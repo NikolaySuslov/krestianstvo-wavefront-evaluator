@@ -1,0 +1,1562 @@
+/*
+The MIT License (MIT)
+Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
+(https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator/blob/master/LICENSE.md)
+*/
+// ═══════════════════════════════════════════════════════════════════════════
+// Krestianstvo Wavefront Evaluator
+//
+// Deterministic reactive execution engine for multiplayer distributed apps.
+// Built on Renkon (reactive programs) + Croquet synchronisation model.
+//
+// Architecture (top → bottom):
+//   Reflector shim  stamps canonical pulses, simulates network delivery
+//   Meta Program    orchestrates worlds: warp · drain · stability · UI sync
+//   World           hosts the reactive node graph (W.reduce per node)
+//   Host helpers    _worldNextAt · _worldSnapshot (no node names)
+//
+// Two-layer time:
+//   Macro-tick  shared logical time, discrete, reflector-stamped, observable
+//   Micro-tick  local settlement (drain · warp · feedback), transient, hidden
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+  const { ProgramState } = import(
+    "https://cdn.jsdelivr.net/npm/renkon-core/dist/renkon-core.js"
+  );
+
+// ── Priority queue (_Q) ───────────────────────────────────────────────────────
+// Sorted min-heap over fireAt. All operations are pure — no mutation.
+// Used by W.reduce to manage each node's local queue of future messages.
+
+const _Q = (() => {
+  const enqueue = (q, e) => [...q, e].sort((a, b) => a.fireAt - b.fireAt);
+  const split   = (q, now) => ({
+    ready: q.filter(e => e.fireAt <= now),
+    later: q.filter(e => e.fireAt >  now),
+  });
+  const nextAt  = (q) => q.length > 0 ? q[0].fireAt : Infinity;
+  return Object.freeze({ enqueue, split, nextAt });
+})();
+
+// ── Node runtime (W) ─────────────────────────────────────────────────────────
+// W.reduce(state, pulse, nodeId, handlers) → newState
+//   Processes one pulse through a node's message handlers.
+//   Manages: inbound outbox delivery (evalGen-gated), queue splitting,
+//   __macro injection, depth tracking for feedback loops.
+//
+// W.stable(nodes, pulse) → bool
+//   Returns true when all queues are drained past wallTime,
+//   all feedback depths are 0, and the shared outbox is empty.
+//
+// W.export(Renkon, nodeMap, isStable)
+//   Writes node states + isStable to world.app for the host layer.
+//
+// W.getState(node) → plain user fields (strips _queue, _nextAt, _depth)
+
+const W = (() => {
+  const reduce = (state, pulse, nodeId, handlers) => {
+    if (!pulse) return state;
+    const { wallTime, logicalTime, isSubTick } = pulse;
+    const appRef = pulse._appRef;
+
+    // Collect inbound send() messages for this node.
+    // Only consume entries written in a PREVIOUS evalGen — entries written
+    // in the CURRENT evalGen were produced by another node earlier in this
+    // same evaluate() pass and must wait for the next evaluate() to be seen.
+    // This prevents the outbox wipe from destroying messages mid-pass.
+    const inbound = (appRef?._outbox?.[nodeId] ?? [])
+      .filter(m => (m._evalGen ?? 0) < (appRef?._currentEvalGen ?? 0))
+      .map(m => ({
+        fireAt: wallTime, msg: m.msg, payload: m.payload,
+        _depth: (m._depth ?? 0),
+      }));
+    // Remove only the consumed entries, leaving same-gen entries in place.
+    if (appRef?._outbox?.[nodeId]) {
+      appRef._outbox[nodeId] = appRef._outbox[nodeId]
+        .filter(m => (m._evalGen ?? 0) >= (appRef?._currentEvalGen ?? 0));
+      if (appRef._outbox[nodeId].length === 0) delete appRef._outbox[nodeId];
+    }
+
+    // Split own queue. Queue entries may carry _depth from a feedback() call.
+    const { ready: ownReady, later } = _Q.split(state._queue ?? [], wallTime);
+    const allReady = [...inbound, ...ownReady];
+
+    // Inject __macro on every non-sub-tick — resets depth to 0.
+    if (!isSubTick) {
+      allReady.unshift({ fireAt: wallTime, msg: "__macro", payload: pulse, _depth: 0 });
+    }
+
+    const { _queue, _nextAt, _depth: _prevDepth, ...userState0 } = state;
+    let userState = userState0;
+    let newQueue  = later;
+    let maxDepthSeen = 0;
+
+    for (const entry of allReady) {
+      const handler = handlers[entry.msg];
+      if (!handler) continue;
+
+      const entryDepth = entry._depth ?? 0;
+      maxDepthSeen = Math.max(maxDepthSeen, entryDepth);
+
+      const effects = [];
+      const ctx = {
+        wallTime, logicalTime,
+        // Current feedback loop depth for this entry.
+        depth: entryDepth,
+        // Schedule a future at a real time offset.
+        // delayMs > 0 starts a new phase — depth resets to 0.
+        // delayMs = 0 stays within the same wave — depth is preserved.
+        future: (delayMs, msg, payload) =>
+          effects.push({ kind: "future", fireAt: wallTime + delayMs, msg, payload,
+            _depth: delayMs > 0 ? 0 : entryDepth }),
+        // Send a message to another node — same wave, depth preserved.
+        // The receiving node will see this depth on the next evaluate() call,
+        // so the round-trip depth accumulates correctly across send() boundaries.
+        send: (targetId, msg, payload) =>
+          effects.push({ kind: "send", targetId, msg, payload, _depth: entryDepth }),
+        // Schedule a feedback loop iteration at the same wallTime.
+        // Only fires if entryDepth < maxDepth — enforces termination.
+        // Each feedback() call increments depth by 1, making the loop
+        // depth a first-class, observable property of the wavefront.
+        feedback: (msg, payload, maxDepth = 32) => {
+          if (entryDepth < maxDepth) {
+            // _fbStepMs is injected into the pulse by META_PROGRAM from meta.ps.app._fbStepMs.
+            // 0 = sync drain (instant); >0 = real-time animation via heartbeat.
+            const fbDelay = pulse._fbStepMs ?? 0;
+            effects.push({ kind: "future", fireAt: wallTime + fbDelay, msg, payload, _depth: entryDepth + 1 });
+          }
+        },
+      };
+
+      userState = handler(userState, entry.payload, ctx);
+
+      for (const eff of effects) {
+        if (eff.kind === "future") {
+          newQueue = _Q.enqueue(newQueue,
+            { fireAt: eff.fireAt, msg: eff.msg, payload: eff.payload, _depth: eff._depth ?? 0 });
+        } else if (eff.kind === "send" && appRef) {
+          appRef._outbox ??= {};
+          appRef._outbox[eff.targetId] ??= [];
+          appRef._outbox[eff.targetId].push(
+            { msg: eff.msg, payload: eff.payload, _depth: eff._depth ?? 0,
+              _evalGen: appRef._currentEvalGen });
+        }
+      }
+    }
+
+    return {
+      ...userState,
+      _queue:  newQueue,
+      _nextAt: _Q.nextAt(newQueue),
+      // _depth: maximum feedback depth seen this evaluate call.
+      // Resets to 0 when no ready entries carried depth > 0.
+      // Used by W.stable() to detect in-progress feedback loops.
+      _depth:  maxDepthSeen,
+    };
+  };
+
+  // stable: world is settled when:
+  // 1. All node queues have no ready entries (fireAt > wallTime)
+  // 2. No node is mid-feedback-loop (_depth === 0)
+  // 3. The shared outbox is empty — ctx.send() messages are pending work
+  //    just as much as queue entries, but they live outside any node's _queue.
+  //    Without this check, a send() at the end of a feedback chain leaves
+  //    the world appearing stable while a message is undelivered in the outbox.
+  const stable = (nodes, pulse) => {
+    const wall   = pulse?.wallTime ?? 0;
+    const appRef = pulse?._appRef;
+    const outboxEmpty = !appRef || Object.keys(appRef._outbox ?? {}).length === 0;
+    return outboxEmpty && nodes.every(n =>
+      !n ||
+      ((n._queue ?? []).every(e => e.fireAt > wall) && (n._depth ?? 0) === 0)
+    );
+  };
+
+  const exportFn = (Renkon, nodeMap, isStable) => {
+    const ws = Renkon.app.meta.app.registry.get(Renkon.app.id).app;
+    ws.isStable    = isStable;
+    ws.logicalTime = Renkon.app._lastPulse?.logicalTime ?? 0;
+    for (const [k, v] of Object.entries(nodeMap)) ws[k] = v;
+    return null;
+  };
+
+  const getState = (n) => {
+    if (!n) return null;
+    const { _queue, _nextAt, _depth, ...user } = n;
+    return user;
+  };
+
+  return Object.freeze({ reduce, stable, export: exportFn, getState });
+})();
+
+// ── Host helpers ──────────────────────────────────────────────────────────────
+// Registered on meta.ps.app and called from META_PROGRAM as Renkon.app.*.
+// Completely generic — no node names, work for any world topology.
+
+// _worldNextAt(world) → number | null
+//   Earliest pending fireAt across all W nodes. Drives wallTime advancement
+//   in drain and warp loops so queue entries fire at the right moment.
+
+const _worldNextAt = (world) => {
+  let t = Infinity;
+  for (const key of Object.keys(world)) {
+    const v = world[key];
+    if (v !== null && typeof v === 'object' && typeof v._nextAt === 'number') {
+      t = Math.min(t, v._nextAt);
+    }
+  }
+  return isFinite(t) ? t : null;
+};
+
+// _worldSnapshot(world, source, iter) → { source, iter, nodes }
+//   Serialisable per-evaluate snapshot of all W node states.
+//   Infrastructure fields (_queue etc.) excluded; _depth exposed as "depth".
+//   Used for telemetry. nodes[nodeName] contains app-specific scalar fields.
+
+const _worldSnapshot = (world, source, iter) => {
+  const nodes = {};
+  for (const key of Object.keys(world)) {
+    const v = world[key];
+    if (v === null || typeof v !== 'object' || !Array.isArray(v._queue)) continue;
+    const fields = {};
+    for (const [k, fv] of Object.entries(v)) {
+      if (k.startsWith('_')) continue;
+      if (fv === null || typeof fv !== 'object') fields[k] = fv;
+    }
+    nodes[key] = { ...fields, queueLen: v._queue.length, nextAt: v._nextAt ?? Infinity, depth: v._depth ?? 0 };
+  }
+  return { source, iter, nodes };
+};
+
+// ── Meta program (META_PROGRAM) ───────────────────────────────────────────────
+// Renkon program that runs above world programs.
+// Receives reflector pulses via a queued receiver (no pulse dropped under jitter).
+// Processes each pulse in order and drives the wavefront per registered world:
+//
+//   HEARTBEAT tick (isSubTick=true, stepMs > 0)
+//     One evaluate() advancing wallTime to Date.now(). Releases any queue
+//     entries whose fireAt has passed. Used for real-time step animation.
+//
+//   WARP (new macro LT arrives, previous cycle unfinished)
+//     Synchronous loop advancing wallTime via _worldNextAt until isStable.
+//     Preserves determinism: uses queue-derived fireAt values, not Date.now().
+//     UI is flushed before logicalTime advances so old LT records correctly.
+//
+//   MACRO pulse (new logicalTime)
+//     Standard world evaluation. Then:
+//     stepMs = 0 → synchronous drain loop (all steps in one JS call stack)
+//     stepMs > 0 → leave for heartbeat (real-time animation)
+
+const META_PROGRAM = `
+  const reflectorPulse = Events.receiver({queued: true});
+
+  const dispatch = (() => {
+    if (!reflectorPulse?.length) return null;
+
+    const reg    = Renkon.app.registry;
+    const stepMs = Renkon.app._stepMs ?? 0; // injected at wire time
+
+    for (const pulse of reflectorPulse) {
+      const isTick = !!pulse.isSubTick; // heartbeat-driven real-time tick
+
+      for (const [id, worldps] of reg) {
+        const world  = worldps.app;
+        const lastLT = world.logicalTime || 0;
+        const isNewPulse = !isTick && pulse.logicalTime > lastLT;
+
+        // ── HEARTBEAT TICK (stepMs > 0 only): advance one real-time step ─────
+        // The heartbeat injects the current Date.now() as wallTime. We let
+        // _Q.split decide naturally which queued steps are now ready.
+        // We do NOT loop — fire at most what real time allows, then continue.
+        if (isTick) {
+          if (!world._lastPulse) continue; // not yet initialised
+          world._currentEvalGen++;
+          worldps.registerEvent("reflector", {
+            ...world._lastPulse,
+            wallTime: pulse.wallTime, // real Date.now() from heartbeat
+            isSubTick: true,
+            _fbStepMs: Renkon.app._fbStepMs ?? 0,
+          });
+          worldps.evaluate();
+          if (typeof Renkon.app._uiRefresh === "function") Renkon.app._uiRefresh();
+          continue;
+        }
+
+        // ── WARP: finish the previous cycle before starting the new macro ────
+        if (isNewPulse && lastLT > 0 && !world.isStable) {
+          console.log(\`[WARP] \${id} LT \${lastLT} → \${pulse.logicalTime}\`);
+          world._telemetry ??= {};
+          world._telemetry[lastLT] ??= [];
+          let safety = 0;
+          while (!world.isStable && safety < 1000) {
+            safety++;
+            world._currentEvalGen++;
+            const _wn = Renkon.app._worldNextAt(world) ?? world._lastPulse.wallTime;
+            worldps.registerEvent("reflector", {
+              ...world._lastPulse,
+              wallTime: _wn,
+              isSubTick: true,
+            });
+            worldps.evaluate();
+            world._telemetry[lastLT].push(
+              Renkon.app._worldSnapshot(world, "warp", safety)
+            );
+          }
+          world._lastWarpIters = safety;
+          // ── CRITICAL: flush UI while logicalTime is STILL the old LT ──────
+          if (typeof Renkon.app._uiRefresh === "function") Renkon.app._uiRefresh();
+        }
+
+        // ── STANDARD: process the new macro pulse ──────────────────────────
+        if (isNewPulse || lastLT === 0) {
+          world._currentEvalGen = (world._currentEvalGen ?? 0) + 1;
+          const p = { ...pulse, _appRef: world, _fbStepMs: Renkon.app._fbStepMs ?? 0 };
+          world._lastPulse = p;
+          world.logicalTime = p.logicalTime; // ← logicalTime advances HERE
+          worldps.registerEvent("reflector", p);
+          worldps.evaluate();
+
+          // Baseline snapshot after macro pulse — iter 0
+          world._telemetry ??= {};
+          world._telemetry[p.logicalTime] = [
+            Renkon.app._worldSnapshot(world, "macro", 0)
+          ];
+          // Prune: keep only the last 5 LT entries to prevent unbounded growth.
+          // Runs once per new LT — not per push — so cost is O(keys) ~= O(5).
+          const _tKeys = Object.keys(world._telemetry).map(Number).sort((a, b) => a - b);
+          if (_tKeys.length > 5) delete world._telemetry[_tKeys[0]];
+
+          // ── SYNC DRAIN (stepMs = 0 only): exhaust all steps immediately ──
+          if (stepMs === 0) {
+            let iters = 0;
+            while (!world.isStable && iters < 200) {
+              iters++;
+              world._currentEvalGen++;
+              const _sn = Renkon.app._worldNextAt(world) ?? p.wallTime;
+              worldps.registerEvent("reflector", {
+                ...p,
+                wallTime: _sn,
+                isSubTick: true,
+              });
+              worldps.evaluate();
+              world._telemetry[p.logicalTime].push(
+                Renkon.app._worldSnapshot(world, "drain", iters)
+              );
+            }
+            world._lastDrainIters = iters;
+          }
+          // stepMs > 0: no drain loop — heartbeat ticker drives steps in real time.
+        }
+      }
+
+      // UI refresh after each pulse in the queue (macro + sync drain if stepMs=0).
+      if (typeof Renkon.app._uiRefresh === "function") Renkon.app._uiRefresh();
+    }
+
+    return null;
+  })();
+`;
+
+// ── Factories ─────────────────────────────────────────────────────────────────
+
+// makeMeta(peerId) → { ps, id, register, injectPulse }
+//   Creates a meta ProgramState running META_PROGRAM.
+//   register(world) — adds a world to this meta's registry.
+//   injectPulse(pulse) — delivers a reflector pulse to META_PROGRAM.
+//
+// makeWorld(worldId, programString) → { ps, app, id, getNodeState, getQueue }
+//   Creates a world ProgramState from a user program string.
+//   getNodeState(name) — returns plain user state for a named W node.
+//   getQueue(name)     — returns raw queue for a named W node.
+
+const makeMeta = (peerId) => {
+  const ps = new ProgramState(0, {
+    id: peerId, registry: new Map(),
+    logicalTime: 0, isStable: false, lastDispatch: null,
+  });
+  ps.setupProgram([META_PROGRAM]);
+  ps.evaluator(0);
+
+  const register    = (world) => {
+    world.app.meta = ps;
+    ps.app.registry.set(world.id, world.ps);
+  };
+  const injectPulse = (pulse) => {
+    ps.registerEvent("reflectorPulse", pulse);
+    ps.evaluate();
+  };
+  return { ps, id: peerId, register, injectPulse };
+};
+
+const makeWorld = (worldId, programString) => {
+  const ps = new ProgramState(0, {
+    id:              worldId,
+    meta:            null,
+    isStable:        true,
+    W,
+    _outbox:         {},
+    _outboxGen:      0,
+    _currentEvalGen: 0,
+    _lastPulse:      null,
+  });
+  ps.setupProgram([programString]);
+  ps.evaluator(0, { once: true });
+
+  // Helper to extract node state for the view
+  const getNodeState = (name) => W.getState(ps.app[name]);
+  const getQueue     = (name) => ps.app[name]?._queue ?? [];
+  
+  return { ps, app: ps.app, id: worldId, getNodeState, getQueue };
+};
+
+// ── Reflector shim ────────────────────────────────────────────────────────────
+// Simulates the Croquet reflector. Stamps wallTime once per pulse — peers
+// receive the identical frozen pulse object regardless of delivery timing.
+//
+// Default: ideal network (no latency, synchronous delivery).
+// Fast version: REFLECTOR_MS=3000, SUB_STEPS=50, STEP_MS=50.
+// Change REFLECTOR_MS to set how often logical time advances.
+// To simulate jitter: makeShim(intervalMs, { min: 10, max: 300 })
+//
+// wallTime is stamped once and frozen. Delivery delay is simulated via
+// setTimeout but the pulse content never changes — determinism guaranteed.
+
+const makeShim = (intervalMs = 1000, latency = { min: 0, max: 0 }) => {
+  let lt = 0;
+  const peers = [];
+  const addPeer = (m) => peers.push(m);
+
+  const fire = () => {
+    lt++;
+    const basePulse = Object.freeze({
+      logicalTime: lt,
+      wallTime:    Date.now(),
+    });
+    for (const m of peers) {
+      const delay = latency.max > 0
+        ? Math.floor(Math.random() * (latency.max - latency.min + 1)) + latency.min
+        : 0;
+      if (delay > 0) setTimeout(() => m.injectPulse(basePulse), delay);
+      else m.injectPulse(basePulse);
+    }
+  };
+
+  const start = () => {
+    fire(); // first pulse immediately — no waiting one full interval
+    setInterval(fire, intervalMs);
+  };
+
+  return { addPeer, start };
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE 1 — Counter / Subcounter
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Demonstrates:
+//   • Macro pulses driving a counter across two deterministic peers
+//   • Real-time sub-step drain at STEP_MS intervals (STEP_MS > 0)
+//     or synchronous instant drain (STEP_MS = 0)
+//   • Warp mechanism: if a new macro arrives before the previous cycle
+//     finishes, warp drains the remainder synchronously before advancing
+//   • Visual integrity trace showing both peers filling the sub-step bar
+//
+// Constants:
+//   PULSE_MS   — interval between macro pulses (ms)
+//   SUB_STEPS  — number of sub-steps per cycle
+//   STEP_MS    — delay between sub-steps (0 = instant sync drain)
+
+const REFLECTOR_MS = 3000;  // reflector shim interval — how often logical time advances
+                            // must be > SUB_STEPS × STEP_MS to avoid warp
+                            // set to e.g. 50 with STEP_MS=0 for fast logical time
+const PULSE_MS  = REFLECTOR_MS; // alias kept for constraint documentation
+const SUB_STEPS = 50;    // 50 sub-steps per cycle
+const STEP_MS   = 50;    // 50 × 50ms = 2500ms < REFLECTOR_MS (3000ms) ✓
+
+const WORLD_PROGRAM = `
+  const W         = Renkon.app.W;
+  const reflector = Events.receiver();
+
+  // 1. Define 'counter' first so it is available for _export
+  const counter = Behaviors.collect(
+    { count: 0 }, 
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "counter", {
+      __macro: (s, p, ctx) => {
+        // Pass SUBSTEPS_VAL in the payload so subcounter knows the target
+        ctx.send("subcounter", "startSubCount", { 
+          cycleId: p.logicalTime,
+          pTime: p.wallTime,
+          steps: SUBSTEPS_VAL 
+        });
+        return { ...s, count: s.count + 1 };
+      },
+    })
+  );
+
+  // 2. Define 'subcounter'
+
+const subcounter = Behaviors.collect(
+  { subCount: 0, stepsDone: 0, currentCycle: 0, stepsTarget: SUBSTEPS_VAL },
+  reflector,
+  (state, pulse) => W.reduce(state, pulse, "subcounter", {
+    startSubCount: (s, p, ctx) => {
+      // Only start if this is a NEW macro cycle.
+      if (p.cycleId <= s.currentCycle) return s;
+      ctx.future(0, "step", p.cycleId);
+      return { ...s, subCount: 0, stepsDone: 0, stepsTarget: p.steps || SUBSTEPS_VAL, currentCycle: p.cycleId };
+    },
+    step: (s, cycleId, ctx) => {
+      // Reject stale steps from a previous cycle still in the queue.
+      if (cycleId !== s.currentCycle || s.stepsDone >= s.stepsTarget) return s;
+      const next = s.stepsDone + 1;
+      if (next < s.stepsTarget) ctx.future(STEPMS_VAL, "step", cycleId);
+      return { ...s, subCount: s.subCount + 1, stepsDone: next };
+    }
+  })
+);
+
+// Update stability to be content-aware, not just queue-aware
+
+// A world is only truly stable if:
+// 1. All internal node queues are empty (standard check)
+// 2. The subcounter has actually reached its intended target
+const _isStable = W.stable([counter, subcounter], reflector) &&
+                 (subcounter.stepsDone >= subcounter.stepsTarget);
+
+const _export = W.export(Renkon, { counter, subcounter }, _isStable);
+`
+// Perform the string injections[cite: 2]
+.replace(/STEPMS_VAL/g, String(STEP_MS))
+.replace(/SUBSTEPS_VAL/g, String(SUB_STEPS));
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE 2 — Fixed-Point Bisection (Feedback Loop)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Demonstrates:
+//   • ctx.feedback() — feedback loop depth as a first-class wavefront property
+//   • Two-node feedback: estimator ↔ corrector, bisecting toward nearest integer
+//   • Depth accumulates across send() boundaries (same wave, depth preserved)
+//   • Real-time animation via FB_STEP_MS heartbeat (FB_STEP_MS > 0)
+//   • Varying convergence depth per cycle via non-trivial starting formula
+//
+// Starting formula: initial = 50 + 49 * sin(lt * 2.3)
+//   Produces values in [1, 99] with varying fractional parts.
+//   Cycles near an integer converge in 3–5 iterations (bar partially filled).
+//   Cycles far from an integer take 15–25+ iterations (bar fully filled).
+//   This makes the depth bar and canvas curve look different each cycle,
+//   demonstrating that convergence depth is a genuine property of the input,
+//   not a fixed constant of the algorithm.
+//
+// Bisection recurrence (per iteration):
+//   correction = (value + target) / 2
+//   refined    = (value + correction) / 2
+//             = (3·value + target) / 4
+//   Converges with ratio 3/4 per step. Number of steps to reach EPSILON:
+//   N ≈ log(|initial - target| / EPSILON) / log(4/3)
+//
+// Constants:
+//   EPSILON      — convergence threshold (loop stops when |delta| < EPSILON)
+//   MAX_FB_DEPTH — maximum feedback depth (circuit breaker)
+//   FB_STEP_MS   — delay between iterations (0 = sync, >0 = animated)
+//   FB_PULSE_MS  — macro pulse interval for feedback worlds
+//                  must be > MAX_FB_DEPTH × FB_STEP_MS to avoid warp
+
+// Two nodes: estimator and corrector.
+// Each macro pulse: estimator proposes an initial value (a noisy integer).
+// corrector observes it and sends back a refined value via feedback.
+// estimator applies the correction and re-evaluates if delta > EPSILON.
+// The loop terminates when |value - correction| < EPSILON — fixed point.
+//
+// This demonstrates ctx.feedback() as a first-class wavefront property:
+// each iteration increments depth, telemetry captures the full convergence
+// trajectory, and stability requires depth === 0 (loop fully settled).
+
+const EPSILON      = 0.01;
+const MAX_FB_DEPTH = 64;
+const FB_REFLECTOR_MS = 3000;   // feedback world reflector interval
+                               // must be > est. convergence steps × FB_STEP_MS
+const FB_STEP_MS   = 50;       // fast: one iteration per 50ms
+const FB_PULSE_MS  = FB_REFLECTOR_MS; // alias
+
+const FEEDBACK_WORLD_PROGRAM = `
+  const W       = Renkon.app.W;
+  const reflector = Events.receiver();
+
+  // estimator: proposes a value each macro pulse, refines it on feedback.
+  const estimator = Behaviors.collect(
+    { value: 0, iterations: 0, cycleId: 0 },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "estimator", {
+      __macro: (s, p, ctx) => {
+        // Start with a noisy value derived deterministically from logicalTime.
+        // Varying fractional part → different convergence depth each cycle.
+        // sin gives values across [1,99] with non-repeating fractional parts
+        // so the bar fills to a different depth each LT.
+        const initial = 50 + 49 * Math.sin(p.logicalTime * 2.3);
+        ctx.send("corrector", "observe", { value: initial, cycleId: p.logicalTime });
+        return { ...s, value: initial, iterations: 0, cycleId: p.logicalTime };
+      },
+      refine: (s, p, ctx) => {
+        // Received a correction from corrector.
+        // If delta is above epsilon, feed back another iteration.
+        if (p.cycleId !== s.cycleId) return s;
+        const delta = Math.abs(p.correction - s.value);
+        const refined = (s.value + p.correction) / 2;
+        if (delta > EPSILONVAL) {
+          ctx.send("corrector", "observe", { value: refined, cycleId: s.cycleId });
+        }
+        return { ...s, value: refined, iterations: s.iterations + 1 };
+      },
+    })
+  );
+
+  // corrector: receives a value, computes the correction, sends it back.
+  const corrector = Behaviors.collect(
+    { correction: 0, cycleId: 0 },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "corrector", {
+      observe: (s, p, ctx) => {
+        if (p.cycleId < s.cycleId) return s; // reject truly stale cycles
+        // Target is deterministic: nearest integer (fixed point of this loop).
+        const target = Math.round(p.value);
+        const correction = (p.value + target) / 2;
+        ctx.feedback("respond", { correction, cycleId: p.cycleId }, MAX_FB_DEPTHVAL);
+        return { ...s, correction, cycleId: p.cycleId };
+      },
+      respond: (s, p, ctx) => {
+        // Deliver correction back to estimator via send.
+        if (p.cycleId !== s.cycleId) return s;
+        ctx.send("estimator", "refine", { correction: p.correction, cycleId: p.cycleId });
+        return s;
+      },
+    })
+  );
+
+  const _isStable = W.stable([estimator, corrector], reflector);
+  const _export   = W.export(Renkon, { estimator, corrector }, _isStable);
+`
+  .replace(/EPSILONVAL/g,     String(EPSILON))
+  .replace(/MAX_FB_DEPTHVAL/g, String(MAX_FB_DEPTH));
+
+// ══════════════════════════════════════════════════════════════════════════════
+// WIRE — Connect examples to infrastructure
+// ══════════════════════════════════════════════════════════════════════════════
+
+const meta1 = makeMeta("peer_A");
+const meta2 = makeMeta("peer_B");
+
+// Inject STEP_MS so META_PROGRAM can branch on sync vs real-time mode.
+meta1.ps.app._stepMs = STEP_MS;
+meta2.ps.app._stepMs = STEP_MS;
+meta1.ps.app._worldNextAt    = _worldNextAt;
+meta2.ps.app._worldNextAt    = _worldNextAt;
+meta1.ps.app._worldSnapshot  = _worldSnapshot;
+meta2.ps.app._worldSnapshot  = _worldSnapshot;
+
+const worldA = makeWorld("worldA", WORLD_PROGRAM);
+const worldB = makeWorld("worldB", WORLD_PROGRAM);
+
+meta1.register(worldA);
+meta2.register(worldB);
+
+// Feedback loop worlds — always sync drain (STEP_MS=0 equivalent):
+// feedback() schedules at the same wallTime so the drain loop exhausts
+// the entire convergence chain in one synchronous burst per macro pulse.
+const meta3 = makeMeta("peer_A_fb");
+const meta4 = makeMeta("peer_B_fb");
+meta3.ps.app._stepMs   = FB_STEP_MS;
+meta4.ps.app._stepMs   = FB_STEP_MS;
+meta3.ps.app._fbStepMs = FB_STEP_MS;
+meta4.ps.app._fbStepMs = FB_STEP_MS;
+meta3.ps.app._worldNextAt    = _worldNextAt;
+meta4.ps.app._worldNextAt    = _worldNextAt;
+meta3.ps.app._worldSnapshot  = _worldSnapshot;
+meta4.ps.app._worldSnapshot  = _worldSnapshot;
+
+const worldC = makeWorld("worldC", FEEDBACK_WORLD_PROGRAM);
+const worldD = makeWorld("worldD", FEEDBACK_WORLD_PROGRAM);
+
+meta3.register(worldC);
+meta4.register(worldD);
+
+const shim = makeShim(REFLECTOR_MS);
+shim.addPeer({ injectPulse: (p) => meta1.injectPulse(p) });
+shim.addPeer({ injectPulse: (p) => meta2.injectPulse(p) });
+shim.start();
+
+// Feedback worlds get a separate slower shim so the full convergence
+// (up to MAX_FB_DEPTH × FB_STEP_MS) completes before the next macro pulse.
+// Sharing the main shim (5000ms) leaves too little margin — warp fires
+// before the heartbeat finishes animating the canvas step by step.
+const fbShim = makeShim(FB_REFLECTOR_MS);
+fbShim.addPeer({ injectPulse: (p) => meta3.injectPulse(p) });
+fbShim.addPeer({ injectPulse: (p) => meta4.injectPulse(p) });
+fbShim.start();
+
+// ── Heartbeat: real-time step ticker for STEP_MS > 0 ─────────────────────────
+// Runs on every RAF frame. Injects a sub-tick pulse with the REAL current
+// Date.now() so _Q.split in W.reduce fires queued steps as real time passes.
+// For STEP_MS = 0 this is a no-op (META_PROGRAM drains synchronously and the
+// world is already stable after the macro pulse, so the heartbeat injectPulse
+// hits the isTick branch, evaluates, finds nothing pending, and exits cheaply).
+if (STEP_MS > 0) {
+  const _heartbeat = (metas) => {
+    const tick = () => {
+      const now = Date.now();
+      for (const meta of metas) {
+        meta.injectPulse({ logicalTime: 0, wallTime: now, isSubTick: true });
+      }
+      requestAnimationFrame(tick);
+    };
+    tick();
+  };
+  _heartbeat([meta1, meta2]);
+}
+
+// Feedback worlds always need a heartbeat (FB_STEP_MS > 0).
+const _fbHeartbeat = () => {
+  const tick = () => {
+    const now = Date.now();
+    meta3.injectPulse({ logicalTime: 0, wallTime: now, isSubTick: true });
+    meta4.injectPulse({ logicalTime: 0, wallTime: now, isSubTick: true });
+    requestAnimationFrame(tick);
+  };
+  tick();
+};
+_fbHeartbeat();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VIEWS — DOM rendering
+// ══════════════════════════════════════════════════════════════════════════════
+
+// _renderView is extracted as an imperative function so META_PROGRAM can call
+// it synchronously via meta1/meta2.ps.app._uiRefresh after a warp/drain cycle,
+// without waiting for the next Events.timer(16) tick.
+
+const _vt = Events.timer(16);
+const waveStack = new Map();
+
+const _renderView = () => {
+  // Use 'worldps' to access the internal app state reliably
+  if (!worldA?.ps?.app || !worldB?.ps?.app) return null;
+
+  const getW = (w) => {
+    const s = w.getNodeState("subcounter");
+    const c = w.getNodeState("counter");
+    const lt = s?.currentCycle || w.ps.app.logicalTime || 0;
+    return {
+      lt,
+      sub:        s?.subCount   ?? 0,
+      stepsDone:  s?.stepsDone  ?? 0,
+      count:      c?.count      ?? 0,
+      target:     s?.stepsTarget ?? 50,
+      drainIters: w.ps.app._lastDrainIters ?? 0,
+      warpIters:  w.ps.app._lastWarpIters  ?? 0,
+      telemetry:  w.ps.app._telemetry?.[lt] ?? [],
+    };
+  };
+  
+  const a = getW(worldA), b = getW(worldB);
+  // Use the max LT seen across both peers as currentLT.
+  // Using only peer A's LT caused premature 'fail' when peer A advanced 2+
+  // LTs ahead of peer B due to jitter — the gap threshold fired incorrectly.
+  const currentLT = Math.max(a.lt, b.lt);
+
+  const updateStack = (data, peerId) => {
+    if (data.lt === 0) return;
+    if (!waveStack.has(data.lt)) {
+      waveStack.set(data.lt, {
+        a: 0, b: 0, aValues: {}, bValues: {},
+        aStepsDone: 0, bStepsDone: 0,
+        aDrainIters: 0, bDrainIters: 0,
+        aWarpIters: 0,  bWarpIters: 0,
+        target: data.target, status: 'process'
+      });
+    }
+
+    const wave = waveStack.get(data.lt);
+    const id = peerId.toLowerCase();
+
+    // Update data
+    wave[id] = Math.max(wave[id], data.sub);
+    wave[id + 'Values'][data.sub] = data.count;
+    wave[id + 'StepsDone']  = Math.max(wave[id + 'StepsDone'],  data.stepsDone);
+    wave[id + 'DrainIters'] = Math.max(wave[id + 'DrainIters'], data.drainIters);
+    wave[id + 'WarpIters']  = Math.max(wave[id + 'WarpIters'],  data.warpIters);
+
+    // --- INTEGRITY & STATUS ---
+    const isNewest = data.lt === currentLT;
+    const bothFinished = (wave.a >= wave.target && wave.b >= wave.target);
+
+    // Once a wave reaches 'success' it is frozen — never overwritten.
+    if (wave.status === 'success') return;
+
+    if (bothFinished) {
+      wave.status = 'success';
+      if (!isNewest) wave.warped = true;
+    } else if (!isNewest && currentLT > data.lt + 2) {
+      wave.status = 'fail';
+    } else {
+      wave.status = 'process';
+    }
+  };
+
+  updateStack(a, 'A');
+  updateStack(b, 'B');
+
+  const activeLTs = [...waveStack.keys()].sort((x, y) => y - x).slice(0, 3);
+
+  let root = document.getElementById("v10-app");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "v10-app";
+    Object.assign(root.style, {
+      fontFamily: "ui-monospace,monospace", padding: "20px",
+      background: "#0d0d0d", color: "#eee", borderRadius: "10px", 
+      margin: "10px", maxWidth: "620px", border: "1px solid #222"
+    });
+    document.body.appendChild(root);
+  }
+
+  const renderTrack = (lt, isActive) => {
+    const wave = waveStack.get(lt);
+    const colors = { success: '#238636', process: '#d29922', fail: '#f85149' };
+    const statusColor = colors[wave.status] || colors.process;
+
+    // ── ACTIVE (current LT): full dot-track view ──────────────────────────
+    if (isActive) {
+      const lead = Math.max(wave.a, wave.b);
+      const windowStart = Math.max(0, lead - 9);
+      const cellIndices = Array.from({length: 12}, (_, i) => windowStart + i).filter(i => i <= wave.target);
+
+      const renderRow = (label, currentSub, isIdRow = false) => `
+        <div style="display: flex; gap: 3px; margin-bottom: 3px; align-items: center;">
+          <div style="width: 55px; font-size: 10px; color: #555; font-weight: bold;">${label}</div>
+          ${cellIndices.map(i => {
+            const isFilled = i <= currentSub;
+            let bgColor = "#161616";
+            let textColor = "#333";
+            if (isIdRow)       { bgColor = "#222"; textColor = "#666"; }
+            else if (isFilled) { bgColor = "#ccc"; textColor = "#000"; }
+            return `
+              <div style="flex: 1; height: 24px; background: ${bgColor};
+                          border: 1px solid #282828; display: flex; align-items: center;
+                          justify-content: center; font-size: 9px; color: ${textColor};">
+                ${(isIdRow || isFilled) ? i : ''}
+              </div>`;
+          }).join('')}
+        </div>`;
+
+      return `
+        <div style="margin-bottom: 16px; padding: 12px; border-left: 4px solid ${statusColor}; background: #111; border-radius: 4px;">
+          <div style="font-size: 10px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+            <span style="color: #888">WAVEFRONT LT ${lt}</span>
+            <span style="background: ${statusColor}33; color: ${statusColor}; padding: 2px 8px; border-radius: 10px; font-weight: bold; border: 1px solid ${statusColor}66">
+              ${wave.status.toUpperCase()}
+            </span>
+          </div>
+          ${renderRow('ID', wave.target, true)}
+          ${renderRow('PEER A', wave.a)}
+          ${renderRow('PEER B', wave.b)}
+          <div style="margin-top: 8px; display: flex; gap: 12px; font-size: 9px; color: #444;">
+            <span>A stepsDone: <span style="color:#666">${wave.aStepsDone}</span></span>
+            <span>B stepsDone: <span style="color:#666">${wave.bStepsDone}</span></span>
+            <span>drain: <span style="color:#666">${Math.max(wave.aDrainIters, wave.bDrainIters)} iters</span></span>
+            ${(wave.aWarpIters > 0 || wave.bWarpIters > 0)
+              ? `<span style="color:#d29922">warp: ${Math.max(wave.aWarpIters, wave.bWarpIters)} iters</span>`
+              : ''}
+          </div>
+        </div>`;
+    }
+
+    // ── COMPLETED (past LT): compact status-only badge ────────────────────
+    // Dot rows are dropped — fill level is always 50/50 for completed cycles
+    // and carries no information. Only success vs fail vs warped matters.
+    const wasWarped  = wave.aWarpIters > 0 || wave.bWarpIters > 0;
+    const warpLabel  = wasWarped ? ` · WARP ${Math.max(wave.aWarpIters, wave.bWarpIters)}i` : '';
+    const drainLabel = `drain:${Math.max(wave.aDrainIters, wave.bDrainIters)}i`;
+    const peerLine   = wave.status === 'fail'
+      ? `<span style="color:#666; font-size:9px;">A:${wave.a} B:${wave.b} / ${wave.target}</span>`
+      : `<span style="color:#444; font-size:9px;">${drainLabel}</span>`;
+    return `
+      <div style="margin-bottom: 8px; padding: 8px 12px; border-left: 4px solid ${statusColor}44;
+                  background: #0e0e0e; border-radius: 4px; display: flex;
+                  justify-content: space-between; align-items: center;">
+        <span style="color: #555; font-size: 10px;">LT ${lt}${warpLabel}</span>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          ${peerLine}
+          <span style="background: ${statusColor}22; color: ${statusColor}; padding: 1px 7px;
+                       border-radius: 8px; font-size: 9px; font-weight: bold;
+                       border: 1px solid ${statusColor}44">
+            ${wave.status.toUpperCase()}
+          </span>
+        </div>
+      </div>`;
+  };
+
+  root.innerHTML = `
+    <div style="font-size: 13px; font-weight: bold; color: #666; margin-bottom: 20px; letter-spacing: 1px; text-align: center;">
+      WAVEFRONT INTEGRITY PHYSICAL TRACE
+    </div>
+    ${activeLTs.map((lt, i) => renderTrack(lt, i === 0)).join('')}
+  `;
+};
+
+
+// Register _uiRefresh so META_PROGRAM can call it synchronously after any
+// warp or drain cycle, bypassing the 16 ms Events.timer gate entirely.
+meta1.ps.app._uiRefresh = _renderView;
+meta2.ps.app._uiRefresh = _renderView;
+
+// ── 8. Feedback loop view ─────────────────────────────────────────────────────
+// Shows convergence depth per cycle for the estimator/corrector feedback world.
+// Each row is one macro pulse: the depth bar shows how many feedback iterations
+// were needed to reach the fixed point, and the final converged value.
+
+const fbStack = new Map(); // lt → { aDepth, bDepth, aValue, bValue, status }
+
+const _renderFeedback = () => {
+  if (!worldC?.ps?.app || !worldD?.ps?.app) return;
+
+  const getFB = (w) => {
+    const e  = w.getNodeState("estimator");
+    const lt = e?.cycleId || w.ps.app.logicalTime || 0;
+
+    // Depth: read directly from the live node state on world.app.
+    // W.export writes the full node object (including _depth) to world.app[name].
+    // Telemetry only captures drain snapshots in sync mode — in real-time mode
+    // (FB_STEP_MS > 0) the heartbeat drives steps without populating telemetry,
+    // so we read _depth directly instead.
+    const estDepth = w.ps.app.estimator?._depth ?? 0;
+    const corDepth = w.ps.app.corrector?._depth ?? 0;
+    const liveDepth = Math.max(estDepth, corDepth);
+
+    return {
+      lt,
+      value:      e?.value      ?? 0,
+      iterations: e?.iterations ?? 0,
+      depth:      liveDepth,
+      stable:     w.ps.app.isStable ?? false,
+    };
+  };
+
+  const fa = getFB(worldC), fb = getFB(worldD);
+  const currentLT = fa.lt;
+
+  // Update each peer's data only into the fbStack entry for its own LT.
+  // This prevents a peer still at LT N from contaminating LT N+1's entry
+  // with stale values when the other peer has already advanced.
+  const updateFB = (f, peerKey) => {
+    if (f.lt === 0) return;
+    if (!fbStack.has(f.lt)) fbStack.set(f.lt, {
+      aDepth: 0, bDepth: 0, aValue: null, bValue: null,
+      aIter: 0, bIter: 0, aStable: false, bStable: false, status: 'process',
+    });
+    const e = fbStack.get(f.lt);
+    e[peerKey + 'Depth']  = Math.max(e[peerKey + 'Depth'],  f.depth);
+    e[peerKey + 'Value']  = f.value;
+    e[peerKey + 'Iter']   = Math.max(e[peerKey + 'Iter'],   f.iterations);
+    e[peerKey + 'Stable'] = e[peerKey + 'Stable'] || f.stable;
+  };
+  updateFB(fa, 'a');
+  updateFB(fb, 'b');
+
+  // Status: only evaluate LTs where both peers have reported.
+  for (const [lt, e] of fbStack) {
+    if (e.aValue === null || e.bValue === null) continue; // one peer not yet reported
+    const synced = Math.abs(e.aValue - e.bValue) < EPSILON;
+    const bothStable = e.aStable && e.bStable;
+    if (synced && bothStable)              e.status = 'success';
+    else if (!synced && currentLT > lt + 1) e.status = 'fail';
+    else                                   e.status = 'process';
+  }
+
+  const activeLTs = [...fbStack.keys()].sort((a, b) => b - a).slice(0, 4);
+
+  let root = document.getElementById("fb-app");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "fb-app";
+    Object.assign(root.style, {
+      fontFamily: "ui-monospace,monospace", padding: "20px",
+      background: "#0d0d0d", color: "#eee", borderRadius: "10px",
+      margin: "10px", maxWidth: "620px", border: "1px solid #222"
+    });
+    document.body.appendChild(root);
+  }
+
+  const MAX_DEPTH_DISPLAY = 16;
+
+  const renderFBTrack = (lt, isActive) => {
+    const e     = fbStack.get(lt);
+    const colors = { success: '#238636', process: '#d29922', fail: '#f85149' };
+    const col   = colors[e.status] || colors.process;
+    const depth = Math.max(e.aDepth, e.bDepth);
+
+    if (isActive) {
+      // Depth bar: each cell is one feedback iteration
+      const cells = Array.from({ length: MAX_DEPTH_DISPLAY }, (_, i) => {
+        const filled = i < depth;
+        return `<div style="flex:1; height:20px; background:${filled ? '#7c3aed' : '#161616'};
+                            border:1px solid #282828; border-radius:2px;"></div>`;
+      }).join('');
+
+      return `
+        <div style="margin-bottom:16px; padding:12px; border-left:4px solid ${col}; background:#111; border-radius:4px;">
+          <div style="font-size:10px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+            <span style="color:#888">FEEDBACK LT ${lt}</span>
+            <span style="background:${col}33; color:${col}; padding:2px 8px; border-radius:10px; font-weight:bold; border:1px solid ${col}66">
+              ${e.status.toUpperCase()}
+            </span>
+          </div>
+          <div style="font-size:9px; color:#555; margin-bottom:4px;">DEPTH (max ${MAX_DEPTH_DISPLAY} shown)</div>
+          <div style="display:flex; gap:2px; margin-bottom:8px;">${cells}</div>
+          <div style="display:flex; gap:16px; font-size:9px; color:#555;">
+            <span>A value: <span style="color:#a78bfa">${e.aValue != null ? e.aValue.toFixed(4) : '—'}</span></span>
+            <span>B value: <span style="color:#a78bfa">${e.bValue != null ? e.bValue.toFixed(4) : '—'}</span></span>
+            <span>A iters: <span style="color:#666">${e.aIter}</span></span>
+            <span>B iters: <span style="color:#666">${e.bIter}</span></span>
+            <span>depth: <span style="color:#7c3aed">${depth}</span></span>
+          </div>
+        </div>`;
+    }
+
+    // Compact completed row
+    const synced = e.aValue != null && e.bValue != null && Math.abs(e.aValue - e.bValue) < EPSILON;
+    return `
+      <div style="margin-bottom:8px; padding:8px 12px; border-left:4px solid ${col}44;
+                  background:#0e0e0e; border-radius:4px; display:flex;
+                  justify-content:space-between; align-items:center;">
+        <span style="color:#555; font-size:10px;">LT ${lt}</span>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="color:#444; font-size:9px;">depth:${depth} · iters:${Math.max(e.aIter, e.bIter)}</span>
+          <span style="color:${synced ? '#444' : '#f85149'}; font-size:9px;">${synced ? 'converged' : 'DIVERGED'}</span>
+          <span style="background:${col}22; color:${col}; padding:1px 7px; border-radius:8px; font-size:9px; font-weight:bold; border:1px solid ${col}44">
+            ${e.status.toUpperCase()}
+          </span>
+        </div>
+      </div>`;
+  };
+
+  root.innerHTML = `
+    <div style="font-size:13px; font-weight:bold; color:#666; margin-bottom:20px; letter-spacing:1px; text-align:center;">
+      FEEDBACK LOOP CONVERGENCE TRACE
+    </div>
+    ${activeLTs.map((lt, i) => renderFBTrack(lt, i === 0)).join('')}
+  `;
+};
+
+const _fbView = Behaviors.collect(null, _vt, () => { _renderFeedback(); return null; });
+
+// ── 9. Bisection coordinate space canvas ─────────────────────────────────────
+// A third panel drawn on a <canvas> element. Reads live from worldC (peer A)
+// on every _uiRefresh call. Shows the full convergence trajectory in (n, value)
+// space: each feedback iteration is one point on the curve, plotted as it
+// arrives during the drain loop. The target integer is a dashed horizontal
+// line; the current value is a moving dot on the curve.
+//
+// History: the last BISECT_HISTORY completed cycles are kept as faded traces
+// so you can see how different LTs produce different starting points but the
+// same convergence shape.
+
+const _renderBisect = (() => {
+  const BISECT_HISTORY = 5;
+  const bisectTraces   = [];
+  let   bisectCurrent  = null;
+
+  return () => {
+  if (!worldC?.ps?.app) return;
+
+  // ── Canvas setup ──────────────────────────────────────────────────────────
+  let canvas = document.getElementById("bisect-canvas");
+  if (!canvas) {
+    const wrap = document.createElement("div");
+    wrap.id = "bisect-wrap";
+    Object.assign(wrap.style, {
+      fontFamily: "ui-monospace,monospace", padding: "20px",
+      background: "#0d0d0d", color: "#eee", borderRadius: "10px",
+      margin: "10px", maxWidth: "620px", border: "1px solid #222"
+    });
+    wrap.innerHTML = `
+      <div style="font-size:13px; font-weight:bold; color:#666; margin-bottom:14px; letter-spacing:1px; text-align:center;">
+        BISECTION COORDINATE SPACE — FEEDBACK LOOP
+      </div>
+      <canvas id="bisect-canvas" width="580" height="300"
+        style="width:100%; border-radius:4px; background:#0a0a0a; display:block;"></canvas>
+      <div style="display:flex; gap:16px; margin-top:10px; font-size:9px; color:#444;">
+        <span><span style="display:inline-block;width:24px;height:2px;background:#7c3aed;vertical-align:middle;margin-right:4px;"></span>peer A value</span>
+        <span><span style="display:inline-block;width:24px;height:2px;background:#1d9e75;vertical-align:middle;margin-right:4px;border-top:1px dashed #1d9e75;"></span>peer B value</span>
+        <span><span style="display:inline-block;width:24px;height:1px;background:#555;vertical-align:middle;margin-right:4px;border-top:1px dashed #555;"></span>target</span>
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#7c3aed;vertical-align:middle;margin-right:4px;"></span>current</span>
+      </div>`;
+    // Create the global header once — before all other panels.
+    if (!document.getElementById("kwe-header")) {
+      const hdr = document.createElement("div");
+      hdr.id = "kwe-header";
+      Object.assign(hdr.style, {
+        fontFamily: "ui-monospace,monospace",
+        padding: "18px 20px 12px",
+        background: "#0a0a0a",
+        borderBottom: "1px solid #1a1a1a",
+        marginBottom: "4px",
+        letterSpacing: "2px",
+      });
+      hdr.innerHTML = `
+        <div style="font-size:15px; font-weight:bold; color:#555; text-align:center;">
+          KRESTIANSTVO WAVEFRONT EVALUATOR
+        </div>
+        <div style="font-size:9px; color:#333; text-align:center; margin-top:4px; letter-spacing:1px;">
+          DETERMINISTIC REACTIVE ENGINE · CROQUET/RENKON · TWO-LAYER TIME
+        </div>`;
+      document.body.prepend(hdr);
+    }
+    document.body.appendChild(wrap);
+    canvas = document.getElementById("bisect-canvas");
+  }
+
+  const eA = worldC.getNodeState("estimator");
+  const eB = worldD.getNodeState("estimator");
+  if (!eA) return;
+
+  const lt      = eA.cycleId || worldC.ps.app.logicalTime || 0;
+  const initial = 50 + 49 * Math.sin(lt * 2.3);
+  const target  = Math.round(initial);
+
+  // Only record a peer's value if it has started this cycle and value is finite.
+  // eB.value from a previous cycle or before __macro runs can be stale/NaN.
+  const aCycleOk = eA.cycleId === lt && isFinite(eA.value);
+  const bCycleOk = eB?.cycleId === lt && isFinite(eB?.value);
+  const value    = aCycleOk ? eA.value        : initial;
+  const valueB   = bCycleOk ? (eB.value ?? initial) : initial;
+  const iters    = aCycleOk ? (eA.iterations ?? 0)  : 0;
+  const itersB   = bCycleOk ? (eB?.iterations ?? 0) : 0;
+
+  // ── Track live trace ──────────────────────────────────────────────────────
+  if (!bisectCurrent || bisectCurrent.lt !== lt) {
+    if (bisectCurrent?.ptsA?.length > 1) {
+      bisectTraces.push(bisectCurrent);
+      if (bisectTraces.length > BISECT_HISTORY) bisectTraces.shift();
+    }
+    bisectCurrent = { lt, initial, target,
+      ptsA: [{ n: 0, v: initial }],
+      ptsB: [{ n: 0, v: initial }],
+    };
+  }
+
+  if (!bisectCurrent.ptsA || !bisectCurrent.ptsB) { bisectCurrent = null; return; }
+
+  // Append peer A point only when its value is valid for this cycle
+  if (aCycleOk) {
+    const lastA = bisectCurrent.ptsA[bisectCurrent.ptsA.length - 1];
+    if (iters > lastA.n)        bisectCurrent.ptsA.push({ n: iters, v: value  });
+    else if (iters === lastA.n) lastA.v = value;
+  }
+
+  // Append peer B point only when its value is valid for this cycle
+  if (bCycleOk) {
+    const lastB = bisectCurrent.ptsB[bisectCurrent.ptsB.length - 1];
+    if (itersB > lastB.n)        bisectCurrent.ptsB.push({ n: itersB, v: valueB });
+    else if (itersB === lastB.n) lastB.v = valueB;
+  }
+
+  // ── Draw ──────────────────────────────────────────────────────────────────
+  const W = canvas.width, H = canvas.height;
+  const PAD = { top: 24, right: 20, bottom: 36, left: 52 };
+  const cw  = W - PAD.left - PAD.right;
+  const ch  = H - PAD.top  - PAD.bottom;
+
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+
+  // Determine Y range from both peer traces
+  const allVals = [
+    ...bisectCurrent.ptsA.map(p => p.v),
+    ...bisectCurrent.ptsB.map(p => p.v),
+    initial, target,
+  ];
+  const yRaw = Math.abs(target - initial);
+  const yPad = Math.max(yRaw * 0.35, 0.05);
+  const yMin = Math.min(...allVals) - yPad;
+  const yMax = Math.max(...allVals) + yPad;
+
+  // Max X = furthest iteration reached by either peer, minimum 5
+  const maxN = Math.max(
+    bisectCurrent.ptsA[bisectCurrent.ptsA.length - 1].n,
+    bisectCurrent.ptsB[bisectCurrent.ptsB.length - 1].n,
+    5,
+  );
+
+  const toX = n  => PAD.left + (n  / maxN) * cw;
+  const toY = v  => PAD.top  + (1 - (v - yMin) / (yMax - yMin)) * ch;
+
+  // Grid
+  ctx.strokeStyle = "#1a1a1a";
+  ctx.lineWidth   = 1;
+  const ySteps = 5;
+  for (let i = 0; i <= ySteps; i++) {
+    const v = yMin + (yMax - yMin) * (i / ySteps);
+    const y = toY(v);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+    ctx.fillStyle = "#444"; ctx.font = "9px ui-monospace,monospace"; ctx.textAlign = "right";
+    ctx.fillText(v.toFixed(2), PAD.left - 4, y + 3);
+  }
+  const xSteps = Math.min(maxN, 8);
+  for (let i = 0; i <= xSteps; i++) {
+    const n = Math.round((i / xSteps) * maxN);
+    const x = toX(n);
+    ctx.beginPath(); ctx.moveTo(x, PAD.top); ctx.lineTo(x, H - PAD.bottom); ctx.stroke();
+    ctx.fillStyle = "#444"; ctx.font = "9px ui-monospace,monospace"; ctx.textAlign = "center";
+    ctx.fillText(n, x, H - PAD.bottom + 14);
+  }
+
+  // Axis labels
+  ctx.fillStyle = "#555"; ctx.font = "9px ui-monospace,monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("iteration (depth)", W / 2, H - 2);
+  ctx.save(); ctx.translate(10, H / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText("value", 0, 0); ctx.restore();
+
+  // Target dashed line
+  const ty = toY(target);
+  ctx.strokeStyle = "#444"; ctx.lineWidth = 1;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(PAD.left, ty); ctx.lineTo(W - PAD.right, ty); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#555"; ctx.font = "9px ui-monospace,monospace"; ctx.textAlign = "left";
+  ctx.fillText("target " + target, W - PAD.right + 2, ty + 3);
+
+  // Historical traces (faded) — peer A only
+  bisectTraces.forEach((tr, ti) => {
+    const alpha = 0.08 + (ti / bisectTraces.length) * 0.12;
+    if (!tr.ptsA || tr.ptsA.length < 2) return;
+    const trMaxN = tr.ptsA[tr.ptsA.length - 1].n || 1;
+    const trToX  = n => PAD.left + (n / Math.max(trMaxN, maxN)) * cw;
+    ctx.strokeStyle = `rgba(124,58,237,${alpha})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    tr.ptsA.forEach((p, i) => {
+      const x = trToX(p.n), y = toY(p.v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  });
+
+  // Live trace — peer A (purple solid), plotted against its own iters
+  if (bisectCurrent.ptsA.length >= 2) {
+    ctx.strokeStyle = "#7c3aed"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    bisectCurrent.ptsA.forEach((p, i) => {
+      const x = toX(p.n), y = toY(p.v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  // Live trace — peer B (teal dashed), plotted against its own iters.
+  // When jitter causes phase offset the lines will overlap — same curve,
+  // same shape — confirming determinism. Any visible gap is purely temporal.
+  if (bisectCurrent.ptsB.length >= 2) {
+    ctx.strokeStyle = "#1d9e75"; ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    bisectCurrent.ptsB.forEach((p, i) => {
+      const x = toX(p.n), y = toY(p.v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Dots at each iteration — peer A
+  bisectCurrent.ptsA.forEach(p => {
+    ctx.fillStyle = "#7c3aed";
+    ctx.beginPath();
+    ctx.arc(toX(p.n), toY(p.v), 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Current value dot (larger, glowing ring)
+  const curPt = bisectCurrent.ptsA[bisectCurrent.ptsA.length - 1];
+  const cx2 = toX(curPt.n), cy2 = toY(curPt.v);
+  ctx.strokeStyle = "rgba(124,58,237,0.4)"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(cx2, cy2, 7, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#7c3aed";
+  ctx.beginPath(); ctx.arc(cx2, cy2, 4, 0, Math.PI * 2); ctx.fill();
+
+  // Delta annotation on current point
+  const delta = Math.abs(target - curPt.vA);
+  ctx.fillStyle = "#666"; ctx.font = "9px ui-monospace,monospace"; ctx.textAlign = "left";
+  ctx.fillText(`δ=${isFinite(delta) ? delta.toFixed(4) : '…'}`, cx2 + 8, cy2 - 4);
+
+  // LT label top-right
+  ctx.fillStyle = "#333"; ctx.font = "bold 10px ui-monospace,monospace"; ctx.textAlign = "right";
+  ctx.fillText(`LT ${lt}`, W - PAD.right, PAD.top - 8);
+  };
+})();
+
+const _bisectView = Behaviors.collect(null, _vt, () => { _renderBisect(); return null; });
+
+const _refreshFB = () => { _renderFeedback(); _renderBisect(); };
+meta3.ps.app._uiRefresh = _refreshFB;
+meta4.ps.app._uiRefresh = _refreshFB;
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE 3 — 2D Wavefront Stress (10×10 grid, 100 nodes)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Demonstrates:
+//   • A single W node holding 100 cell states in one queue
+//   • Macro pulse fires ctx.future() for each cell staggered by Euclidean
+//     distance from the disturbance origin — the wavefront spreads outward
+//   • Cells oscillate with a sine envelope that decays over time
+//   • World only stable when all 100 "activate" futures have fired
+//   • Two peers run identical waves — canvas shows both overlaid
+//
+// Architecture:
+//   One "grid" W node per world. __macro enqueues 100 "activate" entries at
+//   fireAt = wallTime + floor(dist(cell, origin) × WAVE_STEP_MS).
+//   Each activate sets cell amplitude. A second "decay" future fires
+//   WAVE_DECAY_MS later to return the cell to rest.
+//   The wavefront drains in real time via the stress heartbeat.
+
+const GRID_W        = 10;    // grid columns
+const GRID_H        = 10;    // grid rows
+const WAVE_STEP_MS  = 60;    // ms per unit distance — controls wave speed
+const WAVE_PULSE_MS = 4000;  // reflector interval for stress worlds
+                             // must be > max_dist × WAVE_STEP_MS
+                             // max_dist ≈ sqrt(4.5²+4.5²) ≈ 6.36 → 6.36×60 = 381ms << 4000ms ✓
+const WAVE_DECAY_MS = 800;   // ms until a cell returns to rest after activation
+
+const STRESS_WORLD_PROGRAM = `
+  const W      = Renkon.app.W;
+  const reflector = Events.receiver();
+
+  const grid = Behaviors.collect(
+    { cells: {}, lt: 0 },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "grid", {
+
+      __macro: (s, p, ctx) => {
+        // Choose disturbance origin: oscillate between different grid positions
+        // each LT so the wave source moves, producing varied patterns.
+        const t   = p.logicalTime;
+        const ox  = Math.round((GRID_W_VAL / 2 - 1) + (GRID_W_VAL / 2 - 1) * Math.sin(t * 1.1));
+        const oy  = Math.round((GRID_H_VAL / 2 - 1) + (GRID_H_VAL / 2 - 1) * Math.sin(t * 0.7));
+        const cells = {};
+        for (let y = 0; y < GRID_H_VAL; y++) {
+          for (let x = 0; x < GRID_W_VAL; x++) {
+            const id   = y * GRID_W_VAL + x;
+            const dist = Math.sqrt((x - ox) ** 2 + (y - oy) ** 2);
+            const fireAt = p.wallTime + Math.floor(dist * WAVE_STEP_MS_VAL);
+            ctx.future(Math.floor(dist * WAVE_STEP_MS_VAL), "activate",
+              { id, x, y, dist, phase: dist * 0.8, lt: t });
+            cells[id] = { x, y, amp: 0, active: false };
+          }
+        }
+        return { ...s, cells, lt: t };
+      },
+
+      activate: (s, p, ctx) => {
+        if (p.lt !== s.lt) return s; // stale entry from previous cycle
+        // Amplitude: sine wave modulated by distance — closer cells peak higher
+        const amp = Math.cos(p.phase) * Math.exp(-p.dist * 0.15);
+        ctx.future(WAVE_DECAY_MS_VAL, "decay", { id: p.id, lt: p.lt });
+        const cells = { ...s.cells,
+          [p.id]: { ...s.cells[p.id], amp, active: true }
+        };
+        return { ...s, cells };
+      },
+
+      decay: (s, p, ctx) => {
+        if (p.lt !== s.lt) return s;
+        const cells = { ...s.cells,
+          [p.id]: { ...s.cells[p.id], amp: 0, active: false }
+        };
+        return { ...s, cells };
+      },
+    })
+  );
+
+  const _isStable = W.stable([grid], reflector);
+  const _export   = W.export(Renkon, { grid }, _isStable);
+`
+  .replace(/GRID_W_VAL/g,       String(GRID_W))
+  .replace(/GRID_H_VAL/g,       String(GRID_H))
+  .replace(/WAVE_STEP_MS_VAL/g, String(WAVE_STEP_MS))
+  .replace(/WAVE_DECAY_MS_VAL/g,String(WAVE_DECAY_MS));
+
+
+// ── Stress world wire ─────────────────────────────────────────────────────────
+const meta5 = makeMeta("peer_A_wave");
+const meta6 = makeMeta("peer_B_wave");
+
+meta5.ps.app._stepMs        = WAVE_STEP_MS;  // real-time drain via heartbeat
+meta6.ps.app._stepMs        = WAVE_STEP_MS;
+meta5.ps.app._worldNextAt   = _worldNextAt;
+meta6.ps.app._worldNextAt   = _worldNextAt;
+meta5.ps.app._worldSnapshot = _worldSnapshot;
+meta6.ps.app._worldSnapshot = _worldSnapshot;
+
+const worldE = makeWorld("worldE", STRESS_WORLD_PROGRAM);
+const worldF = makeWorld("worldF", STRESS_WORLD_PROGRAM);
+
+meta5.register(worldE);
+meta6.register(worldF);
+
+const waveShim = makeShim(WAVE_PULSE_MS);
+waveShim.addPeer({ injectPulse: (p) => meta5.injectPulse(p) });
+waveShim.addPeer({ injectPulse: (p) => meta6.injectPulse(p) });
+waveShim.start();
+
+// Wave heartbeat — drives real-time activation of grid cells
+const _waveHeartbeat = () => {
+  const tick = () => {
+    const now = Date.now();
+    meta5.injectPulse({ logicalTime: 0, wallTime: now, isSubTick: true });
+    meta6.injectPulse({ logicalTime: 0, wallTime: now, isSubTick: true });
+    requestAnimationFrame(tick);
+  };
+  tick();
+};
+_waveHeartbeat();
+
+
+// ── 10. Stress world view — 2D wave canvas ────────────────────────────────────
+
+const _renderWave = (() => {
+  // Pre-create all cell divs once — only update their CSS transform/background
+  // on each render. This avoids innerHTML teardown and is much smoother.
+  let cellsA = null;
+  let cellsB = null;
+
+  const CELL_PX = 24; // px per cell
+  const GAP_PX  = 2;  // gap between cells
+
+  const buildGrid = (containerId) => {
+    const container = document.getElementById(containerId);
+    if (!container) return null;
+    const cells = {};
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        const id  = y * GRID_W + x;
+        const div = document.createElement("div");
+        Object.assign(div.style, {
+          position:        "absolute",
+          left:            `${x * (CELL_PX + GAP_PX)}px`,
+          top:             `${y * (CELL_PX + GAP_PX)}px`,
+          width:           `${CELL_PX}px`,
+          height:          `${CELL_PX}px`,
+          borderRadius:    "3px",
+          background:      "#121212",
+          transition:      "background 60ms linear, transform 60ms ease-out",
+          transform:       "scale(0.85)",
+          willChange:      "background, transform",
+        });
+        container.appendChild(div);
+        cells[id] = div;
+      }
+    }
+    return cells;
+  };
+
+  const updateGrid = (cells, worldX) => {
+    if (!cells) return;
+    const g = worldX.getNodeState("grid");
+    if (!g?.cells) return;
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        const id   = y * GRID_W + x;
+        const cell = g.cells[id];
+        const div  = cells[id];
+        if (!cell || !div) continue;
+
+        const amp = cell.amp ?? 0;
+        const abs = Math.abs(amp);
+
+        // CSS transform: scale up on activation, back to rest when quiet
+        const scale = cell.active ? (0.85 + abs * 0.55) : 0.85;
+        div.style.transform = `scale(${scale.toFixed(3)})`;
+
+        // Background colour: teal crest / purple trough / dark rest
+        let bg;
+        if (amp > 0.01) {
+          const v = Math.floor(abs * 255);
+          bg = `rgb(${Math.floor(v*0.12)},${Math.floor(v*0.72)},${Math.floor(v*0.62)})`;
+        } else if (amp < -0.01) {
+          const v = Math.floor(abs * 255);
+          bg = `rgb(${Math.floor(v*0.55)},${Math.floor(v*0.15)},${Math.floor(v*0.8)})`;
+        } else {
+          bg = "#121212";
+        }
+        div.style.background = bg;
+      }
+    }
+  };
+
+  return () => {
+    if (!worldE?.ps?.app) return;
+
+    const gridPx = GRID_W * (CELL_PX + GAP_PX) - GAP_PX;
+
+    // One-time panel creation
+    if (!document.getElementById("wave-wrap")) {
+      const wrap = document.createElement("div");
+      wrap.id = "wave-wrap";
+      Object.assign(wrap.style, {
+        fontFamily: "ui-monospace,monospace", padding: "20px",
+        background: "#0d0d0d", color: "#eee", borderRadius: "10px",
+        margin: "10px", maxWidth: "620px", border: "1px solid #222",
+      });
+      wrap.innerHTML = `
+        <div style="font-size:13px; font-weight:bold; color:#666; margin-bottom:14px; letter-spacing:1px; text-align:center;">
+          2D WAVEFRONT STRESS — ${GRID_W}×${GRID_H} NODES
+        </div>
+        <div style="display:flex; gap:16px; justify-content:center;">
+          <div>
+            <div style="font-size:9px; color:#444; margin-bottom:6px; text-align:center; letter-spacing:1px;">PEER A</div>
+            <div id="wave-grid-a" style="position:relative; width:${gridPx}px; height:${gridPx}px;"></div>
+          </div>
+          <div>
+            <div style="font-size:9px; color:#444; margin-bottom:6px; text-align:center; letter-spacing:1px;">PEER B</div>
+            <div id="wave-grid-b" style="position:relative; width:${gridPx}px; height:${gridPx}px;"></div>
+          </div>
+        </div>
+        <div style="display:flex; gap:16px; margin-top:14px; font-size:9px; color:#444; justify-content:center;">
+          <span>LT <span id="wave-lt" style="color:#555">—</span></span>
+          <span>stable: <span id="wave-stable" style="color:#555">—</span></span>
+          <span>active: <span id="wave-active" style="color:#555">—</span>/100</span>
+        </div>`;
+      document.body.appendChild(wrap);
+      cellsA = buildGrid("wave-grid-a");
+      cellsB = buildGrid("wave-grid-b");
+    }
+
+    updateGrid(cellsA, worldE);
+    updateGrid(cellsB, worldF);
+
+    // Status line
+    const g = worldE.getNodeState("grid");
+    const lt = g?.lt ?? 0;
+    const activeCells = g?.cells
+      ? Object.values(g.cells).filter(c => c.active).length : 0;
+    const stable = worldE.ps.app.isStable ?? false;
+
+    const ltEl = document.getElementById("wave-lt");
+    const stEl = document.getElementById("wave-stable");
+    const acEl = document.getElementById("wave-active");
+    if (ltEl) ltEl.textContent = lt;
+    if (stEl) { stEl.textContent = stable ? "yes" : "no"; stEl.style.color = stable ? "#238636" : "#d29922"; }
+    if (acEl) acEl.textContent = activeCells;
+  };
+})();
+
+const _waveView = Behaviors.collect(null, _vt, () => { _renderWave(); return null; });
+meta5.ps.app._uiRefresh = _renderWave;
+meta6.ps.app._uiRefresh = _renderWave;
+const _view = Behaviors.collect(null, _vt, () => { _renderView(); return null; });
