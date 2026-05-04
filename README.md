@@ -61,7 +61,7 @@ The wavefront is *local*. It does not require coordination between peers. Each p
 
 A **phase** is one stage within a wave. The current implementation has two named phases:
 
-- **Macro phase** — triggered by the arrival of a new shared pulse. Every node receives the `__macro` message and responds to the new logical time.
+- **Macro phase** — triggered by the arrival of a new shared pulse. Every node receives the `__macro` message once per `logicalTime` (guaranteed by `W.reduce`'s `_lt` guard). Nodes respond to the new logical time — either scheduling new work (total `__macro`) or returning unchanged if nothing relevant changed (incremental `__macro`).
 - **Micro phase** (sub-tick) — one or more local iterations that settle inter-node dependencies and drain queued futures. The micro phase is invisible to the outside world; only the final settled state is observable.
 
 A wave is `stable` when its micro phase has fully drained — all pending futures have `fireAt > wallTime`.
@@ -93,7 +93,7 @@ Conditions 1 and 2 are checked by `W.stable()` generically across all nodes. Con
 
 The **Reflector** is the Krestianstvo-equivalent shim that stamps and broadcasts pulses. It is the sole source of `wallTime` — no world ever calls `Date.now()` internally. This ensures that "now" is the same for all peers regardless of their real-time clock drift.
 
-In the current implementation the Reflector is simulated by `makeShim`, which stamps pulses once and delivers them with randomised jitter to simulate network latency.
+In the current implementation the Reflector is simulated by `makeShim`. By default it delivers pulses synchronously with no latency (ideal network). Jitter is opt-in: `makeShim(REFLECTOR_MS, { min: 10, max: 300 })`.
 
 ---
 
@@ -134,13 +134,13 @@ META_PROGRAM never knows the names of nodes inside a world. All world-level intr
 
 `W` is the functional core of each node. Its `reduce` function takes `(state, pulse, nodeId, handlers)` and returns a new state. On each call it:
 
-1. Clears the shared outbox if this is a new evaluation generation
+1. Collects inbound outbox messages written by a *previous* evalGen — same-gen messages are deferred to the next evaluate pass, preventing a node from consuming a message written by another node in the same pass
 2. Collects inbound `send()` messages for this node from the outbox
 3. Splits the node's own queue into ready (fireAt ≤ wallTime) and later entries
-4. Injects `__macro` at the front of the ready list on non-sub-tick pulses
+4. Injects `__macro` at the front of the ready list on non-sub-tick pulses — **once per `logicalTime`**. `W.reduce` tracks `_lt` (the last `logicalTime` for which `__macro` was injected) as infrastructure state alongside `_queue` and `_nextAt`. If `_lt === logicalTime`, `__macro` is skipped — preventing double-firing under warp replay. This makes incremental `__macro` the default: the handler is guaranteed to be called at most once per logical tick, and can freely choose to do nothing when its inputs haven't changed
 5. Runs each ready entry through its handler, collecting `future` and `send` effects
 6. Enqueues futures into the node's new queue; deposits sends into the outbox
-7. Returns the new state with updated `_queue` and `_nextAt`
+7. Returns the new state with updated `_queue`, `_nextAt`, `_depth`, and `_lt` (infrastructure fields stripped by `W.getState` before the view layer sees them)
 
 `_nextAt` — the timestamp of the next pending entry — is the signal that `_worldNextAt` reads to drive the drain loop. It is written on every `reduce` call without any node-name coupling.
 
@@ -151,7 +151,7 @@ Outbox entries are stamped with `_evalGen` (the evaluation generation at write t
 Three functions live in the host layer, registered on `meta.ps.app` and callable from inside the META_PROGRAM string as `Renkon.app.*`:
 
 - **`_worldNextAt(world)`** — scans all node states for the minimum `_nextAt`, returns it or `null`. Used to advance `wallTime` correctly during drain and warp.
-- **`_worldSnapshot(world, source, iter)`** — scans all W nodes (identified by having an array `_queue`) and captures their current scalar fields into a plain serialisable object. Used for telemetry and future network snapshot/restore.
+- **`_worldSnapshot(world, source, iter)`** — scans all W nodes (identified by having an array `_queue`) and captures their current scalar fields into a plain serialisable object. Used for telemetry and future network snapshot/restore. Optional — metas that don't need telemetry (e.g. wave worlds) simply don't register it; META_PROGRAM calls it with optional chaining (`?.`) so absent registration is silently skipped.
 - **`_uiRefresh()`** — called synchronously after warp and drain to push state to the DOM immediately, bypassing the RAF timer gate.
 
 ---
@@ -171,6 +171,44 @@ These invariants must hold for two peers to stay in sync across arbitrary networ
 5. **Stability is locally determined.** Each peer settles its own wavefront independently. Because inputs are identical, independent local settlement converges to the same result — no cross-peer coordination is needed during a wave.
 
 6. **Queued pulse receiver.** The META_PROGRAM receiver uses `{queued: true}` — no pulse is silently dropped under jitter or load. Each pulse is processed in arrival order.
+
+7. **`__macro` fires at most once per `logicalTime`.** `W.reduce` tracks `_lt` and skips `__macro` injection if the node already processed this logical tick. This prevents double-firing under warp replay without any app-level guard.
+
+---
+
+## Incremental `__macro`
+
+The `__macro` handler is guaranteed by `W.reduce` to be called **at most once per `logicalTime`**. What it does when called is the application's choice.
+
+**Total `__macro`** — reschedules everything unconditionally every cycle. Simple to reason about, correct when every cycle genuinely produces new work (e.g. counter always increments, feedback always starts a new convergence run).
+
+**Incremental `__macro`** — only schedules work when inputs have changed. This is the production-correct Croquet idiom: the reflector may fire many times per second, but most objects are stationary most of the time. An incremental handler checks whether anything changed and returns the previous state unchanged if not — zero queue churn for idle nodes.
+
+The key insight for implementing incremental `__macro` in a deterministic system: when the node's decision depends on a **pure function of `logicalTime`**, there is no need to store the previous value in state. Compute both the current and previous value from `logicalTime` and `logicalTime - 1`:
+
+```javascript
+__macro: (s, p, ctx) => {
+  const t    = p.logicalTime;
+  const cur  = _computeInput(t);
+  const prev = _computeInput(t - 1);   // no state needed
+  if (cur === prev) return { ...s, lt: t }; // nothing changed — idle
+  // ... schedule futures for the new input
+}
+```
+
+This pattern is exact and requires zero extra state. It is applicable whenever the node's trigger is a deterministic function of logical time — which is the common case in Krestianstvo applications where behaviour is driven by the shared clock.
+
+When the trigger is **not** a pure function of time (message-driven state, accumulated values), use `Behaviors.collect`'s own previous state — the reducer's first argument — to detect changes:
+
+```javascript
+__macro: (s, p, ctx) => {
+  if (p.someValue === s.lastValue) return { ...s, lt: p.logicalTime }; // idle
+  // ... schedule work for the new value
+  return { ...s, lastValue: p.someValue, lt: p.logicalTime };
+}
+```
+
+The 2D wave example uses the pure-function approach: `_waveOrigin(t)` vs `_waveOrigin(t-1)`. When the origin hasn't moved, all 100 cells return immediately — zero futures scheduled, zero queue churn. Only when the origin changes does the full wavefront propagate.
 
 ---
 
@@ -397,6 +435,89 @@ Logical time  T ─────────────────────�
 
 Macro time is shared and observable. Micro time is local and transient — to an external observer, only the final stable state after each pulse is visible. Feedback loops deepen the micro phase but remain invisible externally; only the converged result is exported. This is the same two-layer model described in the original Renkon/Krestianstvo design, made explicit and enforced by the wavefront evaluator.
 
+
+---
+
+## Example — 2D Wavefront Stress (100 independent W nodes, zero inter-node communication)
+
+This example is the purest demonstration of the local-queue-of-futures architecture: 100 fully autonomous cell nodes arranged in a 10×10 grid, each receiving the reflector pulse directly, each computing its own wave timing independently. There is no coordinator, no broadcast, no `ctx.send` between nodes.
+
+### Architecture
+
+```
+cell_0 .. cell_99 (100 fully independent nodes)
+  __macro  → computes own origin from logicalTime (deterministic)
+             computes own dist from (cx, cy) to (ox, oy)
+             ctx.future(floor(dist × 80), "activate", {...})  ← own queue
+  activate → sets amplitude, ctx.future(600, "decay", {...})  ← own queue
+  decay    → resets amplitude
+```
+
+Each cell permanently captures its grid position `(cx, cy)` in a closure at construction time (`cx = id % 10`, `cy = floor(id / 10)`). On every macro pulse each cell independently computes the same deterministic origin — a pure function of `logicalTime` — and derives its own propagation delay. No two cells share any computation or communicate in any way.
+
+### Zero inter-node communication
+
+The key architectural property: the origin formula `ox = round(4 + 4·sin(lt·1.1))`, `oy = round(4 + 4·sin(lt·0.7))` is a pure deterministic function of `logicalTime`. Every cell computes it independently and gets the same result — because all cells receive the same `logicalTime` from the reflector. This is the Croquet/Krestianstvo guarantee in action: shared logical time makes independent computation equivalent to coordinated computation, without any message passing.
+
+The wave propagation delay `floor(dist × 80ms)` is scheduled as a `ctx.future` entry in each cell's own local queue. Cell 0 (at the origin) schedules `activate` at `wallTime + 0ms`. A corner cell at distance 8 schedules at `wallTime + 640ms`. These 100 different `fireAt` values live in 100 independent queues — there is no central structure holding all of them. The heartbeat advances `wallTime` and `_worldNextAt` finds the minimum across all 100 `_nextAt` values to know when to fire next.
+
+### Evolution of the architecture
+
+This reached the current form through three stages, each eliminating centralisation:
+
+**Stage 1 — Single grid node:** One W node holds all 100 cell states and a single queue of 100 `dispatch` futures. Compact but sequential — one queue, one node, the wavefront is not distributed at all.
+
+**Stage 2 — Coordinator + 100 cells:** Coordinator holds 100 staggered `dispatch` futures in its own queue. After dispatch fires it sends `activate` to each cell via `ctx.send`. Cells are independent after activation but the propagation timing is still centralised in the coordinator's queue.
+
+**Stage 3 — 100 autonomous cells (current):** No coordinator. Each cell receives `reflector` directly, computes its own delay, schedules its own futures. The coordinator's queue is eliminated entirely. Propagation timing is genuinely distributed across 100 independent queues.
+
+### W.stable and _worldNextAt under load
+
+`W.stable([cell_0, ..., cell_99], reflector)` checks all 100 node queues on every evaluate call. The world is stable only when every cell has both fired its `activate` and its `decay` — all 100 queues are empty and all `_depth` values are 0. This is a genuine distributed fixed point, not a flag set by a central node.
+
+`_worldNextAt` scans all 100 `_nextAt` values to find the earliest pending future. During wave propagation this minimum advances steadily outward from the origin — the heartbeat ticks at ~16ms intervals and on each tick `_worldNextAt` releases whichever cells' `activate` futures have `fireAt ≤ wallTime`.
+
+### Node generation via `updateProgram`
+
+The 100 cell declarations cannot be written as a static list in the source — that would require hardcoded `const cell_0 = ...` through `const cell_99 = ...`. Instead, `_waveScript2` is a JavaScript string built at load time by `Array.from({ length: GRID_W * GRID_H }, ...)`, and injected into the world's program via `updateProgram([script1, script2])` called from the host layer immediately after `makeWorld` — before the first pulse arrives. This is the correct call site: outside any evaluation cycle, no mid-evaluation conflict.
+
+```javascript
+// Generated string injected as script2:
+// "const cell_0 = Behaviors.collect({...}, reflector, _makeCell(0));
+//  const cell_1 = Behaviors.collect({...}, reflector, _makeCell(1));
+//  ...
+//  const _isStable = W.stable([cell_0, ..., cell_99], reflector);
+//  const _export   = W.export(Renkon, { cell_0, ..., cell_99 }, _isStable);"
+```
+
+Change `GRID_W` and `GRID_H` — the generator scales automatically. The Renkon static analyser sees all 100 named consts correctly because they appear as proper top-level declarations in the injected script.
+
+### Key implementation notes
+
+**`__macro` resets amplitude on each pulse** — `return { ...s, lt: t, amp: 0, active: false }` clears the previous cycle's state atomically with scheduling the new `activate` future. This avoids a separate `reset` message.
+
+**`activate` guard `p.lt !== s.lt`** — necessary because `__macro` always fires before `activate` (the future fires after the macro delay), but in a new cycle `__macro` sets `s.lt = newLt` before `activate` from the previous cycle's future might still be in the queue. The guard rejects it.
+
+**`decay` guard `p.lt !== s.lt`** — same reason: a decay future from cycle N must not fire if cycle N+1 has already started.
+
+**`_makeCell` closure** — `const cx = id % 10; const cy = Math.floor(id / 10)` are captured once at construction, not recomputed on every pulse.
+
+### Visual
+
+Two side-by-side 10×10 CSS div grids (peer A and peer B). Each cell div uses `transform: scale()` and `background` CSS transitions — teal for positive amplitude (crest), purple for negative (trough), light grey at rest on a white background. Both grids are always identical — any visible difference is a determinism failure. The wave origin moves each logical tick via a Lissajous pattern (`sin(lt·1.1)` × `sin(lt·0.7)`) so each cycle shows a ring emanating from a different position.
+
+### Parameters
+
+```javascript
+const GRID_W        = 10;    // grid columns (GRID_W × GRID_H = total nodes)
+const GRID_H        = 10;    // grid rows
+const WAVE_STEP_MS  = 80;    // ms per unit distance — controls wavefront speed
+const WAVE_PULSE_MS = 4000;  // reflector interval
+                             // must be > max_dist × WAVE_STEP_MS + WAVE_DECAY_MS
+                             // sqrt(5²+5²) × 80 + 600 ≈ 1167ms << 4000ms ✓
+const WAVE_DECAY_MS = 600;   // ms a cell stays lit after activation
+```
+
 ---
 
 ## Experimentation Guide
@@ -409,45 +530,44 @@ By default pulses are delivered synchronously with no delay — ideal network co
 
 ```javascript
 // Ideal network (default)
-const shim = makeShim(PULSE_MS);
+const shim = makeShim(REFLECTOR_MS);
 
 // Simulate jitter: 10–300ms random delivery delay per peer
-const shim = makeShim(PULSE_MS, { min: 10, max: 300 });
+const shim = makeShim(REFLECTOR_MS, { min: 10, max: 300 });
 
-// Same for the feedback shim
-const fbShim = makeShim(FB_PULSE_MS, { min: 10, max: 100 });
+// Same for the feedback and wave shims
+const fbShim   = makeShim(FB_REFLECTOR_MS, { min: 10, max: 100 });
+const waveShim = makeShim(WAVE_PULSE_MS,   { min: 10, max: 100 });
 ```
 
 With jitter enabled you will see the warp mechanism fire (console: `[WARP] worldX LT N → N+1`), the bisection canvas show two slightly offset curves (same convergence path, different phase), and occasional `PROCESS` status on counter rows during the jitter window.
 
 ### Macro pulse interval
 
-`PULSE_MS` is simply a `setInterval` delay — there is no architectural minimum. It can be set to 50ms, 16ms, or even 1ms. The only practical constraint is:
+`REFLECTOR_MS` is simply a `setInterval` delay — there is no architectural minimum. The only practical constraint is:
 
 ```
-PULSE_MS > SUB_STEPS × STEP_MS
+REFLECTOR_MS > SUB_STEPS × STEP_MS
 ```
 
-Otherwise the next pulse arrives before the current cycle finishes draining and warp fires every cycle. The default values (`PULSE_MS=5000`, `SUB_STEPS=50`, `STEP_MS=100`) sit at exactly the limit: `50 × 100 = 5000ms`. To cycle faster, reduce `STEP_MS` or `SUB_STEPS`:
+Otherwise the next pulse arrives before the cycle drains and warp fires every time. Current values: `REFLECTOR_MS=3000`, `SUB_STEPS=50`, `STEP_MS=50` → `50×50=2500ms < 3000ms`. To go faster:
 
 ```javascript
-// Fast animated cycling — 500ms per macro pulse
-const PULSE_MS  = 500;
-const SUB_STEPS = 10;
-const STEP_MS   = 40;   // 10 × 40 = 400ms < 500ms ✓
+// Faster animated cycling
+const REFLECTOR_MS = 1000;
+const SUB_STEPS    = 50;
+const STEP_MS      = 18;   // 50×18=900ms < 1000ms ✓
 
-// Instant drain, very fast cycling
-const PULSE_MS  = 50;
-const STEP_MS   = 0;    // sync drain
+// Fast logical time, instant drain
+const REFLECTOR_MS = 50;
+const STEP_MS      = 0;    // sync drain
 ```
 
-The same constraint applies to the feedback shim:
-
+The same constraint applies to feedback and wave shims:
 ```
-FB_PULSE_MS > estimated_convergence_steps × FB_STEP_MS
+FB_REFLECTOR_MS > convergence_steps × FB_STEP_MS
+WAVE_PULSE_MS   > max_dist × WAVE_STEP_MS + WAVE_DECAY_MS
 ```
-
-If `FB_PULSE_MS` is too small, warp fires on every cycle and the animation collapses to instant.
 
 ### Sub-step animation (STEP_MS)
 
@@ -494,7 +614,6 @@ The starting formula controls how much depth varies between cycles:
 // WARNING: never use Math.random() — non-deterministic, peers desync
 ```
 
----
 
 ## Running in Renkon Pad
 
@@ -511,15 +630,16 @@ The starting formula controls how much depth varies between cycles:
 4. **Create a new runner window** — press the **Run** button (▶). The evaluator bootstraps, the shim fires its first pulse immediately, and the DOM panels appear below the cell within ~100ms.
 
 5. **Observe** — four panels render:
-   - **VM INTEGRITY PHYSICAL TRACE** — counter sub-steps for both peers, warp badges on completed rows
+   - **WAVEFRONT INTEGRITY PHYSICAL TRACE** — counter sub-steps for both peers, warp badges on completed rows
    - **FEEDBACK LOOP CONVERGENCE TRACE** — depth bar, peer values, convergence status
-   - **BISECTION COORDINATE SPACE** — canvas animation of the bisection curve
-   - **2D Wavefront (10×10 grid, 100 nodes)** - the wavefront spreads outward with divs
+   - **BISECTION COORDINATE SPACE — FEEDBACK LOOP** — canvas animation of the bisection convergence
+   - **2D WAVEFRONT STRESS — 10×10 NODES** — 101 independent W nodes, animated wave spreading across CSS div grid
 
-6. **Experiment** — edit any constant at the top of the cell (`PULSE_MS`, `STEP_MS`, `FB_STEP_MS`, `EPSILON`, shim latency) and press Run again. Each run starts a fresh instance.
+6. **Experiment** — edit any constant at the top of the cell (`REFLECTOR_MS`, `STEP_MS`, `FB_STEP_MS`, `EPSILON`, `WAVE_STEP_MS`, shim latency) and press Run again. Each run starts a fresh instance.
 
-7. **Enable jitter** — change line `const shim = makeShim(PULSE_MS);` to `const shim = makeShim(PULSE_MS, { min: 10, max: 300 });` and re-run. The warp mechanism and bisection phase offset become visible.
+7. **Enable jitter** — change `makeShim(REFLECTOR_MS)` to `makeShim(REFLECTOR_MS, { min: 10, max: 300 })` and re-run. Warp fires (console: `[WARP]`), bisection canvas shows phase offset, wave grid shows slight peer divergence timing.
 
+---
 
 ## Contributing
 

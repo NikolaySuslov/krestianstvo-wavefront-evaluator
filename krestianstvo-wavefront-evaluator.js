@@ -83,12 +83,15 @@ const W = (() => {
     const { ready: ownReady, later } = _Q.split(state._queue ?? [], wallTime);
     const allReady = [...inbound, ...ownReady];
 
-    // Inject __macro on every non-sub-tick — resets depth to 0.
-    if (!isSubTick) {
+    // Inject __macro once per logicalTime (W-managed via _lt).
+    // Skip if this node already processed this logicalTime — prevents
+    // double-firing under warp replay and makes incremental __macro the default.
+    // App handlers decide what to do when called; W ensures they're called once.
+    if (!isSubTick && (state._lt ?? -1) !== logicalTime) {
       allReady.unshift({ fireAt: wallTime, msg: "__macro", payload: pulse, _depth: 0 });
     }
 
-    const { _queue, _nextAt, _depth: _prevDepth, ...userState0 } = state;
+    const { _queue, _nextAt, _depth: _prevDepth, _lt: _prevLt, ...userState0 } = state;
     let userState = userState0;
     let newQueue  = later;
     let maxDepthSeen = 0;
@@ -150,10 +153,10 @@ const W = (() => {
       ...userState,
       _queue:  newQueue,
       _nextAt: _Q.nextAt(newQueue),
-      // _depth: maximum feedback depth seen this evaluate call.
-      // Resets to 0 when no ready entries carried depth > 0.
-      // Used by W.stable() to detect in-progress feedback loops.
       _depth:  maxDepthSeen,
+      // _lt: last logicalTime for which __macro ran — W-managed infrastructure.
+      // Preserved on sub-ticks so the once-per-LT guard works across heartbeat.
+      _lt:     isSubTick ? (state._lt ?? -1) : logicalTime,
     };
   };
 
@@ -165,10 +168,13 @@ const W = (() => {
   //    Without this check, a send() at the end of a feedback chain leaves
   //    the world appearing stable while a message is undelivered in the outbox.
   const stable = (nodes, pulse) => {
-    const wall   = pulse?.wallTime ?? 0;
-    const appRef = pulse?._appRef;
+    const wall    = pulse?.wallTime ?? 0;
+    const appRef  = pulse?._appRef;
     const outboxEmpty = !appRef || Object.keys(appRef._outbox ?? {}).length === 0;
-    return outboxEmpty && nodes.every(n =>
+    // Flatten arrays of W nodes so W.stable([coordinator, cells]) works
+    // without manually spreading — Renkon array behaviors are passed directly.
+    const flat = nodes.flatMap(n => Array.isArray(n) ? n : [n]);
+    return outboxEmpty && flat.every(n =>
       !n ||
       ((n._queue ?? []).every(e => e.fireAt > wall) && (n._depth ?? 0) === 0)
     );
@@ -184,7 +190,7 @@ const W = (() => {
 
   const getState = (n) => {
     if (!n) return null;
-    const { _queue, _nextAt, _depth, ...user } = n;
+    const { _queue, _nextAt, _depth, _lt, ...user } = n;
     return user;
   };
 
@@ -203,8 +209,14 @@ const _worldNextAt = (world) => {
   let t = Infinity;
   for (const key of Object.keys(world)) {
     const v = world[key];
-    if (v !== null && typeof v === 'object' && typeof v._nextAt === 'number') {
+    if (v === null || typeof v !== 'object') continue;
+    if (typeof v._nextAt === 'number') {
       t = Math.min(t, v._nextAt);
+    } else if (Array.isArray(v)) {
+      for (const item of v) {
+        if (item !== null && typeof item === 'object' && typeof item._nextAt === 'number')
+          t = Math.min(t, item._nextAt);
+      }
     }
   }
   return isFinite(t) ? t : null;
@@ -217,15 +229,19 @@ const _worldNextAt = (world) => {
 
 const _worldSnapshot = (world, source, iter) => {
   const nodes = {};
-  for (const key of Object.keys(world)) {
-    const v = world[key];
-    if (v === null || typeof v !== 'object' || !Array.isArray(v._queue)) continue;
+  const scanNode = (key, v) => {
+    if (v === null || typeof v !== 'object' || !Array.isArray(v._queue)) return;
     const fields = {};
     for (const [k, fv] of Object.entries(v)) {
       if (k.startsWith('_')) continue;
       if (fv === null || typeof fv !== 'object') fields[k] = fv;
     }
     nodes[key] = { ...fields, queueLen: v._queue.length, nextAt: v._nextAt ?? Infinity, depth: v._depth ?? 0 };
+  };
+  for (const key of Object.keys(world)) {
+    const v = world[key];
+    if (Array.isArray(v)) v.forEach((item, i) => scanNode(key + "_" + i, item));
+    else scanNode(key, v);
   }
   return { source, iter, nodes };
 };
@@ -301,7 +317,7 @@ const META_PROGRAM = `
             });
             worldps.evaluate();
             world._telemetry[lastLT].push(
-              Renkon.app._worldSnapshot(world, "warp", safety)
+              Renkon.app._worldSnapshot?.(world, "warp", safety)
             );
           }
           world._lastWarpIters = safety;
@@ -321,7 +337,7 @@ const META_PROGRAM = `
           // Baseline snapshot after macro pulse — iter 0
           world._telemetry ??= {};
           world._telemetry[p.logicalTime] = [
-            Renkon.app._worldSnapshot(world, "macro", 0)
+            Renkon.app._worldSnapshot?.(world, "macro", 0)
           ];
           // Prune: keep only the last 5 LT entries to prevent unbounded growth.
           // Runs once per new LT — not per push — so cost is O(keys) ~= O(5).
@@ -342,7 +358,7 @@ const META_PROGRAM = `
               });
               worldps.evaluate();
               world._telemetry[p.logicalTime].push(
-                Renkon.app._worldSnapshot(world, "drain", iters)
+                Renkon.app._worldSnapshot?.(world, "drain", iters)
               );
             }
             world._lastDrainIters = iters;
@@ -380,7 +396,7 @@ const makeMeta = (peerId) => {
   ps.evaluator(0);
 
   const register    = (world) => {
-    world.app.meta = ps;
+    world.app.meta          = ps;
     ps.app.registry.set(world.id, world.ps);
   };
   const injectPulse = (pulse) => {
@@ -390,7 +406,7 @@ const makeMeta = (peerId) => {
   return { ps, id: peerId, register, injectPulse };
 };
 
-const makeWorld = (worldId, programString) => {
+const makeWorld = (worldId, programScripts) => {
   const ps = new ProgramState(0, {
     id:              worldId,
     meta:            null,
@@ -401,7 +417,8 @@ const makeWorld = (worldId, programString) => {
     _currentEvalGen: 0,
     _lastPulse:      null,
   });
-  ps.setupProgram([programString]);
+  const scripts = Array.isArray(programScripts) ? programScripts : [programScripts];
+  ps.setupProgram(scripts);
   ps.evaluator(0, { once: true });
 
   // Helper to extract node state for the view
@@ -486,11 +503,7 @@ const WORLD_PROGRAM = `
     (state, pulse) => W.reduce(state, pulse, "counter", {
       __macro: (s, p, ctx) => {
         // Pass SUBSTEPS_VAL in the payload so subcounter knows the target
-        ctx.send("subcounter", "startSubCount", { 
-          cycleId: p.logicalTime,
-          pTime: p.wallTime,
-          steps: SUBSTEPS_VAL 
-        });
+        ctx.send("subcounter", "startSubCount", { cycleId: p.logicalTime });
         return { ...s, count: s.count + 1 };
       },
     })
@@ -498,37 +511,31 @@ const WORLD_PROGRAM = `
 
   // 2. Define 'subcounter'
 
-const subcounter = Behaviors.collect(
-  { subCount: 0, stepsDone: 0, currentCycle: 0, stepsTarget: SUBSTEPS_VAL },
-  reflector,
-  (state, pulse) => W.reduce(state, pulse, "subcounter", {
-    startSubCount: (s, p, ctx) => {
-      // Only start if this is a NEW macro cycle.
-      if (p.cycleId <= s.currentCycle) return s;
-      ctx.future(0, "step", p.cycleId);
-      return { ...s, subCount: 0, stepsDone: 0, stepsTarget: p.steps || SUBSTEPS_VAL, currentCycle: p.cycleId };
-    },
-    step: (s, cycleId, ctx) => {
-      // Reject stale steps from a previous cycle still in the queue.
-      if (cycleId !== s.currentCycle || s.stepsDone >= s.stepsTarget) return s;
-      const next = s.stepsDone + 1;
-      if (next < s.stepsTarget) ctx.future(STEPMS_VAL, "step", cycleId);
-      return { ...s, subCount: s.subCount + 1, stepsDone: next };
-    }
-  })
-);
+  const subcounter = Behaviors.collect(
+    { subCount: 0, stepsDone: 0, currentCycle: 0 },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "subcounter", {
+      startSubCount: (s, p, ctx) => {
+        if (p.cycleId <= s.currentCycle) return s;
+        ctx.future(0, "step", p.cycleId);
+        return { ...s, subCount: 0, stepsDone: 0, currentCycle: p.cycleId };
+      },
+      step: (s, cycleId, ctx) => {
+        if (cycleId !== s.currentCycle || s.stepsDone >= SUBSTEPS_VAL) return s;
+        const next = s.stepsDone + 1;
+        if (next < SUBSTEPS_VAL) ctx.future(STEPMS_VAL, "step", cycleId);
+        return { ...s, subCount: s.subCount + 1, stepsDone: next };
+      }
+    })
+  );
 
-// Update stability to be content-aware, not just queue-aware
-
-// A world is only truly stable if:
-// 1. All internal node queues are empty (standard check)
-// 2. The subcounter has actually reached its intended target
-const _isStable = W.stable([counter, subcounter], reflector) &&
-                 (subcounter.stepsDone >= subcounter.stepsTarget);
+  // World stable when queues empty AND subcounter reached its target.
+  const _isStable = W.stable([counter, subcounter], reflector) &&
+                   (subcounter.stepsDone >= SUBSTEPS_VAL);
 
 const _export = W.export(Renkon, { counter, subcounter }, _isStable);
 `
-// Perform the string injections[cite: 2]
+// Inject runtime constants
 .replace(/STEPMS_VAL/g, String(STEP_MS))
 .replace(/SUBSTEPS_VAL/g, String(SUB_STEPS));
 
@@ -1307,104 +1314,119 @@ meta4.ps.app._uiRefresh = _refreshFB;
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// EXAMPLE 3 — 2D Wavefront Stress (10×10 grid, 100 nodes)
+// EXAMPLE 3 — 2D Wavefront Stress (10×10 = 101 independent W nodes)
 // ══════════════════════════════════════════════════════════════════════════════
 //
-// Demonstrates:
-//   • A single W node holding 100 cell states in one queue
-//   • Macro pulse fires ctx.future() for each cell staggered by Euclidean
-//     distance from the disturbance origin — the wavefront spreads outward
-//   • Cells oscillate with a sine envelope that decays over time
-//   • World only stable when all 100 "activate" futures have fired
-//   • Two peers run identical waves — canvas shows both overlaid
+// Demonstrates the local-queue-of-futures architecture under stress:
+//   • 1 coordinator node + 100 cell nodes = 101 independent W nodes
+//   • Each cell owns its own local queue — no central routing after dispatch
+//   • No coordinator — each cell subscribes to reflector directly
+//   • Each cell's __macro independently computes the same deterministic origin
+//     (pure function of logicalTime) and its own dist from its (cx,cy) to (ox,oy)
+//   • Each cell schedules its own ctx.future(dist*80, "activate") — own queue
+//   • 100 fully independent nodes, zero inter-node communication
+//   • W.stable checks all 101 queues — world only stable when every cell
+//     has completed its decay and returned to rest
+//   • _worldNextAt scans all 101 _nextAt values to advance wallTime correctly
 //
-// Architecture:
-//   One "grid" W node per world. __macro enqueues 100 "activate" entries at
-//   fireAt = wallTime + floor(dist(cell, origin) × WAVE_STEP_MS).
-//   Each activate sets cell amplitude. A second "decay" future fires
-//   WAVE_DECAY_MS later to return the cell to rest.
-//   The wavefront drains in real time via the stress heartbeat.
+// The wavefront is genuinely distributed: after the coordinator dispatches,
+// no node knows the global state. Stability emerges from 101 local queues
+// all draining to empty — the architectural invariant under test.
 
-const GRID_W        = 10;    // grid columns
-const GRID_H        = 10;    // grid rows
-const WAVE_STEP_MS  = 60;    // ms per unit distance — controls wave speed
-const WAVE_PULSE_MS = 4000;  // reflector interval for stress worlds
-                             // must be > max_dist × WAVE_STEP_MS
-                             // max_dist ≈ sqrt(4.5²+4.5²) ≈ 6.36 → 6.36×60 = 381ms << 4000ms ✓
-const WAVE_DECAY_MS = 800;   // ms until a cell returns to rest after activation
+const GRID_W        = 10;
+const GRID_H        = 10;
+const WAVE_STEP_MS  = 80;    // ms per unit distance — wavefront travel speed
+const WAVE_DECAY_MS = 600;   // ms a cell stays lit after activation
+// WAVE_PULSE_MS derived — no manual recalculation needed when changing grid size.
+// Formula: ceil((max_dist × WAVE_STEP_MS + WAVE_DECAY_MS) × 1.5)
+// max_dist = sqrt((GRID_W/2)² + (GRID_H/2)²) — corner-to-corner half-diagonal.
+// 1.5× headroom ensures the full wave settles before the next pulse arrives.
+const WAVE_PULSE_MS = Math.ceil(
+  (Math.sqrt((GRID_W / 2) ** 2 + (GRID_H / 2) ** 2) * WAVE_STEP_MS + WAVE_DECAY_MS) * 1.5
+);
 
+// Programmatically build the world string with 101 Behaviors.collect calls.
+// Each cell is a named W node ("cell_0".."cell_99") with its own queue.
 const STRESS_WORLD_PROGRAM = `
-  const W      = Renkon.app.W;
+  const W         = Renkon.app.W;
   const reflector = Events.receiver();
 
-  const grid = Behaviors.collect(
-    { cells: {}, lt: 0 },
-    reflector,
-    (state, pulse) => W.reduce(state, pulse, "grid", {
+  // Pure function of logicalTime — no state needed to compute previous value.
+  const _waveOrigin = (t) => ({
+    ox: Math.round(HALF_VAL + HALF_VAL * Math.sin(t * 1.1)),
+    oy: Math.round(HALF_VAL + HALF_VAL * Math.sin(t * 0.7)),
+  });
 
+  // Incremental __macro: only reschedules if the wave origin moved since
+  // the previous cycle. Previous origin is recomputed from t-1 — no state
+  // needed to store it. When origin is unchanged the cell does nothing,
+  // leaving any in-progress activate/decay futures untouched.
+  // This is the production-correct Croquet pattern: frequent reflector pulses,
+  // most nodes idle most of the time, only active ones reschedule.
+  const _makeCell = (id) => {
+    const cx = id % GW_VAL;
+    const cy = Math.floor(id / GW_VAL);
+    return (state, pulse) => W.reduce(state, pulse, "cell_" + id, {
       __macro: (s, p, ctx) => {
-        // Choose disturbance origin: oscillate between different grid positions
-        // each LT so the wave source moves, producing varied patterns.
-        const t   = p.logicalTime;
-        const ox  = Math.round((GRID_W_VAL / 2 - 1) + (GRID_W_VAL / 2 - 1) * Math.sin(t * 1.1));
-        const oy  = Math.round((GRID_H_VAL / 2 - 1) + (GRID_H_VAL / 2 - 1) * Math.sin(t * 0.7));
-        const cells = {};
-        for (let y = 0; y < GRID_H_VAL; y++) {
-          for (let x = 0; x < GRID_W_VAL; x++) {
-            const id   = y * GRID_W_VAL + x;
-            const dist = Math.sqrt((x - ox) ** 2 + (y - oy) ** 2);
-            const fireAt = p.wallTime + Math.floor(dist * WAVE_STEP_MS_VAL);
-            ctx.future(Math.floor(dist * WAVE_STEP_MS_VAL), "activate",
-              { id, x, y, dist, phase: dist * 0.8, lt: t });
-            cells[id] = { x, y, amp: 0, active: false };
-          }
-        }
-        return { ...s, cells, lt: t };
+        const t         = p.logicalTime;
+        const cur       = _waveOrigin(t);
+        const prev      = _waveOrigin(t - 1);
+        // Origin unchanged — nothing to reschedule, preserve current state
+        if (cur.ox === prev.ox && cur.oy === prev.oy) return { ...s, lt: t };
+        // Origin moved — reset and schedule fresh activation
+        const dist  = Math.sqrt((cx - cur.ox) * (cx - cur.ox) + (cy - cur.oy) * (cy - cur.oy));
+        const phase = dist * 0.8;
+        ctx.future(Math.floor(dist * 80), "activate", { dist, phase, lt: t });
+        return { ...s, lt: t, amp: 0, active: false };
       },
-
       activate: (s, p, ctx) => {
-        if (p.lt !== s.lt) return s; // stale entry from previous cycle
-        // Amplitude: sine wave modulated by distance — closer cells peak higher
+        if (p.lt !== s.lt) return s;
         const amp = Math.cos(p.phase) * Math.exp(-p.dist * 0.15);
-        ctx.future(WAVE_DECAY_MS_VAL, "decay", { id: p.id, lt: p.lt });
-        const cells = { ...s.cells,
-          [p.id]: { ...s.cells[p.id], amp, active: true }
-        };
-        return { ...s, cells };
+        ctx.future(600, "decay", { lt: p.lt });
+        return { ...s, amp, active: true };
       },
-
       decay: (s, p, ctx) => {
         if (p.lt !== s.lt) return s;
-        const cells = { ...s.cells,
-          [p.id]: { ...s.cells[p.id], amp: 0, active: false }
-        };
-        return { ...s, cells };
+        return { ...s, amp: 0, active: false };
       },
-    })
-  );
-
-  const _isStable = W.stable([grid], reflector);
-  const _export   = W.export(Renkon, { grid }, _isStable);
+    });
+  };
 `
-  .replace(/GRID_W_VAL/g,       String(GRID_W))
-  .replace(/GRID_H_VAL/g,       String(GRID_H))
-  .replace(/WAVE_STEP_MS_VAL/g, String(WAVE_STEP_MS))
-  .replace(/WAVE_DECAY_MS_VAL/g,String(WAVE_DECAY_MS));
+  .replace(/GW_VAL/g,   String(GRID_W))
+  .replace(/HALF_VAL/g, String(GRID_W / 2 - 1));
+// ── Stress world wire
+// _injectCellScript: called after makeWorld, before first pulse.
+// Appends the generated cell declarations as a second script via updateProgram.
+// updateProgram(array) is called with [script1, script2] — the array is what
+// setupProgram expects. Called from host layer so no mid-evaluation conflict.
+const _waveScript2 = (() => {
+  const N = GRID_W * GRID_H;
+  const cells = Array.from({ length: N }, (_, i) =>
+    "const cell_" + i + " = Behaviors.collect({amp:0,active:false,lt:0}, reflector, _makeCell(" + i + "));"
+  ).join(" ");
+  const refs = Array.from({ length: N }, (_, i) => "cell_" + i).join(", ");
+  return cells
+    + " const _isStable = W.stable([" + refs + "], reflector);"
+    + " const _export = W.export(Renkon, { " + refs + " }, _isStable);";
+})();
+const _injectCellScript = (worldPs) => {
+  worldPs.updateProgram([worldPs.scripts[0], _waveScript2]);
+};
 
-
-// ── Stress world wire ─────────────────────────────────────────────────────────
+// ── Stress world wire ────────────────────────────────────────────────────────
 const meta5 = makeMeta("peer_A_wave");
 const meta6 = makeMeta("peer_B_wave");
 
-meta5.ps.app._stepMs        = WAVE_STEP_MS;  // real-time drain via heartbeat
-meta6.ps.app._stepMs        = WAVE_STEP_MS;
+meta5.ps.app._stepMs      = WAVE_STEP_MS;
+meta6.ps.app._stepMs      = WAVE_STEP_MS;
 meta5.ps.app._worldNextAt   = _worldNextAt;
 meta6.ps.app._worldNextAt   = _worldNextAt;
-meta5.ps.app._worldSnapshot = _worldSnapshot;
-meta6.ps.app._worldSnapshot = _worldSnapshot;
 
 const worldE = makeWorld("worldE", STRESS_WORLD_PROGRAM);
 const worldF = makeWorld("worldF", STRESS_WORLD_PROGRAM);
+// Inject cell declarations before first pulse arrives
+_injectCellScript(worldE.ps);
+_injectCellScript(worldF.ps);
 
 meta5.register(worldE);
 meta6.register(worldF);
@@ -1414,7 +1436,7 @@ waveShim.addPeer({ injectPulse: (p) => meta5.injectPulse(p) });
 waveShim.addPeer({ injectPulse: (p) => meta6.injectPulse(p) });
 waveShim.start();
 
-// Wave heartbeat — drives real-time activation of grid cells
+// Wave heartbeat — drives real-time firing of staggered cell activations
 const _waveHeartbeat = () => {
   const tick = () => {
     const now = Date.now();
@@ -1467,23 +1489,19 @@ const _renderWave = (() => {
 
   const updateGrid = (cells, worldX) => {
     if (!cells) return;
-    const g = worldX.getNodeState("grid");
-    if (!g?.cells) return;
     for (let y = 0; y < GRID_H; y++) {
       for (let x = 0; x < GRID_W; x++) {
         const id   = y * GRID_W + x;
-        const cell = g.cells[id];
+        const cell = worldX.getNodeState("cell_" + id);
         const div  = cells[id];
-        if (!cell || !div) continue;
+        if (!div || !cell) continue;
 
         const amp = cell.amp ?? 0;
         const abs = Math.abs(amp);
 
-        // CSS transform: scale up on activation, back to rest when quiet
         const scale = cell.active ? (0.85 + abs * 0.55) : 0.85;
         div.style.transform = `scale(${scale.toFixed(3)})`;
 
-        // Background colour: teal crest / purple trough / dark rest
         let bg;
         if (amp > 0.01) {
           const v = Math.floor(abs * 255);
@@ -1541,10 +1559,11 @@ const _renderWave = (() => {
     updateGrid(cellsB, worldF);
 
     // Status line
-    const g = worldE.getNodeState("grid");
-    const lt = g?.lt ?? 0;
-    const activeCells = g?.cells
-      ? Object.values(g.cells).filter(c => c.active).length : 0;
+    const lt = worldE.getNodeState("cell_0")?.lt ?? 0;
+    let activeCells   = 0;
+    for (let i = 0; i < GRID_W * GRID_H; i++) {
+      if (worldE.getNodeState("cell_" + i)?.active) activeCells++;
+    }
     const stable = worldE.ps.app.isStable ?? false;
 
     const ltEl = document.getElementById("wave-lt");
