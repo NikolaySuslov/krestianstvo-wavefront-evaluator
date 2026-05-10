@@ -26,6 +26,11 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
     "https://cdn.jsdelivr.net/npm/renkon-core/dist/renkon-core.js"
   );
 
+//   const REFLECTOR_MS = 50; // ms per logical tick (reflector pulse interval)
+//   const SUBTICK_MS = 1;    // ms per sub-tick (drain iteration interval)
+//   const SUB_STEPS = 10;     // max sub-ticks per tick (drain iteration cap)
+// const EPSILON      = 0.01;
+
 // ── Priority queue (_Q) ───────────────────────────────────────────────────────
 // Sorted min-heap over fireAt. All operations are pure — no mutation.
 // Used by W.reduce to manage each node's local queue of future messages.
@@ -230,6 +235,11 @@ const W = (() => {
     ws.isStable    = isStable;
     ws.logicalTime = Renkon.app._lastPulse?.logicalTime ?? 0;
     for (const [k, v] of Object.entries(nodeMap)) ws[k] = v;
+    // Notify registered view ProgramState. The view runs in its own RAF loop
+    // and re-renders reactively on each worldUpdate event.
+    if (ws._viewPs) {
+      ws._viewPs.registerEvent("worldUpdate", { logicalTime: ws.logicalTime, isStable });
+    }
     return null;
   };
 
@@ -357,8 +367,23 @@ const META_PROGRAM = `
     for (const pulse of reflectorPulse) {
       for (const [id, worldps] of reg) {
         const world  = worldps.app;
-        const lastLT = world.logicalTime || 0;
-        const isNewPulse = pulse.logicalTime > lastLT;
+
+        // ── GATEKEEPER: filter targeted events ──────────────────────────────
+        // No target → global broadcast (all worlds process).
+        // _targetWorld → single world.
+        // _targetWorlds → list of worlds (e.g. both wave peer replicas).
+        const _tgt  = pulse._targetWorld;
+        const _tgts = pulse._targetWorlds;
+        const isTargeted = _tgt != null || _tgts != null;
+        if (isTargeted && _tgt !== id && !(_tgts?.includes(id))) continue;
+
+        const lastLT      = world.logicalTime   || 0;
+        const lastPulseId = world._lastPulseId || 0;
+        // Both heartbeats and event pulses are full macro pulses (integer lt).
+        // _isEvent=true is only a hint for world programs.
+        // _pulseId distinguishes multiple events sharing the same logicalTime.
+        const isNewPulse = (pulse._pulseId > lastPulseId) ||
+                           (pulse.logicalTime > lastLT);
 
 
         // ── WARP: finish the previous cycle before starting the new macro ────
@@ -384,8 +409,6 @@ const META_PROGRAM = `
             );
           }
           world._lastWarpIters = safety;
-          // ── CRITICAL: flush UI while logicalTime is STILL the old LT ──────
-          if (typeof Renkon.app._uiRefresh === "function") Renkon.app._uiRefresh();
         }
 
         // ── STANDARD: process the new macro pulse ──────────────────────────
@@ -393,7 +416,11 @@ const META_PROGRAM = `
           world._currentEvalGen = (world._currentEvalGen ?? 0) + 1;
           const p = { ...pulse, _appRef: world, _fbStepMs: Renkon.app._fbStepMs ?? 0 };
           world._lastPulse = p;
-          world.logicalTime = p.logicalTime; // ← logicalTime advances HERE
+          // Both heartbeats and events advance logicalTime — they are both
+          // full macro pulses. World programs inspect p._isEvent to
+          // distinguish them and handle the payload if desired.
+          world.logicalTime  = p.logicalTime;
+          world._lastPulseId = p._pulseId || 0;
           worldps.registerEvent("reflector", p);
           worldps.evaluate();
 
@@ -413,7 +440,8 @@ const META_PROGRAM = `
           let iters = 0;
           while (!world.isStable && iters < 10000) {
             const _wn = Renkon.app._worldNextAt(world);
-              if (_wn !== null && _wn >= p.wallTime + SUBTICK_MS) break;
+            if (_wn === null) break;
+            if (_wn >= p.wallTime + SUBTICK_MS) break;
             iters++;
             world._currentEvalGen++;
             worldps.registerEvent("reflector", { ...p, wallTime: _wn ?? p.wallTime, isSubTick: true });
@@ -432,8 +460,16 @@ const META_PROGRAM = `
         }
       }
 
-      // UI refresh after each pulse.
-      if (typeof Renkon.app._uiRefresh === "function") Renkon.app._uiRefresh();
+      // ── LOG: META dispatch complete for this pulse ─────────────────────
+      const _ptag = pulse._isEvent ? "⚡EVENT" : "♥HB";
+      pulse._isEvent ? console.log(
+        "[META " + Renkon.app.id + "] " + _ptag +
+        " dispatched | lt=" + pulse.logicalTime +
+        " | pulseId=#" + (pulse._pulseId || "?") +
+        " | worlds=" + [...reg.keys()].join(",") +
+        (pulse._eventPayload ? " | payload=" + JSON.stringify(pulse._eventPayload) : "")
+      ): {};
+
     }
 
     return null;
@@ -452,7 +488,15 @@ const META_PROGRAM = `
 //   getNodeState(name) — returns plain user state for a named W node.
 //   getQueue(name)     — returns raw queue for a named W node.
 
-const makeMeta = (peerId) => {
+const makeMeta = (peerId, rngSeed = null) => {
+  // Each peer restores its own RNG state on construction.
+  // This models the session-join handshake: the reflector provides a
+  // session seed (e.g. from a snapshot or session ID hash); each peer
+  // calls W.rng.restore(seed) independently upon joining.
+  // Both peers use the same seed → identical RNG sequences.
+  // The restore happens here, not in the reflector shim.
+  if (rngSeed) W.rng.restore(rngSeed);
+
   const ps = new ProgramState(0, {
     id: peerId, registry: new Map(),
     logicalTime: 0, isStable: false, lastDispatch: null,
@@ -474,6 +518,15 @@ const makeMeta = (peerId) => {
     _localLt     = pulse.logicalTime; // stay in sync with outer
     // Outer reflector connected — stop autonomous mode, outer takes over
     if (_autoInterval) stopAutonomous();
+    // ── LOG: pulse arrives at this peer's meta ───────────────────────────
+    pulse._isEvent? console.log(
+      "[META " + peerId + "] injectPulse" +
+      " | lt=" + pulse.logicalTime +
+      " | pulseId=#" + (pulse._pulseId || "?") +
+      " | " + (pulse._isEvent
+        ? "⚡EVENT payload=" + JSON.stringify(pulse._eventPayload)
+        : "♥HB")
+    ) : {};
     ps.registerEvent("reflectorPulse", pulse);
     ps.evaluate();
   };
@@ -485,7 +538,12 @@ const makeMeta = (peerId) => {
     if (_autoInterval) return;
     _autoInterval = setInterval(() => {
       _localLt++;
-      const pulse = Object.freeze({ logicalTime: _localLt, wallTime: _localLt, _isLocal: true });
+      const pulse = Object.freeze({
+        logicalTime: _localLt,
+        wallTime:    _localLt,
+        wallMs:      _localLt * REFLECTOR_MS,   // consistent with shim pulses
+        _isLocal:    true,
+      });
       ps.registerEvent("reflectorPulse", pulse);
       ps.evaluate();
     }, REFLECTOR_MS);
@@ -521,6 +579,33 @@ const makeWorld = (worldId, programScripts) => {
   return { ps, app: ps.app, id: worldId, getNodeState, getQueue };
 };
 
+// makeView(viewId, viewProgram, appData) → { ps, id }
+//   Creates a view ProgramState that auto-evaluates via requestAnimationFrame.
+//   The view program receives model updates through Events.receiver("worldUpdate"),
+//   fired by W.export whenever the linked world calls it.
+//   Link a world to a view by setting: world.ps.app._viewPs = view.ps
+//   Multiple worlds can share one view — each W.export push triggers a re-render.
+//   appData is merged onto the view's Renkon.app; use it to pass render functions
+//   and any model references the view program needs (e.g. { renderFn, worldA }).
+
+const makeView = (viewId, viewProgram, appData = {}) => {
+  const ps = new ProgramState(0, { id: viewId, ...appData });
+  const scripts = Array.isArray(viewProgram) ? viewProgram : [viewProgram];
+  ps.setupProgram(scripts);
+  ps.evaluator(0);
+  return { ps, id: viewId };
+};
+
+// Generic view program: re-renders when any linked model world calls W.export.
+// Renkon.app.renderFn must be supplied via makeView appData.
+const _VIEW_PROGRAM = `
+  const worldUpdate = Events.receiver();
+  const _render = Behaviors.collect(null, worldUpdate, () => {
+    Renkon.app.renderFn();
+    return null;
+  });
+`;
+
 // ── Reflector shim ────────────────────────────────────────────────────────────
 // Simulates the Croquet reflector. Stamps wallTime once per pulse — peers
 // receive the identical frozen pulse object regardless of delivery timing.
@@ -539,56 +624,143 @@ const makeWorld = (worldId, programScripts) => {
 // Both simulate network conditions in pure logical time — no Date.now().
 // The delayed peer receives the same pulse content (same logicalTime, wallTime)
 // just delivered later. Warp in META_PROGRAM catches it up deterministically.
-const makeShim = (intervalMs = 1000, jitter = null,
-                  rngSeed = { s0: 0x12345678, s1: 0x9abcdef0,
-                              s2: 0xdeadbeef, s3: 0xcafebabe }) => {
-  W.rng.restore(rngSeed); // seed shared RNG — same on all peers
-  let lt = 0;
+const makeShim = (intervalMs = 1000, jitter = null) => {
+  // Croquet-style real-time anchoring.
+  // Logical time is a fixed grid: tick N = startTime + N*intervalMs real ms.
+  // getCurrentTick() derives the slot from elapsed time — no manual lt++.
+  //
+  // wallTime  = tick              integer, unchanged — all existing world programs safe
+  // wallMs    = tick * intervalMs real-time ms — for display and new programs
+  // _pulseId  = monotonic counter — distinguishes multiple events in the same tick
+  //
+  // Heartbeat: fires only when the poller detects a new tick slot not already
+  //   claimed by an event (Croquet silence-detector model).
+  // Event: claims the current tick slot via lastHeartbeatTick = tick.
+  //   Three clicks in the same tick → three pulses, all logicalTime=N, _pulseId unique.
+
+  let startTime        = null;
+  let lastHeartbeatTick = -1;
+  let pulseCount       = 0;   // monotonic, never resets between ticks
+  let _running         = false;
+  let _timer           = null;
+
   const peers   = [];
-  // pending[i] = queue of pulses waiting to be delivered to peer i
   const pending = [];
   const addPeer = (m) => { peers.push(m); pending.push([]); };
-  const setLt   = (n) => { lt = n; };
 
-  const fire = () => {
-    lt++;
+  // Current tick slot from elapsed real time.
+  const getCurrentTick = () => {
+    if (!startTime) return 0;
+    return Math.floor((Date.now() - startTime) / intervalMs);
+  };
+
+  // Broadcast a pulse to all peers, respecting lag/drop jitter.
+  const broadcastPulse = (tick, isHeartbeat, payload = null,
+                           targetWorldId = null, targetNodeId = null, targetWorldIds = null) => {
+    pulseCount++;
     const pulse = Object.freeze({
-      logicalTime: lt,
-      wallTime:    lt,  // pure logical tick count — no ms scaling
+      logicalTime:   tick,
+      wallTime:      tick,              // integer tick — existing world programs unchanged
+      wallMs:        tick * intervalMs, // real-time ms — for display and new programs
+      _pulseId:      pulseCount,        // unique across all pulses, same-tick or not
+      _isHeartbeat:  isHeartbeat,
+      _isEvent:      !isHeartbeat,
+      _eventPayload: payload,
+      _targetWorld:  targetWorldId,
+      _targetNode:   targetNodeId,
+      _targetWorlds: targetWorldIds,
     });
 
+    // ── LOG: reflector broadcasts pulse ───────────────────────────────────
+    const tag = isHeartbeat ? "♥ HEARTBEAT" : "⚡ EVENT    ";
+    (isHeartbeat == false) ? console.log(
+      "[REFLECTOR] " + tag +
+      " | lt=" + tick +
+      " | wallMs=" + pulse.wallMs +
+      " | pulseId=#" + pulseCount +
+      (payload ? " | payload=" + JSON.stringify(payload) : "")
+    ):{};
+
     for (let i = 0; i < peers.length; i++) {
-      // Check if this peer has a lag configured
-      const lag = (jitter?.peer === i) ? (jitter.lag ?? 0) : 0;
+      const lag      = (jitter?.peer === i) ? (jitter.lag      ?? 0) : 0;
       const dropEvery = (jitter?.peer === i) ? (jitter.dropEvery ?? 0) : 0;
 
-      if (dropEvery > 0 && lt % dropEvery === 0) continue; // drop this pulse
+      if (dropEvery > 0 && tick % dropEvery === 0) {
+        console.log("[REFLECTOR]   DROP peer=" + i + " lt=" + tick);
+        continue;
+      }
 
       if (lag > 0) {
-        // Queue the pulse — deliver when lt reaches lt+lag
-        pending[i].push({ deliverAt: lt + lag, pulse });
+        pending[i].push({ deliverAt: tick + lag, pulse });
+        console.log("[REFLECTOR]   QUEUED peer=" + i + " deliverAt=" + (tick + lag));
       } else {
+        //console.log("[REFLECTOR]   → peer=" + i);
         peers[i].injectPulse(pulse);
       }
     }
+  };
 
-    // Deliver any queued pulses whose deliverAt has been reached
+  // Deliver any queued lagged pulses whose deliverAt has been reached.
+  const _deliverPending = (currentTick) => {
     for (let i = 0; i < peers.length; i++) {
-      while (pending[i].length > 0 && pending[i][0].deliverAt <= lt) {
-        peers[i].injectPulse(pending[i].shift().pulse);
+      while (pending[i].length > 0 && pending[i][0].deliverAt <= currentTick) {
+        const item = pending[i].shift();
+        console.log("[REFLECTOR]   DELIVER lagged peer=" + i +
+                    " pulseId=#" + item.pulse._pulseId);
+        peers[i].injectPulse(item.pulse);
       }
     }
   };
 
-  let _interval = null;
-  const start = () => {
-    fire();
-    _interval = setInterval(fire, intervalMs);
+  // External event relay.
+  // Claims the current tick slot so the heartbeat does not double-fire it.
+  const injectExternalEvent = (payload, targetWorldId = null, targetNodeId = null, targetWorldIds = null) => {
+    if (!_running) {
+      console.log("[REFLECTOR] injectExternalEvent called but shim not running — ignored");
+      return;
+    }
+    const tick = getCurrentTick();
+    console.log("[REFLECTOR] injectExternalEvent received | tick=" + tick +
+                " | payload=" + JSON.stringify(payload));
+    lastHeartbeatTick = tick;   // claim slot — suppress heartbeat for this tick
+    broadcastPulse(tick, false, payload, targetWorldId, targetNodeId, targetWorldIds);
   };
-  const stop  = () => { if (_interval) { clearInterval(_interval); _interval = null; } };
-  const isRunning = () => _interval !== null;
 
-  return { addPeer, start, stop, isRunning, setLt };
+  const start = () => {
+    if (_running) return;
+    _running          = true;
+    if (!startTime) startTime = Date.now();  // preserve epoch set by setLt()
+    lastHeartbeatTick = -1;
+    pulseCount        = 0;
+    console.log("[REFLECTOR] started | intervalMs=" + intervalMs);
+
+    // High-frequency poller — detects tick transitions at ~10ms resolution.
+    // Delivers lagged/jitter messages and fires heartbeats on silence.
+    _timer = setInterval(() => {
+      const tick = getCurrentTick();
+      _deliverPending(tick);
+      if (tick > lastHeartbeatTick) {
+        lastHeartbeatTick = tick;
+        broadcastPulse(tick, true);
+      }
+    }, 10);
+  };
+
+  const stop = () => {
+    _running = false;
+    if (_timer) { clearInterval(_timer); _timer = null; }
+    console.log("[REFLECTOR] stopped | lastTick=" + getCurrentTick() +
+                " | totalPulses=" + pulseCount);
+  };
+
+  // Shift logical time by adjusting the epoch.
+  // Always updates startTime — safe to call before start() or after stop().
+  const setLt = (n) => {
+    startTime = Date.now() - (n * intervalMs);
+    console.log("[REFLECTOR] setLt(" + n + ") — epoch adjusted");
+  };
+
+  return { addPeer, start, stop, isRunning: () => _running, setLt, injectExternalEvent };
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -847,9 +1019,17 @@ shim.addPeer({ injectPulse: (p) => meta2.injectPulse(p) });
 shim.addPeer({ injectPulse: (p) => meta3.injectPulse(p) });
 shim.addPeer({ injectPulse: (p) => meta4.injectPulse(p) });
 
-// RNG worlds
-const meta9  = makeMeta("peer_A_rng");
-const meta10 = makeMeta("peer_B_rng");
+
+const SESSION_RNG_SEED = Object.freeze({
+  s0: 0x12345678, s1: 0x9abcdef0,
+  s2: 0xdeadbeef, s3: 0xcafebabe,
+});
+
+// Both RNG peers receive the same session seed and restore independently.
+// This is the distributed model: reflector sends the seed once at
+// session start; each peer calls W.rng.restore(seed) on join.
+const meta9  = makeMeta("peer_A_rng", SESSION_RNG_SEED);
+const meta10 = makeMeta("peer_B_rng", SESSION_RNG_SEED);
 meta9.ps.app._subtickMs    = SUBTICK_MS;
 meta9.ps.app._worldNextAt  = _worldNextAt;
 meta9.ps.app._worldSnapshot = _worldSnapshot;
@@ -930,6 +1110,38 @@ const _makeShimControl = () => {
   update();
   el.appendChild(btn);
   el.appendChild(status);
+
+  // ── External event button ──────────────────────────────────────────────
+  // Fires shim.injectExternalEvent() at the real-time moment of the click.
+  // The reflector stamps it with fractional wallTime between the last and
+  // next heartbeat, broadcasts to all peers identically.
+  // Both peers process it as a sub-tick of the current macro cycle —
+  // no __macro re-fire, no warp. Handle _isEvent in world node handlers.
+  const evBtn = document.createElement("button");
+  evBtn.textContent = "FIRE EVENT";
+  Object.assign(evBtn.style, {
+    padding: "6px 14px", borderRadius: "6px", border: "none",
+    background: "#1f6feb", color: "#fff", fontFamily: "inherit",
+    fontSize: "11px", fontWeight: "700", cursor: "pointer", marginLeft: "10px",
+  });
+  const evStatus = document.createElement("span");
+  Object.assign(evStatus.style, { fontSize: "10px", color: "#888", marginLeft: "8px" });
+  evBtn.onclick = () => {
+    if (!shim.isRunning()) {
+      evStatus.textContent = "reflector stopped";
+      console.log("[UI] FIRE EVENT clicked but reflector stopped");
+      return;
+    }
+    const payload = { name: "buttonClick", value: Math.round(Math.random() * 100) };
+    console.log("[UI] FIRE EVENT clicked → sending to reflector | payload=" +
+                JSON.stringify(payload));
+    shim.injectExternalEvent(payload);
+    evStatus.textContent = "fired: " + JSON.stringify(payload);
+    evStatus.style.color = "#58a6ff";
+    setTimeout(() => { evStatus.style.color = "#888"; }, 1200);
+  };
+  el.appendChild(evBtn);
+  el.appendChild(evStatus);
   document.body.insertBefore(el, document.body.firstChild);
 };
 // Auto-start: begin in autonomous mode immediately.
@@ -944,11 +1156,6 @@ _makeShimControl();
 // VIEWS — DOM rendering
 // ══════════════════════════════════════════════════════════════════════════════
 
-// _renderView is extracted as an imperative function so META_PROGRAM can call
-// it synchronously via meta1/meta2.ps.app._uiRefresh after a warp/drain cycle,
-// without waiting for the next Events.timer(16) tick.
-
-const _vt = Events.timer(16);
 const waveStack = new Map();
 
 const _renderView = () => {
@@ -1120,11 +1327,6 @@ if (isActive) {
 };
 
 
-// Register _uiRefresh so META_PROGRAM can call it synchronously after any
-// warp or drain cycle, bypassing the 16 ms Events.timer gate entirely.
-meta1.ps.app._uiRefresh = _renderView;
-meta2.ps.app._uiRefresh = _renderView;
-
 // ── 8. Feedback loop view ─────────────────────────────────────────────────────
 // Shows convergence depth per cycle for the estimator/corrector feedback world.
 // Each row is one macro pulse: the depth bar shows how many feedback iterations
@@ -1259,11 +1461,9 @@ const _renderFeedback = () => {
   `;
 };
 
-const _fbView = Behaviors.collect(null, _vt, () => { _renderFeedback(); return null; });
-
 // ── 9. Bisection coordinate space canvas ─────────────────────────────────────
-// A third panel drawn on a <canvas> element. Reads live from worldC (peer A)
-// on every _uiRefresh call. Shows the full convergence trajectory in (n, value)
+// A third panel drawn on a <canvas> element. Shows the full convergence trajectory
+// in (n, value) space as feedback iterations arrive during the drain loop.
 // space: each feedback iteration is one point on the curve, plotted as it
 // arrives during the drain loop. The target integer is a dashed horizontal
 // line; the current value is a moving dot on the curve.
@@ -1447,14 +1647,6 @@ const _renderBisect = (() => {
   };
 })();
 
-const _bisectView = Behaviors.collect(null, _vt, () => { _renderBisect(); return null; });
-
-const _refreshFB = () => { _renderFeedback(); _renderBisect(); };
-meta3.ps.app._uiRefresh = _refreshFB;
-meta4.ps.app._uiRefresh = _refreshFB;
-
-
-
 // ══════════════════════════════════════════════════════════════════════════════
 // EXAMPLE 5 — Deterministic RNG (XOROSHIRO128+)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1591,8 +1783,7 @@ const ZENO_WORLD_PROGRAM = `
 const GRID_W        = 10;
 const GRID_H        = 10;
 const WAVE_STEP_MS    = 2;    // ticks per unit distance — wavefront travel speed
-const WAVE_DECAY_MS   = 12;   // ticks a cell stays lit after activation
-const WAVE_CYCLE_MS   = 80;   // ticks between wave cycles
+const WAVE_DECAY_MS   = 28;   // ticks a cell stays lit after activation
 // Wave uses the main REFLECTOR_MS shim — no separate shim needed
 
 // Programmatically build the world string with 101 Behaviors.collect calls.
@@ -1601,60 +1792,75 @@ const STRESS_WORLD_PROGRAM = `
   const W         = Renkon.app.W;
   const reflector = Events.receiver();
 
-  // clock: single coordinator node. __macro fires once (started guard),
-  // schedules startWave immediately. startWave computes origin from wallTime,
-  // broadcasts to all cells, then schedules the next wave via future.
-  // The WAVE_CYCLE_VAL future sits in clock's queue across many 50ms ticks,
-  // firing when wallTime advances far enough — no second shim needed.
+  // clock: routes cellClick events from the reflector into userWave messages.
+  // No automatic wave loop — waves only originate from user interaction.
   const clock = Behaviors.collect(
-    { started: false },
+    {},
     reflector,
-    (state, pulse) => W.reduce(state, pulse, "clock", {
+    (state, pulse) => {
+      let stateWithEvent = state;
+      if (pulse?._isEvent && pulse?._eventPayload?.type === "cellClick") {
+        const entry = {
+          fireAt:  pulse.wallTime,
+          msg:     "userWave",
+          payload: { ox: pulse._eventPayload.ox, oy: pulse._eventPayload.oy, wt: pulse.wallTime },
+        };
+        stateWithEvent = {
+          ...state,
+          _queue:  [entry, ...(state._queue ?? [])],
+          _nextAt: pulse.wallTime,
+        };
+      }
+      return W.reduce(stateWithEvent, pulse, "clock", {
       __macro: (s, p, ctx) => {
-        if (s.started) return s;
-        ctx.future(0, "startWave", { wt: p.wallTime });
-        return { started: true };
+        if (s._alive) return s;
+        ctx.future(1, "_keepalive", {});
+        return { ...s, _alive: true };
       },
-      startWave: (s, p, ctx) => {
-        const ox = Math.round(HALF_VAL + HALF_VAL * Math.sin(p.wt * 0.07));
-        const oy = Math.round(HALF_VAL + HALF_VAL * Math.sin(p.wt * 0.05));
-        for (let i = 0; i < GW_VAL * GW_VAL; i++) {
-          ctx.send("cell_" + i, "wave", { ox, oy, wt: p.wt });
-        }
-        ctx.future(CYCLE_VAL, "startWave", { wt: p.wt + CYCLE_VAL });
+      _keepalive: (s, p, ctx) => {
+        ctx.future(1, "_keepalive", {});
         return s;
       },
-    })
+      userWave: (s, p, ctx) => {
+        for (let i = 0; i < GW_VAL * GW_VAL; i++) {
+          ctx.send("cell_" + i, "wave", { ox: p.ox ?? 0, oy: p.oy ?? 0, wt: p.wt });
+        }
+        return s;
+      },
+    });   // closes W.reduce
+    }     // closes outer (state, pulse) => { wrapper
   );
 
-  // Each cell receives "wave" from clock, computes its own distance,
-  // schedules its own activate future. All propagation timing is local.
   const _makeCell = (id) => {
     const cx = id % GW_VAL;
     const cy = Math.floor(id / GW_VAL);
     return (state, pulse) => W.reduce(state, pulse, "cell_" + id, {
       wave: (s, p, ctx) => {
-        const dist  = Math.sqrt((cx - p.ox) * (cx - p.ox) + (cy - p.oy) * (cy - p.oy));
-        const phase = dist * 0.8;
-        ctx.future(Math.floor(dist * STEP_VAL), "activate", { dist, phase, wt: p.wt });
-        return { ...s, wt: p.wt, amp: 0, active: false };
+        const dist         = Math.sqrt((cx - p.ox) * (cx - p.ox) + (cy - p.oy) * (cy - p.oy));
+        const contribution = Math.cos(dist * 0.45) * Math.exp(-dist * 0.22) * 0.8;
+        ctx.future(Math.max(1, Math.floor(dist * STEP_VAL)), "activate", { contribution });
+        return s;
       },
       activate: (s, p, ctx) => {
-        if (p.wt !== s.wt) return s;
-        const amp = Math.cos(p.phase) * Math.exp(-p.dist * 0.15);
-        ctx.future(DECAY_VAL, "decay", { wt: p.wt });
-        return { ...s, amp, active: true };
+        ctx.future(DECAY_VAL, "decay", { contribution: p.contribution });
+        return { ...s,
+          amp:    (s.amp    ?? 0) + p.contribution,
+          active: true,
+          _count: (s._count ?? 0) + 1,
+        };
       },
       decay: (s, p, ctx) => {
-        if (p.wt !== s.wt) return s;
-        return { ...s, amp: 0, active: false };
+        const count = Math.max(0, (s._count ?? 0) - 1);
+        return { ...s,
+          amp:    count > 0 ? (s.amp ?? 0) - p.contribution : 0,
+          active: count > 0,
+          _count: count,
+        };
       },
     });
   };
 `
   .replace(/GW_VAL/g,    String(GRID_W))
-  .replace(/HALF_VAL/g,  String(Math.floor(GRID_W / 2 - 1)))
-  .replace(/CYCLE_VAL/g, String(WAVE_CYCLE_MS))  // ticks
   .replace(/STEP_VAL/g,  String(WAVE_STEP_MS))   // ticks per unit dist
   .replace(/DECAY_VAL/g, String(WAVE_DECAY_MS));  // ticks
 // ── Stress world wire
@@ -1665,7 +1871,7 @@ const STRESS_WORLD_PROGRAM = `
 const _waveScript2 = (() => {
   const N = GRID_W * GRID_H;
   const cells = Array.from({ length: N }, (_, i) =>
-    "const cell_" + i + " = Behaviors.collect({amp:0,active:false,wt:0}, reflector, _makeCell(" + i + "));"
+    "const cell_" + i + " = Behaviors.collect({amp:0,active:false,_count:0}, reflector, _makeCell(" + i + "));"
   ).join(" ");
   const refs = Array.from({ length: N }, (_, i) => "cell_" + i).join(", ");
   return cells
@@ -1705,6 +1911,12 @@ const _renderWave = (() => {
   // on each render. This avoids innerHTML teardown and is much smoother.
   let cellsA = null;
   let cellsB = null;
+  // Rate-limit clicks to one wave event per reflector tick.
+  // Each click synchronously drives a full world evaluation + drain loop for
+  // all 101 nodes. Without throttling, rapid clicking stacks these synchronous
+  // evaluations, stalls the JS thread, delays the reflector setInterval, and
+  // causes wallTime to jump >1 tick — triggering the warp loop on top.
+  let _lastClickMs = 0;
 
   const CELL_PX = 24; // px per cell
   const GAP_PX  = 2;  // gap between cells
@@ -1729,6 +1941,21 @@ const _renderWave = (() => {
           transform:       "scale(0.85)",
           willChange:      "background, transform",
         });
+        // ONE event to the reflector — it stamps and delivers to all peers.
+        // _targetWorlds names both wave-world replicas so the gatekeeper
+        // lets it through to worldE (peer A) and worldF (peer B) only.
+        div.onmouseenter = ((cellId) => () => {
+          const now = Date.now();
+          if (now - _lastClickMs < REFLECTOR_MS) return;
+          _lastClickMs = now;
+          const cx = cellId % GRID_W;
+          const cy = Math.floor(cellId / GRID_W);
+          shim.injectExternalEvent(
+            { type: "cellClick", ox: cx, oy: cy },
+            null, null, ["worldE", "worldF"]
+          );
+        })(id);
+        div.style.cursor = "pointer";
         container.appendChild(div);
         cells[id] = div;
       }
@@ -1746,22 +1973,38 @@ const _renderWave = (() => {
         if (!div || !cell) continue;
 
         const amp = cell.amp ?? 0;
-        const abs = Math.abs(amp);
+        // Skip DOM writes when cell is inactive and was already dark.
+        // Avoids 200 forced style recalculations per frame for idle cells.
+        if (!cell.active && div._wvActive === false) continue;
 
-        const scale = cell.active ? (0.85 + abs * 0.55) : 0.85;
-        div.style.transform = `scale(${scale.toFixed(3)})`;
+        // tanh soft-maps any superimposed amplitude to (-1,1), preserving
+        // gradient distinction even when multiple waves overlap at a cell.
+        const t   = Math.tanh(amp);
+        const abs = Math.abs(t);
+
+        const tf = `scale(${(cell.active ? (0.85 + abs * 0.12) : 0.85).toFixed(3)})`;
+        if (div._wvTf !== tf) { div.style.transform = tf; div._wvTf = tf; }
 
         let bg;
-        if (amp > 0.01) {
-          const v = Math.floor(abs * 255);
-          bg = `rgb(${Math.floor(v*0.12)},${Math.floor(v*0.72)},${Math.floor(v*0.62)})`;
-        } else if (amp < -0.01) {
-          const v = Math.floor(abs * 255);
-          bg = `rgb(${Math.floor(v*0.55)},${Math.floor(v*0.15)},${Math.floor(v*0.8)})`;
+        if (t > 0.04) {
+          // Positive: cyan → teal gradient
+          const v = abs;
+          const r = Math.floor(v * 12);
+          const g = Math.floor(v * 160);
+          const b = Math.floor(v * 190);
+          bg = `rgb(${r},${g},${b})`;
+        } else if (t < -0.04) {
+          // Negative: indigo → violet gradient
+          const v = abs;
+          const r = Math.floor(v * 120);
+          const g = Math.floor(v * 20);
+          const b = Math.floor(v * 190);
+          bg = `rgb(${r},${g},${b})`;
         } else {
           bg = "#121212";
         }
-        div.style.background = bg;
+        if (div._wvBg !== bg) { div.style.background = bg; div._wvBg = bg; }
+        div._wvActive = cell.active;
       }
     }
   };
@@ -1824,9 +2067,7 @@ const _renderWave = (() => {
   };
 })();
 
-const _waveView = Behaviors.collect(null, _vt, () => { _renderWave(); return null; });
-
-// ── Zeno view ─────────────────────────────────────────────────────────────────
+// ── RNG view ──────────────────────────────────────────────────────────────────
 const _renderRng = () => {
   if (!worldI?.ps?.app || !worldJ?.ps?.app) return;
   const rA = worldI.getNodeState("rngNode");
@@ -1871,9 +2112,6 @@ const _renderRng = () => {
     '</div>' +
     '<div style="margin-top:10px;font-size:10px;font-weight:bold;color:' + statusCol + ';">' + statusTxt + '</div>';
 };
-const _rngView = Behaviors.collect(null, _vt, () => { _renderRng(); return null; });
-meta9.ps.app._uiRefresh  = _renderRng;
-meta10.ps.app._uiRefresh = _renderRng;
 
 const _renderZeno = () => {
   if (!worldG?.ps?.app || !worldH?.ps?.app) return;
@@ -1906,9 +2144,25 @@ const _renderZeno = () => {
     '<div style="font-size:9px;color:#444;margin-bottom:12px;">future(0.5) → future(0.25) → future(0.125) → ... all within one tick</div>' +
     bar("PEER A", zA.n, zA.sum) + bar("PEER B", zB?.n, zB?.sum);
 };
-const _zenoView = Behaviors.collect(null, _vt, () => { _renderZeno(); return null; });
-meta7.ps.app._uiRefresh = _renderZeno;
-meta8.ps.app._uiRefresh = _renderZeno;
-meta5.ps.app._uiRefresh = _renderWave;
-meta6.ps.app._uiRefresh = _renderWave;
-const _view = Behaviors.collect(null, _vt, () => { _renderView(); return null; });
+// ── View wiring — each world group linked to its own view ProgramState ────────
+// Models push { logicalTime, isStable } via W.export → view.registerEvent("worldUpdate").
+// Views auto-evaluate via RAF; Events.receiver triggers render only on model updates.
+
+const _counterView  = makeView("counterView",  _VIEW_PROGRAM, { renderFn: _renderView });
+const _feedbackView = makeView("feedbackView", _VIEW_PROGRAM, {
+  renderFn: () => { _renderFeedback(); _renderBisect(); }
+});
+const _waveView     = makeView("waveView",     _VIEW_PROGRAM, { renderFn: _renderWave });
+const _zenoView     = makeView("zenoView",     _VIEW_PROGRAM, { renderFn: _renderZeno });
+const _rngView      = makeView("rngView",      _VIEW_PROGRAM, { renderFn: _renderRng });
+
+worldA.ps.app._viewPs = _counterView.ps;
+worldB.ps.app._viewPs = _counterView.ps;
+worldC.ps.app._viewPs = _feedbackView.ps;
+worldD.ps.app._viewPs = _feedbackView.ps;
+worldE.ps.app._viewPs = _waveView.ps;
+worldF.ps.app._viewPs = _waveView.ps;
+worldG.ps.app._viewPs = _zenoView.ps;
+worldH.ps.app._viewPs = _zenoView.ps;
+worldI.ps.app._viewPs = _rngView.ps;
+worldJ.ps.app._viewPs = _rngView.ps;
