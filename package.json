@@ -1,27 +1,27 @@
 {
   "name": "krestianstvo-wavefront-evaluator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Croquet-TeaTime-inspired, Renkon-driven collaborative computational engine",
   "type": "module",
   "exports": {
     ".": {
-      "import": "./public/krestianstvo-wavefront-evaluator.js"
+      "import": "./krestianstvo-wavefront-evaluator.js"
     },
     "./ui": {
-      "import": "./public/ui-elements.js"
+      "import": "./ui-elements.js"
     }
   },
-  "main": "./public/krestianstvo-wavefront-evaluator.js",
+  "main": "./krestianstvo-wavefront-evaluator.js",
   "files": [
-    "public/krestianstvo-wavefront-evaluator.js",
-    "public/ui-elements.js",
-    "public/renkon-core-0.10.7.js",
+    "krestianstvo-wavefront-evaluator.js",
+    "ui-elements.js",
+    "renkon-core-0.10.7.js",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js --port 3000 --root ./public",
+    "dev": "node server.js --port 3000 --root ./",
     "pub": "npm publish --access public"
   },
   "keywords": [

@@ -26,7 +26,7 @@ import { attachReflector } from './reflector.js';
 
 const args   = process.argv.slice(2);
 const PORT   = Number(args[args.indexOf('--port')  + 1] || process.env.PORT || 3000);
-const ROOT   = path.resolve(args[args.indexOf('--root')  + 1] || './public');
+const ROOT   = path.resolve(args[args.indexOf('--root')  + 1] || './');
 
 // ── MIME types ─────────────────────────────────────────────────────────────
 
