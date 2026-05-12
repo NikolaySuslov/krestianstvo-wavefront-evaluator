@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>KWE — Examples</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #f5f4f0; color: #1a1a1a;
+    font-family: ui-monospace, monospace;
+    padding: 60px 40px;
+    min-height: 100vh;
+  }
+  header { margin-bottom: 48px; }
+  h1 {
+    font-size: 28px; font-weight: bold; letter-spacing: -0.5px;
+    color: #1a1a1a; margin-bottom: 6px;
+  }
+  .subtitle {
+    font-size: 13px; color: #888; letter-spacing: 1px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: #fff; border: 1px solid #e0ddd6; border-radius: 12px;
+    padding: 28px 24px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .card-title {
+    font-size: 16px; font-weight: bold; color: #1a1a1a; letter-spacing: 0;
+  }
+  .card-app {
+    font-size: 11px; color: #aaa; letter-spacing: 1px; text-transform: uppercase;
+  }
+  a {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-radius: 8px;
+    background: #f5f4f0; border: 1px solid #e0ddd6;
+    color: #444; text-decoration: none;
+    font-size: 12px;
+    transition: border-color 80ms, background 80ms, color 80ms;
+  }
+  a:hover { border-color: #1a1a1a; background: #eeecea; color: #1a1a1a; }
+  a .url { color: #888; }
+  a .arrow { color: #ccc; font-size: 14px; }
+  a:hover .arrow { color: #1a1a1a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Krestianstvo Wavefront Evaluator</h1>
+  <div class="subtitle">Examples — open two tabs on the same link to connect</div>
+</header>
+<div class="grid" id="grid"></div>
+<script type="module">
+import { APPS } from "./examples.js";
+
+const grid = document.getElementById('grid');
+
+for (const [appKey, app] of Object.entries(APPS)) {
+  const url = `./selo.html?app=${appKey}&k=1`;
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML =
+    `<div>
+       <div class="card-title">${app.title}</div>
+       <div class="card-app">${appKey}</div>
+     </div>
+     <a href="${url}" target="_blank">
+       <span class="url">?app=${appKey}&amp;k=1</span>
+       <span class="arrow">→</span>
+     </a>`;
+  grid.appendChild(card);
+}
+</script>
+</body>
+</html>

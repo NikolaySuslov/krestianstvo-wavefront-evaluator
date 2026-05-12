@@ -1,0 +1,56 @@
+{
+  "name": "krestianstvo-wavefront-evaluator",
+  "version": "0.1.0",
+  "description": "Croquet-TeaTime-inspired, Renkon-driven collaborative computational engine",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./public/krestianstvo-wavefront-evaluator.js"
+    },
+    "./ui": {
+      "import": "./public/ui-elements.js"
+    }
+  },
+  "main": "./public/krestianstvo-wavefront-evaluator.js",
+  "files": [
+    "public/krestianstvo-wavefront-evaluator.js",
+    "public/ui-elements.js",
+    "public/renkon-core-0.10.7.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --port 3000 --root ./public",
+    "pub": "npm publish --access public"
+  },
+  "keywords": [
+    "renkon",
+    "frp",
+    "multiplayer",
+    "collaborative",
+    "croquet",
+    "virtual-time",
+    "websocket",
+    "reactive",
+    "deterministic"
+  ],
+  "author": "Nikolay Suslov",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.0.0",
+    "renkon-core": "^0.10.7"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator"
+  },
+  "homepage": "https://wavefront.krestianstvo.org",
+  "bugs": {
+    "url": "https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator/issues"
+  }
+}

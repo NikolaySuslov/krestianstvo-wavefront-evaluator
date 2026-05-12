@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>KWE</title>
+<style>
+  body { background: #0a0a0a; color: #eee; margin: 0; font-family: ui-monospace, monospace; }
+  #kwe-error { padding: 40px; color: #f85149; font-size: 13px; }
+</style>
+</head>
+<body>
+<script type="module">
+import * as core from "./krestianstvo-wavefront-evaluator.js";
+import * as ui from "./ui-elements.js";
+import { APPS } from "./examples.js";
+
+const { makeMeta, makeWorld, makeView, _worldNextAt, _worldSnapshot } = core;
+const { AVATAR_WORLD_SCRIPT, makeSendCursorMove, makePeerControl } = ui;
+
+// Merged namespace passed to rendererFactory so examples.js can destructure
+// both core and UI helpers from a single object.
+const appApi = { ...core, ...ui };
+
+const WS_URL = 'ws://localhost:3000';
+
+const params  = new URLSearchParams(window.location.search);
+const appKey  = params.get('app') ?? 'counter';
+const app     = APPS[appKey];
+
+if (!app) {
+  document.body.innerHTML =
+    `<div id="kwe-error">Unknown app: <b>${appKey}</b><br>Available: ${Object.keys(APPS).join(', ')}</div>`;
+  throw new Error('Unknown app: ' + appKey);
+}
+
+// k=myID → seloId becomes "counter:myID", so different k values are separate
+// reflector instances while sharing the same app program.
+const instanceKey = params.get('k');
+const seloId = instanceKey ? app.selo + ':' + instanceKey : app.selo;
+
+document.title = 'KWE — ' + app.title + (instanceKey ? ' [' + instanceKey + ']' : '');
+
+// ── Meta + world ──────────────────────────────────────────────────────────────
+const meta = makeMeta('peer_' + seloId, null, app.reflectorMs);
+Object.assign(meta.ps.app, { _worldNextAt, _worldSnapshot, ...app.metaOptions });
+
+const scripts = app.makeScripts(AVATAR_WORLD_SCRIPT);
+const world   = makeWorld(seloId, scripts);
+meta.register(world);
+
+// ── sendCursorMove ────────────────────────────────────────────────────────────
+const peerState = { peers: null };
+const sendCursorMove = makeSendCursorMove(peerState, app.reflectorMs);
+
+// ── injectEvent (wave2d cellClick) ────────────────────────────────────────────
+const injectEvent = (payload) => {
+  const peer = peerState.peers?.find(p => p.seloId === seloId);
+  peer?.injectExternalEvent(payload);
+};
+
+// ── Renderer + view ───────────────────────────────────────────────────────────
+const rendererFactory = app.makeRenderer(appApi);
+const r = rendererFactory(world, 'A', seloId + '-a', sendCursorMove, injectEvent);
+const v = makeView(seloId + 'View', core._VIEW_PROGRAM, { renderFn: r });
+world.ps.app._viewPs = v.ps;
+
+// ── Connect/disconnect bar ────────────────────────────────────────────────────
+makePeerControl(
+  [meta], seloId, WS_URL, peerState,
+  [meta], app.reflectorMs
+);
+</script>
+</body>
+</html>
