@@ -118,7 +118,14 @@ This is why the system feels so "solid" — it isn't just following a list of in
 
 Local Reflector is recursive in its logic, and it can indeed trigger other reflectors or "nest" emulated ticks. Because the Wavefront Evaluator treats time as a continuous priority queue rather than a fixed set of slots, you can think of the local reflector as a "fractal" heartbeat.
 
-How that recursive nesting works within the implementation:
+#### Generating Fractal Heartbeats
+
+Fractal heartbeats form a vector space; they can be added together to yield an object of the same nature. This stands in contrast to harmonic oscillations of different frequences, the sum of which is not a harmonic oscillation.  
+Phase analysis is simplifying.
+
+Orthogonal (perpendicular in space-time) fractal heartbeats are generated through scaling, whereas orthogonal harmonic oscillations are non-homothetic (dissimilar), and each requires separate generation.   
+
+#### How that recursive nesting works within the implementation:
 
 #### 1. Logical Recursion (The "Loop")
 
