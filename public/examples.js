@@ -794,6 +794,163 @@ function makeWave2dRenderer(core) {
   };
 }
 
+// ── Fractal Heartbeat ─────────────────────────────────────────────────────────
+
+const FRACTAL_DEPTH      = 5;
+const FRACTAL_BASE_DELAY = 0.5;   // sub-tick delay (ms) at first cascade level
+const FRACTAL_MIN_DELAY  = 0.0001; // stop cascading below this threshold
+const FRACTAL_CYCLE      = 30;    // global ticks between cascade restarts
+const FRACTAL_DECAY      = 0.14;  // energy decay per global tick
+
+const fractalHeartbeatWorldProgram = `
+  const W         = Renkon.app.W;
+  const reflector = Events.receiver();
+
+  const fractal = Behaviors.collect(
+    { energy: Array(${FRACTAL_DEPTH}).fill(0), cycleId: 0, totalBeats: 0, _beatDepth: -1, _localActive: false },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "fractal", {
+      __macro: (s, p, ctx) => {
+        const energy = (s.energy || []).map(e => Math.max(0, e - ${FRACTAL_DECAY}));
+        if (p.logicalTime % ${FRACTAL_CYCLE} === 1) {
+          ctx.future(0, "initBeat", { cycleId: p.logicalTime });
+          return { ...s, energy, cycleId: p.logicalTime, _localActive: false };
+        }
+        return { ...s, energy };
+      },
+      initBeat: (s, p, ctx) => {
+        if (p.cycleId !== s.cycleId) return s;
+        const energy = [...(s.energy || Array(${FRACTAL_DEPTH}).fill(0))];
+        energy[0] = 1.0;
+        ctx.localReflector("beat", ${FRACTAL_BASE_DELAY});
+        return { ...s, energy, _beatDepth: 0, totalBeats: s.totalBeats + 1, _localActive: true };
+      },
+      beat: (s, p, ctx) => {
+        const depth = s._beatDepth + 1;
+        if (depth >= ${FRACTAL_DEPTH}) return { ...s, _localActive: false };
+        const energy = [...(s.energy || Array(${FRACTAL_DEPTH}).fill(0))];
+        energy[depth] = 1.0;
+        const nextDelay = (p._innerTickDelay ?? ${FRACTAL_BASE_DELAY}) / 2;
+        if (depth + 1 < ${FRACTAL_DEPTH} && nextDelay >= ${FRACTAL_MIN_DELAY}) {
+          ctx.localReflector("beat", nextDelay);
+          return { ...s, energy, _beatDepth: depth, totalBeats: s.totalBeats + 1 };
+        }
+        // Cascade complete — clear _localActive so next cycle's __macro can restart
+        return { ...s, energy, _beatDepth: depth, totalBeats: s.totalBeats + 1, _localActive: false };
+      },
+    })
+  );
+
+  const _isStable = W.stable([fractal], reflector);
+  const _export   = W.export(Renkon, { fractal }, _isStable);
+`;
+
+function makeFractalHeartbeatRenderer(core) {
+  const { _seloInfo, _clientBadge, _renderAvatars } = core;
+  const DEPTH_COLORS = ['#7c3aed', '#2563eb', '#059669', '#d97706', '#dc2626'];
+  const MAX_HISTORY  = 140;
+
+  return (world, peerId, containerId, sendCursorMove) => {
+    const history = [];
+
+    return () => {
+      if (!world?.ps?.app) return;
+      const f = world.getNodeState("fractal");
+      if (!f) return;
+
+      const energy     = f.energy || [];
+      const totalBeats = f.totalBeats || 0;
+      const cycleId    = f.cycleId   || 0;
+      const drainIters = world.ps.app._lastDrainIters ?? 0;
+
+      history.push(energy.slice());
+      if (history.length > MAX_HISTORY) history.shift();
+
+      if (!document.getElementById("fractal-wrap")) {
+        const wrap = document.createElement("div"); wrap.id = "fractal-wrap";
+        Object.assign(wrap.style, { display: "flex", gap: "0", flexWrap: "wrap" });
+        document.body.appendChild(wrap);
+      }
+      let root = document.getElementById(containerId);
+      if (!root) {
+        root = document.createElement("div"); root.id = containerId;
+        Object.assign(root.style, {
+          fontFamily: "ui-monospace,monospace", padding: "20px",
+          background: "#0d0d0d", color: "#eee", borderRadius: "10px",
+          margin: "10px", flex: "1", minWidth: "300px", border: "1px solid #222",
+        });
+        document.getElementById("fractal-wrap").appendChild(root);
+        root.addEventListener('mousemove', (e) => {
+          const rect = root.getBoundingClientRect();
+          const roster = _seloInfo(world);
+          if (!roster?.myId) return;
+          sendCursorMove(world.id, roster.myId, (e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
+        }, { passive: true });
+      }
+
+      const canvasId  = containerId + '-canvas';
+      const cycleMs   = FRACTAL_CYCLE * 50;
+      const depthBars = Array.from({ length: FRACTAL_DEPTH }, (_, d) => {
+        const e       = Math.min(1, energy[d] ?? 0);
+        const col     = DEPTH_COLORS[d] ?? '#888';
+        const pct     = (e * 100).toFixed(1);
+        const delayLbl = d === 0 ? 'init' : (FRACTAL_BASE_DELAY / Math.pow(2, d - 1)).toFixed(3) + 'ms';
+        return `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+            <div style="width:56px;font-size:9px;color:#555;text-align:right;">D${d} · ${delayLbl}</div>
+            <div style="flex:1;background:#161616;border-radius:2px;height:14px;overflow:hidden;">
+              <div style="width:${pct}%;height:100%;background:${col};border-radius:2px;
+                          transition:width 50ms ease-out;box-shadow:0 0 6px ${col}88;"></div>
+            </div>
+            <div style="width:32px;font-size:9px;color:${col};">${e.toFixed(2)}</div>
+          </div>`;
+      }).join('');
+
+      const _av$ = root.querySelector('[data-av]'), _avM$ = root._avatarMap;
+      root.innerHTML = `
+        <div style="font-size:11px;font-weight:bold;color:#444;margin-bottom:12px;letter-spacing:1px;text-align:center;">
+          PEER ${peerId} · FRACTAL HEARTBEAT ${_clientBadge(world)}
+        </div>
+        <div style="font-size:9px;color:#444;margin-bottom:10px;text-align:center;">
+          cascade every ${FRACTAL_CYCLE} ticks (${cycleMs}ms) · ${FRACTAL_DEPTH} depths · base ${FRACTAL_BASE_DELAY}ms
+        </div>
+        ${depthBars}
+        <canvas id="${canvasId}" width="260" height="96"
+          style="width:100%;border-radius:4px;background:#080808;display:block;margin-top:10px;"></canvas>
+        <div style="display:flex;gap:14px;margin-top:8px;font-size:9px;color:#444;">
+          <span>cycle <span style="color:#555">${cycleId}</span></span>
+          <span>beats <span style="color:#555">${totalBeats}</span></span>
+          <span>drain <span style="color:#555">${drainIters}i</span></span>
+        </div>`;
+      if (_av$) { root.style.position = 'relative'; root.appendChild(_av$); root._avatarMap = _avM$; }
+
+      const canvas = document.getElementById(canvasId);
+      if (canvas && history.length > 1) {
+        const CW = canvas.width, CH = canvas.height;
+        const c2d = canvas.getContext("2d");
+        c2d.clearRect(0, 0, CW, CH);
+        for (let d = FRACTAL_DEPTH - 1; d >= 0; d--) {
+          const col = DEPTH_COLORS[d] ?? '#888';
+          c2d.strokeStyle = col;
+          c2d.lineWidth = 1.5;
+          c2d.globalAlpha = 0.55 + d * 0.09;
+          c2d.beginPath();
+          history.forEach((snap, i) => {
+            const x = (i / (MAX_HISTORY - 1)) * CW;
+            const e = Math.min(1, snap[d] ?? 0);
+            const baseline = CH - 2 - d * (CH / FRACTAL_DEPTH);
+            const y = baseline - e * (CH / FRACTAL_DEPTH - 4);
+            if (i === 0) c2d.moveTo(x, y); else c2d.lineTo(x, y);
+          });
+          c2d.stroke();
+        }
+        c2d.globalAlpha = 1;
+      }
+      _renderAvatars(world, root);
+    };
+  };
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 // Each app entry defines everything selo.html needs to boot it.
 //
@@ -807,42 +964,6 @@ function makeWave2dRenderer(core) {
 //   wrapId          DOM id of the flex container that holds both peer panels
 
 export const APPS = {
-  counter: {
-    title:      'Counter / Subcounter',
-    selo:       'counter',
-    reflectorMs: REFLECTOR_MS,
-    metaOptions: { _subtickMs: SUBTICK_MS },
-    makeScripts: (av) => [counterWorldProgram + av],
-    makeRenderer: makeCounterRenderer,
-    wrapId: 'counter-wrap',
-  },
-  feedback: {
-    title:      'Fixed-Point Bisection',
-    selo:       'feedback',
-    reflectorMs: REFLECTOR_MS,
-    metaOptions: { _fbStepMs: FB_STEP_MS },
-    makeScripts: (av) => [feedbackWorldProgram + av],
-    makeRenderer: makeFeedbackRenderer,
-    wrapId: 'feedback-wrap',
-  },
-  zeno: {
-    title:      'Zeno Series',
-    selo:       'zeno',
-    reflectorMs: REFLECTOR_MS,
-    metaOptions: { _subtickMs: SUBTICK_MS },
-    makeScripts: (av) => [zenoWorldProgram + av],
-    makeRenderer: makeZenoRenderer,
-    wrapId: 'zeno-wrap',
-  },
-  rng: {
-    title:      'Deterministic RNG',
-    selo:       'rng',
-    reflectorMs: REFLECTOR_MS,
-    metaOptions: { _subtickMs: SUBTICK_MS, _rngSeed: SESSION_RNG_SEED },
-    makeScripts: (av) => [rngWorldProgram + av],
-    makeRenderer: makeRngRenderer,
-    wrapId: 'rng-wrap',
-  },
   wave2d: {
     title:      '2D Wavefront',
     selo:       'wave2d',
@@ -852,4 +973,49 @@ export const APPS = {
     makeRenderer: makeWave2dRenderer,
     wrapId: 'wave-wrap',
   },
+  fractal: {
+    title:      'Fractal Heartbeat',
+    selo:       'fractal',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _subtickMs: SUBTICK_MS },
+    makeScripts: (av) => [fractalHeartbeatWorldProgram + av],
+    makeRenderer: makeFractalHeartbeatRenderer,
+    wrapId: 'fractal-wrap',
+  },
+  feedback: {
+    title:      'Feedback Loop | Fixed-Point Bisection',
+    selo:       'feedback',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _fbStepMs: FB_STEP_MS },
+    makeScripts: (av) => [feedbackWorldProgram + av],
+    makeRenderer: makeFeedbackRenderer,
+    wrapId: 'feedback-wrap',
+  },
+  zeno: {
+    title:      'Zeno Series | Infinite Future Cascade',
+    selo:       'zeno',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _subtickMs: SUBTICK_MS },
+    makeScripts: (av) => [zenoWorldProgram + av],
+    makeRenderer: makeZenoRenderer,
+    wrapId: 'zeno-wrap',
+  },
+  counter: {
+    title:      'Counter / Subcounter',
+    selo:       'counter',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _subtickMs: SUBTICK_MS },
+    makeScripts: (av) => [counterWorldProgram + av],
+    makeRenderer: makeCounterRenderer,
+    wrapId: 'counter-wrap',
+  },
+  rng: {
+    title:      'Deterministic RNG',
+    selo:       'rng',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _subtickMs: SUBTICK_MS, _rngSeed: SESSION_RNG_SEED },
+    makeScripts: (av) => [rngWorldProgram + av],
+    makeRenderer: makeRngRenderer,
+    wrapId: 'rng-wrap',
+  }
 };
