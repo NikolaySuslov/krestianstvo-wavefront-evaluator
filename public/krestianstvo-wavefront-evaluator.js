@@ -109,9 +109,9 @@ export const W = (() => {
         },
         futureInf: (msg, payload) =>
           effects.push({ kind: "future", fireAt: wallTime, msg, payload, _depth: entryDepth }),
-        localReflector: (tickMsg, innerTickDelay = 0) =>
+        localReflector: (tickMsg, innerTickDelay = 0, extraPayload = {}) =>
           effects.push({ kind: "future", fireAt: wallTime + innerTickDelay,
-                         msg: tickMsg, payload: { _isLocalTick: true, _innerTickDelay: innerTickDelay },
+                         msg: tickMsg, payload: { ...extraPayload, _isLocalTick: true, _innerTickDelay: innerTickDelay },
                          _depth: entryDepth }),
       };
 
@@ -467,7 +467,18 @@ export const makeMeta = (peerId, rngSeed = null, reflectorMs = 50) => {
 
   const getSeloRoster = () => ps.app.seloRoster ?? null;
 
-  return { ps, id: peerId, register, injectPulse, startAutonomous, stopAutonomous, getLocalLt, takeSnapshot, applySnapshot, getSeloRoster };
+  // Reset logical time on all registered worlds so the next reflector pulse
+  // (whatever lt it carries) always passes isNewPulse. Call this when joining
+  // a fresh selo where no snapshot will arrive (sole member).
+  const resetLt = () => {
+    _localLt = 0;
+    for (const [, worldPS] of ps.app.registry) {
+      worldPS.app.logicalTime  = 0;
+      worldPS.app._lastPulseId = 0;
+    }
+  };
+
+  return { ps, id: peerId, register, injectPulse, startAutonomous, stopAutonomous, getLocalLt, resetLt, takeSnapshot, applySnapshot, getSeloRoster };
 };
 
 export const makeWorld = (worldId, programScripts) => {
@@ -625,6 +636,10 @@ const PEER_PROGRAM = `
       const r = app.meta.ps.app;
       r.seloRoster = { myId: msg.clientId, clients: new Map([[msg.clientId, { joinedAt: Date.now() }]]), count: msg.clientsInSelo };
       console.log('%c[PEER] joined selo:' + msg.seloId + ' as ' + msg.clientId + ' (' + msg.clientsInSelo + ' total)', 'color:#58a6ff');
+      if (msg.clientsInSelo === 1) {
+        // Sole member — no snapshot coming. Reset lt so reflector pulses pass isNewPulse.
+        app.meta.resetLt();
+      }
     } else if (msg.type === 'connect') {
       const r = app.meta.ps.app;
       if (r.seloRoster) {

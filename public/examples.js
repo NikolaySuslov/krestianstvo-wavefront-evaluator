@@ -794,25 +794,25 @@ function makeWave2dRenderer(core) {
   };
 }
 
-// ── Fractal Heartbeat ─────────────────────────────────────────────────────────
+// ── Local Reflector (not full) ─────────────────────────────────────────────────────────
 
-const FRACTAL_DEPTH      = 5;
-const FRACTAL_BASE_DELAY = 0.5;   // sub-tick delay (ms) at first cascade level
-const FRACTAL_MIN_DELAY  = 0.0001; // stop cascading below this threshold
-const FRACTAL_CYCLE      = 30;    // global ticks between cascade restarts
-const FRACTAL_DECAY      = 0.14;  // energy decay per global tick
+const FRACTAL_DEPTH_0      = 5;
+const FRACTAL_BASE_DELAY_0 = 0.5;   // sub-tick delay (ms) at first cascade level
+const FRACTAL_MIN_DELAY_0  = 0.0001; // stop cascading below this threshold
+const FRACTAL_CYCLE_0      = 30;    // global ticks between cascade restarts
+const FRACTAL_DECAY_0      = 0.14;  // energy decay per global tick
 
-const fractalHeartbeatWorldProgram = `
+const fractalHeartbeatWorldProgram0 = `
   const W         = Renkon.app.W;
   const reflector = Events.receiver();
 
   const fractal = Behaviors.collect(
-    { energy: Array(${FRACTAL_DEPTH}).fill(0), cycleId: 0, totalBeats: 0, _beatDepth: -1, _localActive: false },
+    { energy: Array(${FRACTAL_DEPTH_0}).fill(0), cycleId: 0, totalBeats: 0, _beatDepth: -1, _localActive: false },
     reflector,
     (state, pulse) => W.reduce(state, pulse, "fractal", {
       __macro: (s, p, ctx) => {
-        const energy = (s.energy || []).map(e => Math.max(0, e - ${FRACTAL_DECAY}));
-        if (p.logicalTime % ${FRACTAL_CYCLE} === 1) {
+        const energy = (s.energy || []).map(e => Math.max(0, e - ${FRACTAL_DECAY_0}));
+        if (p.logicalTime % ${FRACTAL_CYCLE_0} === 1) {
           ctx.future(0, "initBeat", { cycleId: p.logicalTime });
           return { ...s, energy, cycleId: p.logicalTime, _localActive: false };
         }
@@ -820,18 +820,18 @@ const fractalHeartbeatWorldProgram = `
       },
       initBeat: (s, p, ctx) => {
         if (p.cycleId !== s.cycleId) return s;
-        const energy = [...(s.energy || Array(${FRACTAL_DEPTH}).fill(0))];
+        const energy = [...(s.energy || Array(${FRACTAL_DEPTH_0}).fill(0))];
         energy[0] = 1.0;
-        ctx.localReflector("beat", ${FRACTAL_BASE_DELAY});
+        ctx.localReflector("beat", ${FRACTAL_BASE_DELAY_0});
         return { ...s, energy, _beatDepth: 0, totalBeats: s.totalBeats + 1, _localActive: true };
       },
       beat: (s, p, ctx) => {
         const depth = s._beatDepth + 1;
-        if (depth >= ${FRACTAL_DEPTH}) return { ...s, _localActive: false };
-        const energy = [...(s.energy || Array(${FRACTAL_DEPTH}).fill(0))];
+        if (depth >= ${FRACTAL_DEPTH_0}) return { ...s, _localActive: false };
+        const energy = [...(s.energy || Array(${FRACTAL_DEPTH_0}).fill(0))];
         energy[depth] = 1.0;
-        const nextDelay = (p._innerTickDelay ?? ${FRACTAL_BASE_DELAY}) / 2;
-        if (depth + 1 < ${FRACTAL_DEPTH} && nextDelay >= ${FRACTAL_MIN_DELAY}) {
+        const nextDelay = (p._innerTickDelay ?? ${FRACTAL_BASE_DELAY_0}) / 2;
+        if (depth + 1 < ${FRACTAL_DEPTH_0} && nextDelay >= ${FRACTAL_MIN_DELAY_0}) {
           ctx.localReflector("beat", nextDelay);
           return { ...s, energy, _beatDepth: depth, totalBeats: s.totalBeats + 1 };
         }
@@ -845,13 +845,14 @@ const fractalHeartbeatWorldProgram = `
   const _export   = W.export(Renkon, { fractal }, _isStable);
 `;
 
-function makeFractalHeartbeatRenderer(core) {
+function makeFractalHeartbeatRenderer0(core) {
   const { _seloInfo, _clientBadge, _renderAvatars } = core;
   const DEPTH_COLORS = ['#7c3aed', '#2563eb', '#059669', '#d97706', '#dc2626'];
   const MAX_HISTORY  = 140;
 
   return (world, peerId, containerId, sendCursorMove) => {
-    const history = [];
+    const history  = [];
+    let _historyLt = -1;
 
     return () => {
       if (!world?.ps?.app) return;
@@ -862,9 +863,341 @@ function makeFractalHeartbeatRenderer(core) {
       const totalBeats = f.totalBeats || 0;
       const cycleId    = f.cycleId   || 0;
       const drainIters = world.ps.app._lastDrainIters ?? 0;
+      const lt         = world.ps.app.logicalTime || 0;
 
-      history.push(energy.slice());
-      if (history.length > MAX_HISTORY) history.shift();
+      if (lt !== _historyLt) {
+        _historyLt = lt;
+        history.push(energy.slice());
+        if (history.length > MAX_HISTORY) history.shift();
+      }
+
+      if (!document.getElementById("fractal-wrap")) {
+        const wrap = document.createElement("div"); wrap.id = "fractal-wrap";
+        Object.assign(wrap.style, { display: "flex", gap: "0", flexWrap: "wrap" });
+        document.body.appendChild(wrap);
+      }
+      let root = document.getElementById(containerId);
+      if (!root) {
+        root = document.createElement("div"); root.id = containerId;
+        Object.assign(root.style, {
+          fontFamily: "ui-monospace,monospace", padding: "20px",
+          background: "#0d0d0d", color: "#eee", borderRadius: "10px",
+          margin: "10px", flex: "1", minWidth: "300px", border: "1px solid #222",
+        });
+        document.getElementById("fractal-wrap").appendChild(root);
+        root.addEventListener('mousemove', (e) => {
+          const rect = root.getBoundingClientRect();
+          const roster = _seloInfo(world);
+          if (!roster?.myId) return;
+          sendCursorMove(world.id, roster.myId, (e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
+        }, { passive: true });
+      }
+
+      const canvasId  = containerId + '-canvas';
+      const cycleMs   = FRACTAL_CYCLE_0 * 50;
+      const depthBars = Array.from({ length: FRACTAL_DEPTH_0 }, (_, d) => {
+        const e       = Math.min(1, energy[d] ?? 0);
+        const col     = DEPTH_COLORS[d] ?? '#888';
+        const pct     = (e * 100).toFixed(1);
+        const delayLbl = d === 0 ? 'init' : (FRACTAL_BASE_DELAY_0 / Math.pow(2, d - 1)).toFixed(3) + 'ms';
+        return `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+            <div style="width:56px;font-size:9px;color:#555;text-align:right;">D${d} · ${delayLbl}</div>
+            <div style="flex:1;background:#161616;border-radius:2px;height:14px;overflow:hidden;">
+              <div style="width:${pct}%;height:100%;background:${col};border-radius:2px;
+                          transition:width 50ms ease-out;box-shadow:0 0 6px ${col}88;"></div>
+            </div>
+            <div style="width:32px;font-size:9px;color:${col};">${e.toFixed(2)}</div>
+          </div>`;
+      }).join('');
+
+      const _av$ = root.querySelector('[data-av]'), _avM$ = root._avatarMap;
+      root.innerHTML = `
+        <div style="font-size:11px;font-weight:bold;color:#444;margin-bottom:12px;letter-spacing:1px;text-align:center;">
+          PEER ${peerId} · FRACTAL HEARTBEAT ${_clientBadge(world)}
+        </div>
+        <div style="font-size:9px;color:#444;margin-bottom:10px;text-align:center;">
+          cascade every ${FRACTAL_CYCLE_0} ticks (${cycleMs}ms) · ${FRACTAL_DEPTH_0} depths · base ${FRACTAL_BASE_DELAY_0}ms
+        </div>
+        ${depthBars}
+        <canvas id="${canvasId}" width="260" height="96"
+          style="width:100%;border-radius:4px;background:#080808;display:block;margin-top:10px;"></canvas>
+        <div style="display:flex;gap:14px;margin-top:8px;font-size:9px;color:#444;">
+          <span>cycle <span style="color:#555">${cycleId}</span></span>
+          <span>beats <span style="color:#555">${totalBeats}</span></span>
+          <span>drain <span style="color:#555">${drainIters}i</span></span>
+        </div>`;
+      if (_av$) { root.style.position = 'relative'; root.appendChild(_av$); root._avatarMap = _avM$; }
+
+      const canvas = document.getElementById(canvasId);
+      if (canvas && history.length > 1) {
+        const CW = canvas.width, CH = canvas.height;
+        const c2d = canvas.getContext("2d");
+        c2d.clearRect(0, 0, CW, CH);
+        for (let d = FRACTAL_DEPTH_0 - 1; d >= 0; d--) {
+          const col = DEPTH_COLORS[d] ?? '#888';
+          c2d.strokeStyle = col;
+          c2d.lineWidth = 1.5;
+          c2d.globalAlpha = 0.55 + d * 0.09;
+          c2d.beginPath();
+          history.forEach((snap, i) => {
+            const x = (i / (MAX_HISTORY - 1)) * CW;
+            const e = Math.min(1, snap[d] ?? 0);
+            const baseline = CH - 2 - d * (CH / FRACTAL_DEPTH_0);
+            const y = baseline - e * (CH / FRACTAL_DEPTH_0 - 4);
+            if (i === 0) c2d.moveTo(x, y); else c2d.lineTo(x, y);
+          });
+          c2d.stroke();
+        }
+        c2d.globalAlpha = 1;
+      }
+      _renderAvatars(world, root);
+    };
+  };
+}
+
+
+// ── Fractal Heartbeat ─────────────────────────────────────────────────────────
+
+const FRACTAL_DEPTH      = 5;
+const FRACTAL_BASE_DELAY = 8.3;   // outer-tick units; D0=8.3t D1=4.15t D2=2.075t D3=1.0375t D4=0.52t — D0–D3 each cross tick boundaries independently; D4 sub-tick only
+const FRACTAL_MIN_DELAY  = 0.0001; // stop cascading below this threshold
+const FRACTAL_CYCLE      = 200;   // global ticks between cascade restarts (~10s at 50ms/tick)
+const FRACTAL_DECAY      = 0.03;  // energy decay per global tick (~33 ticks to fade, spans the longer cycle)
+
+const fractalHeartbeatWorldProgram = `
+  const W         = Renkon.app.W;
+  const reflector = Events.receiver();
+
+  const fractal = Behaviors.collect(
+    { energy: Array(${FRACTAL_DEPTH}).fill(0), cycleId: 0, totalBeats: 0,
+      spawned: Array(${FRACTAL_DEPTH}).fill(false), tickEvents: [] },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "fractal", {
+      __macro: (s, p, ctx) => {
+        const energy = (s.energy || []).map(e => Math.max(0, e - ${FRACTAL_DECAY}));
+        if (p.logicalTime % ${FRACTAL_CYCLE} === 1) {
+          ctx.future(0, "initBeat", { cycleId: p.logicalTime });
+          return { ...s, energy, cycleId: p.logicalTime,
+                   spawned: Array(${FRACTAL_DEPTH}).fill(false), tickEvents: [] };
+        }
+        return { ...s, energy, tickEvents: [] };
+      },
+      initBeat: (s, p, ctx) => {
+        if (p.cycleId !== s.cycleId) return s;
+        const energy = [...(s.energy || Array(${FRACTAL_DEPTH}).fill(0))];
+        energy[0] = 1.0;
+        ctx.future(${FRACTAL_BASE_DELAY}, "beat",
+          { depth: 0, delay: ${FRACTAL_BASE_DELAY}, cycleId: s.cycleId });
+        return { ...s, energy, totalBeats: s.totalBeats + 1 };
+      },
+      beat: (s, p, ctx) => {
+        if (p.cycleId !== s.cycleId) return s;
+        const { depth, delay } = p;
+        if (depth >= ${FRACTAL_DEPTH}) return s;
+        // Steady continuity: loop at same depth with same delay
+        ctx.future(delay, "beat", { depth, delay, cycleId: s.cycleId });
+        // Recursive branching + energy pulse: only on first beat per cycle per depth
+        const spawned = [...(s.spawned || Array(${FRACTAL_DEPTH}).fill(false))];
+        const energy  = [...(s.energy  || Array(${FRACTAL_DEPTH}).fill(0))];
+        if (!spawned[depth]) {
+          energy[depth] = 1.0;
+          const childDepth = depth + 1;
+          const childDelay = delay / 2;
+          if (childDepth < ${FRACTAL_DEPTH} && childDelay >= ${FRACTAL_MIN_DELAY}) {
+            ctx.future(childDelay, "beat",
+              { depth: childDepth, delay: childDelay, cycleId: s.cycleId });
+          }
+          spawned[depth] = true;
+        }
+        const subT = ctx.wallTime % 1;
+        const tickEvents = [...(s.tickEvents || []), { d: depth, t: subT, wt: ctx.wallTime, delay }];
+        return { ...s, energy, spawned, totalBeats: s.totalBeats + 1, tickEvents };
+      },
+    })
+  );
+
+  const _wtFloor  = Math.floor(reflector.wallTime ?? 0);
+  const _isStable = (fractal._nextAt ?? Infinity) >= _wtFloor + 1 && W.stable([fractal], reflector);
+  const _export   = W.export(Renkon, { fractal }, _isStable);
+`;
+
+function makeFractalHeartbeatRenderer(core) {
+  const { _seloInfo, _clientBadge, _renderAvatars } = core;
+  const DEPTH_COLORS = ['#E34A27', '#FEA655', '#FFD98E', '#566357', '#909473'];
+  const MAX_HISTORY  = 140;
+
+  const TL_HISTORY = 15;
+
+  return (world, peerId, containerId, sendCursorMove) => {
+    const history   = [];
+    const tlHistory = Array.from({ length: TL_HISTORY }, () => ({ events: [], energy: [], lt: 0 }));
+    let _historyLt  = -1;
+
+    // RAF state for oscillator phase wheels
+    let _rafId      = null;
+    let _lastTickMs = Date.now();
+    let _liveEnergy = Array(FRACTAL_DEPTH).fill(0);
+    // Phase at the last received logical tick — deterministic across peers.
+    // _ltPhase[d] = lt / (FRACTAL_BASE_DELAY / 2^d), set each time lt changes.
+    let _ltPhase    = Array(FRACTAL_DEPTH).fill(0);
+    let _lastLt     = 0;
+    // Current macro-cycle cursor fraction (0..1), updated each outer tick
+    let _cycleFrac  = 0;
+    // Offscreen canvas holding static beat marks — composited in RAF with live cursors on top
+    let _tlStatic   = null;
+    // Last known sub-tick position (0..1) per depth — persists across ticks
+    let _lastBeatT  = Array(FRACTAL_DEPTH).fill(null);
+
+    const _drawOscWheels = () => {
+      const pwCanvas = document.getElementById(containerId + '-canvas-pw');
+      if (!pwCanvas) { _rafId = requestAnimationFrame(_drawOscWheels); return; }
+
+      const CW = pwCanvas.width, CH = pwCanvas.height;
+      const c2d = pwCanvas.getContext('2d');
+      const elapsedMs = Date.now() - _lastTickMs;
+
+      // Each depth d: period P_d = FRACTAL_BASE_DELAY / 2^d ticks.
+      // Base phase is set deterministically from logicalTime each tick — same on every peer.
+      // RAF interpolates forward by elapsedMs for smooth animation only.
+      const WR   = 22;
+      const GAP  = CW / FRACTAL_DEPTH;
+      const cy   = WR + 6;
+
+      c2d.clearRect(0, 0, CW, CH);
+
+      for (let d = 0; d < FRACTAL_DEPTH; d++) {
+        const periodTicks = FRACTAL_BASE_DELAY / Math.pow(2, d);
+        const periodMs    = periodTicks * REFLECTOR_MS;
+        const cx          = GAP * d + GAP / 2;
+        const e           = Math.min(1, _liveEnergy[d] ?? 0);
+        const col         = DEPTH_COLORS[d];
+
+        // Wheel rim
+        c2d.strokeStyle = '#1a1a28';
+        c2d.lineWidth   = 1;
+        c2d.globalAlpha = 0.7;
+        c2d.beginPath(); c2d.arc(cx, cy, WR, 0, Math.PI * 2); c2d.stroke();
+
+        // Phase: deterministic base from lt + smooth interpolation forward in time
+        const cyclesElapsed = _ltPhase[d] + elapsedMs / periodMs;
+
+        // Motion-blur: draw enough hand positions to cover the arc traced this RAF frame
+        const spinsPerFrame = 16.7 / periodMs;
+        const SAMPLES       = Math.max(1, Math.min(48, Math.ceil(spinsPerFrame * 6)));
+        const baseAlpha     = (0.15 + e * 0.75) / Math.sqrt(SAMPLES);
+
+        c2d.strokeStyle = col;
+        c2d.lineWidth   = 1.5;
+        c2d.globalAlpha = baseAlpha;
+        for (let s = 0; s < SAMPLES; s++) {
+          const t     = (s + 1) / SAMPLES;
+          const phase = cyclesElapsed - spinsPerFrame * (1 - t);
+          const a     = phase * Math.PI * 2 - Math.PI / 2;
+          c2d.beginPath();
+          c2d.moveTo(cx, cy);
+          c2d.lineTo(cx + WR * Math.cos(a), cy + WR * Math.sin(a));
+          c2d.stroke();
+        }
+
+        // Leading hand
+        const tipAngle = cyclesElapsed * Math.PI * 2 - Math.PI / 2;
+        c2d.strokeStyle = col;
+        c2d.lineWidth   = 2.5;
+        c2d.globalAlpha = 0.9;
+        c2d.shadowColor = col;
+        c2d.shadowBlur  = 6;
+        c2d.beginPath();
+        c2d.moveTo(cx, cy);
+        c2d.lineTo(cx + WR * Math.cos(tipAngle), cy + WR * Math.sin(tipAngle));
+        c2d.stroke();
+        c2d.shadowBlur = 0;
+
+        // Center dot
+        c2d.fillStyle   = col;
+        c2d.globalAlpha = 0.4 + e * 0.5;
+        c2d.beginPath(); c2d.arc(cx, cy, 2, 0, Math.PI * 2); c2d.fill();
+
+        // Depth label
+        c2d.fillStyle   = col;
+        c2d.globalAlpha = 0.5 + e * 0.45;
+        c2d.font        = '7px ui-monospace';
+        c2d.textAlign   = 'center';
+        c2d.fillText('D' + d, cx, cy + WR + 11);
+
+        // Period label
+        c2d.fillStyle   = '#2a2a35';
+        c2d.globalAlpha = 1;
+        c2d.font        = '6px ui-monospace';
+        c2d.fillText(periodMs.toFixed(1) + 'ms', cx, cy + WR + 20);
+      }
+
+      c2d.globalAlpha = 1;
+
+      // Waterfall live cursors — composite static beat marks then draw animated cursor lines
+      const tlCanvas = document.getElementById(containerId + '-canvas-tl');
+      if (tlCanvas && _tlStatic) {
+        const tc  = tlCanvas.getContext('2d');
+        const TCW = tlCanvas.width, TCH = tlCanvas.height;
+        const PAD_L = 14, PAD_R = 4, PAD_T = 2, PAD_B = 12;
+        const TW    = TCW - PAD_L - PAD_R;
+        const TH    = TCH - PAD_T - PAD_B;
+        const LANE_W = TW / FRACTAL_DEPTH;
+        tc.clearRect(0, 0, TCW, TCH);
+        tc.drawImage(_tlStatic, 0, 0);
+        // Single cursor at current cycle position — same for all lanes and waterfall 1
+        const cycleMs    = FRACTAL_CYCLE * REFLECTOR_MS;
+        const liveFrac   = (_cycleFrac + elapsedMs / cycleMs) % 1;
+        for (let d = 0; d < FRACTAL_DEPTH; d++) {
+          const lx = PAD_L + d * LANE_W + liveFrac * LANE_W;
+          tc.strokeStyle = DEPTH_COLORS[d];
+          tc.lineWidth   = 1.5;
+          tc.globalAlpha = 0.6;
+          tc.beginPath();
+          tc.moveTo(lx, PAD_T);
+          tc.lineTo(lx, PAD_T + TH);
+          tc.stroke();
+        }
+        tc.globalAlpha = 1;
+      }
+
+      _rafId = requestAnimationFrame(_drawOscWheels);
+    };
+
+    return () => {
+      if (!world?.ps?.app) return;
+      const f = world.getNodeState("fractal");
+      if (!f) return;
+
+      const energy     = f.energy || [];
+      const totalBeats = f.totalBeats || 0;
+      const cycleId    = f.cycleId   || 0;
+      const drainIters = world.ps.app._lastDrainIters ?? 0;
+      const lt         = world.ps.app.logicalTime || 0;
+
+      if (lt !== _historyLt) {
+        _historyLt = lt;
+        _lastLt    = lt;
+        _lastTickMs = Date.now();
+        // Phase at this tick is purely lt / period_in_ticks — same on every peer.
+        for (let d = 0; d < FRACTAL_DEPTH; d++) {
+          const periodTicks = FRACTAL_BASE_DELAY / Math.pow(2, d);
+          _ltPhase[d] = lt / periodTicks;
+        }
+        _cycleFrac  = (lt % FRACTAL_CYCLE) / FRACTAL_CYCLE;
+        _liveEnergy = energy.slice();
+        history.push(energy.slice());
+        if (history.length > MAX_HISTORY) history.shift();
+        const tickEvs = (f.tickEvents || []).slice();
+        for (const { d, t } of tickEvs) {
+          if (d < FRACTAL_DEPTH) _lastBeatT[d] = t;
+        }
+        tlHistory.push({ events: tickEvs, energy: (f.energy || []).slice(), lt });
+        if (tlHistory.length > TL_HISTORY) tlHistory.shift();
+      }
+
+      // Start RAF loop for oscillator wheels on first render
+      if (!_rafId) _rafId = requestAnimationFrame(_drawOscWheels);
 
       if (!document.getElementById("fractal-wrap")) {
         const wrap = document.createElement("div"); wrap.id = "fractal-wrap";
@@ -894,7 +1227,7 @@ function makeFractalHeartbeatRenderer(core) {
         const e       = Math.min(1, energy[d] ?? 0);
         const col     = DEPTH_COLORS[d] ?? '#888';
         const pct     = (e * 100).toFixed(1);
-        const delayLbl = d === 0 ? 'init' : (FRACTAL_BASE_DELAY / Math.pow(2, d - 1)).toFixed(3) + 'ms';
+        const delayLbl = (FRACTAL_BASE_DELAY / Math.pow(2, d)).toFixed(4) + 't';
         return `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
             <div style="width:56px;font-size:9px;color:#555;text-align:right;">D${d} · ${delayLbl}</div>
@@ -917,6 +1250,15 @@ function makeFractalHeartbeatRenderer(core) {
         ${depthBars}
         <canvas id="${canvasId}" width="260" height="96"
           style="width:100%;border-radius:4px;background:#080808;display:block;margin-top:10px;"></canvas>
+        <div style="font-size:9px;color:#333;margin-top:10px;margin-bottom:3px;letter-spacing:0.5px;">WATERFALL + PHASE  <span style="color:#222">ring=depth · angle=sub-tick · arms=live oscillators</span></div>
+        <canvas id="${canvasId}-tl1" width="260" height="260"
+          style="width:100%;border-radius:50%;background:#050508;display:block;"></canvas>
+        <div style="font-size:9px;color:#333;margin-top:10px;margin-bottom:3px;letter-spacing:0.5px;">PHASE LANES  <span style="color:#222">x=phase within depth period · cursor synced to wheel</span></div>
+        <canvas id="${canvasId}-tl" width="260" height="100"
+          style="width:100%;border-radius:4px;background:#050508;display:block;"></canvas>
+        <div style="font-size:9px;color:#333;margin-top:10px;margin-bottom:3px;letter-spacing:0.5px;">OSCILLATOR WHEELS  <span style="color:#222">live · each depth spins at its own frequency</span></div>
+        <canvas id="${containerId}-canvas-pw" width="260" height="76"
+          style="width:100%;border-radius:4px;background:#050508;display:block;"></canvas>
         <div style="display:flex;gap:14px;margin-top:8px;font-size:9px;color:#444;">
           <span>cycle <span style="color:#555">${cycleId}</span></span>
           <span>beats <span style="color:#555">${totalBeats}</span></span>
@@ -945,6 +1287,158 @@ function makeFractalHeartbeatRenderer(core) {
           c2d.stroke();
         }
         c2d.globalAlpha = 1;
+      }
+
+      // Shared cycle-position x-axis helper: (wallTime % FRACTAL_CYCLE) / FRACTAL_CYCLE
+      const _cycleX = (wt) => (wt % FRACTAL_CYCLE) / FRACTAL_CYCLE;
+      const _cursorFrac = (lt % FRACTAL_CYCLE) / FRACTAL_CYCLE;
+
+      /* cascade waterfall (x=cycle position) — commented out
+      const tl0Canvas = document.getElementById(canvasId + '-tl0');
+      if (tl0Canvas) { ... }
+      */
+
+      // Circular waterfall: each depth has a fixed ring, angle = sub-tick pos
+      // Marks appear at beat angle and fade over time (newest = brightest)
+      const tl1Canvas = document.getElementById(canvasId + '-tl1');
+      if (tl1Canvas) {
+        const CW   = tl1Canvas.width, CH = tl1Canvas.height;
+        const cx   = CW / 2, cy = CH / 2;
+        const R_MAX = Math.min(cx, cy) - 6;
+        const R_MIN = 18;
+        // Each depth gets its own fixed ring: D0 outermost, D4 innermost
+        const depthR = (d) => R_MAX - d * (R_MAX - R_MIN) / (FRACTAL_DEPTH - 1);
+        const RING_W = (R_MAX - R_MIN) / (FRACTAL_DEPTH - 1) * 0.38; // arc band half-width
+        const ARC_W  = 0.04 * Math.PI; // angular half-width of each mark
+        const c2d    = tl1Canvas.getContext('2d');
+        c2d.clearRect(0, 0, CW, CH);
+
+        // Faint depth rings
+        for (let d = 0; d < FRACTAL_DEPTH; d++) {
+          const r = depthR(d);
+          c2d.strokeStyle = DEPTH_COLORS[d]; c2d.lineWidth = 0.5; c2d.globalAlpha = 0.08;
+          c2d.beginPath(); c2d.arc(cx, cy, r, 0, Math.PI * 2); c2d.stroke();
+        }
+
+        // Radial grid lines at 0.0, 0.25, 0.5, 0.75
+        for (let g = 0; g < 4; g++) {
+          const a = (g / 4) * Math.PI * 2 - Math.PI / 2;
+          c2d.strokeStyle = '#1e1e28'; c2d.lineWidth = 1; c2d.globalAlpha = 0.4;
+          c2d.beginPath();
+          c2d.moveTo(cx + R_MIN * Math.cos(a), cy + R_MIN * Math.sin(a));
+          c2d.lineTo(cx + R_MAX * Math.cos(a), cy + R_MAX * Math.sin(a));
+          c2d.stroke();
+        }
+
+        // Beat marks — all history rows, each depth at its fixed ring
+        // Newest row (idx=TL_HISTORY-1) brightest, oldest (idx=0) faintest
+        tlHistory.forEach(({ events, energy: rowEnergy }, idx) => {
+          const age = idx / (TL_HISTORY - 1); // 0=oldest, 1=newest
+          for (const { d, t } of events) {
+            if (d >= FRACTAL_DEPTH) continue;
+            const e     = Math.min(1, rowEnergy[d] ?? 0);
+            const col   = DEPTH_COLORS[d] ?? '#888';
+            const alpha = age * (0.4 + e * 0.6);
+            const r     = depthR(d);
+            const angle = t * Math.PI * 2 - Math.PI / 2;
+            const r0    = r - RING_W;
+            const r1    = r + RING_W;
+            c2d.fillStyle   = col;
+            c2d.globalAlpha = alpha;
+            c2d.shadowColor = col;
+            c2d.shadowBlur  = age * (4 + e * 8);
+            c2d.beginPath();
+            c2d.arc(cx, cy, r1, angle - ARC_W, angle + ARC_W);
+            c2d.arc(cx, cy, r0, angle + ARC_W, angle - ARC_W, true);
+            c2d.closePath();
+            c2d.fill();
+            c2d.shadowBlur = 0;
+          }
+          c2d.globalAlpha = 1;
+        });
+
+        // Phase arms overlay — arm rotates with macro cycle; tip dot at last-beat sub-tick angle
+        const handAngle = (lt % FRACTAL_CYCLE) / FRACTAL_CYCLE * Math.PI * 2 - Math.PI / 2;
+        for (let d = FRACTAL_DEPTH - 1; d >= 0; d--) {
+          const e   = Math.min(1, energy[d] ?? 0);
+          const dr  = depthR(d);
+          const col = DEPTH_COLORS[d];
+          c2d.strokeStyle = col; c2d.lineWidth = 1 + e * 2;
+          c2d.globalAlpha = 0.15 + e * 0.85;
+          c2d.shadowColor = col; c2d.shadowBlur = e * e * 40;
+          c2d.beginPath();
+          c2d.moveTo(cx, cy);
+          c2d.lineTo(cx + dr * Math.cos(handAngle), cy + dr * Math.sin(handAngle));
+          c2d.stroke();
+          c2d.shadowBlur = 0;
+        }
+
+        // Center dot
+        c2d.fillStyle = '#1a1a28'; c2d.globalAlpha = 1;
+        c2d.beginPath(); c2d.arc(cx, cy, R_MIN - 4, 0, Math.PI * 2); c2d.fill();
+
+        // Tick counter
+        c2d.fillStyle = '#252535'; c2d.font = '8px ui-monospace';
+        c2d.textAlign = 'center'; c2d.globalAlpha = 1;
+        c2d.fillText((lt % FRACTAL_CYCLE) + ' / ' + FRACTAL_CYCLE, cx, CH - 4);
+        c2d.globalAlpha = 1;
+      }
+
+      const tlCanvas = document.getElementById(canvasId + '-tl');
+      if (tlCanvas) {
+        const CW = tlCanvas.width, CH = tlCanvas.height;
+        const PAD_L = 14, PAD_R = 4, PAD_T = 2, PAD_B = 12;
+        const TW = CW - PAD_L - PAD_R;
+        const TH = CH - PAD_T - PAD_B;
+        const ROW_H = TH / TL_HISTORY;
+        const LANE_W = TW / FRACTAL_DEPTH;
+
+        // Draw static beat marks into offscreen canvas; RAF composites it + live cursors
+        if (!_tlStatic || _tlStatic.width !== CW || _tlStatic.height !== CH) {
+          _tlStatic = document.createElement('canvas');
+          _tlStatic.width = CW; _tlStatic.height = CH;
+        }
+        const sc = _tlStatic.getContext('2d');
+        sc.clearRect(0, 0, CW, CH);
+
+        // Lane dividers + depth labels
+        for (let d = 0; d < FRACTAL_DEPTH; d++) {
+          const lx = PAD_L + d * LANE_W;
+          sc.strokeStyle = '#181820'; sc.lineWidth = 1; sc.globalAlpha = 0.5;
+          sc.beginPath(); sc.moveTo(lx, PAD_T); sc.lineTo(lx, PAD_T + TH); sc.stroke();
+          sc.fillStyle = DEPTH_COLORS[d]; sc.globalAlpha = 0.4;
+          sc.font = '6px ui-monospace'; sc.textAlign = 'left';
+          sc.fillText('D' + d, lx + 2, PAD_T + 7);
+        }
+
+        // Beat marks: x = cycle position within lane (same axis as waterfall 1)
+        tlHistory.forEach(({ events, energy: rowEnergy }, idx) => {
+          const age  = idx / (TL_HISTORY - 1);
+          const rowY = PAD_T + idx * ROW_H;
+          const markH = Math.max(2, ROW_H);
+          for (const { d, wt } of events) {
+            if (d >= FRACTAL_DEPTH || wt == null) continue;
+            const frac  = _cycleX(wt);
+            const e     = Math.min(1, rowEnergy[d] ?? 0);
+            const col   = DEPTH_COLORS[d] ?? '#888';
+            const lx    = PAD_L + d * LANE_W;
+            const alpha = (0.25 + age * 0.55) + e * 0.20;
+            const mx    = lx + frac * LANE_W;
+            sc.fillStyle   = col;
+            sc.globalAlpha = alpha;
+            sc.shadowColor = col;
+            sc.shadowBlur  = 4 + e * 6;
+            sc.fillRect(mx - 2, rowY, 4, markH);
+            sc.shadowBlur  = 0;
+          }
+          sc.globalAlpha = 1;
+        });
+
+        // Highlight newest row
+        sc.globalAlpha = 0.06;
+        sc.fillStyle = '#ffffff';
+        sc.fillRect(PAD_L, PAD_T + (TL_HISTORY - 1) * ROW_H, TW, ROW_H);
+        sc.globalAlpha = 1;
       }
       _renderAvatars(world, root);
     };
@@ -980,6 +1474,15 @@ export const APPS = {
     metaOptions: { _subtickMs: SUBTICK_MS },
     makeScripts: (av) => [fractalHeartbeatWorldProgram + av],
     makeRenderer: makeFractalHeartbeatRenderer,
+    wrapId: 'fractal-wrap',
+  },
+  fractal0: {
+    title:      'Local Reflector',
+    selo:       'fractal0',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _subtickMs: SUBTICK_MS },
+    makeScripts: (av) => [fractalHeartbeatWorldProgram0 + av],
+    makeRenderer: makeFractalHeartbeatRenderer0,
     wrapId: 'fractal-wrap',
   },
   feedback: {

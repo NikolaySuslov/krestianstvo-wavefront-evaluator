@@ -89,7 +89,7 @@ The "Drain" phase, where the Meta-program loops until all queues are empty, is a
 
 * **In physics**: A system will naturally move toward a state of maximum entropy or minimum potential energy (stability).
 
-* **In the algorithm**: The messages in the local queues are like "Potential Energy." As the nodes fire, they "dissipate" that energy. When the queues are empty, the system has reached Stability (Equilibrium). The "Stable" flag in code is literally the signal that the system has settled into its lowest "energy" state for that tick.
+* **In the algorithm**: The messages in the local queues are like "Potential Energy." As the nodes fire, they "dissipate" that energy. When all remaining queue entries are scheduled beyond the current tick boundary (`fireAt > wallTime`), the system has reached Stability (Equilibrium) for this tick. The "Stable" flag is the signal that the system has settled into its lowest "energy" state — no ready work remains, no feedback loop is in progress, and no cross-node message is in-flight.
 
 
 #### 4. Zeno’s Paradox & The Geometric Series (Sub-tick Futures)
@@ -130,10 +130,10 @@ Orthogonal (perpendicular in space-time) fractal heartbeats are generated throug
 #### 1. Logical Recursion (The "Loop")
 
 The most basic form of recursion is a single node "ticking" itself. In the krestianstvo-wavefront-evaluator.js code, this is handled by a state-guarded feedback loop.
-* Step 1: A node receives a pulse and calls ctx.localReflector(0.1).
-* Step 2: The Evaluator puts a message in the queue for T + 0.1.
-* Step 3: When the clock hits 0.1, the node receives a __local_tick message.
-* Step 4: The node's logic immediately calls ctx.localReflector(0.1) again.
+* Step 1: A node receives a pulse and calls `ctx.localReflector("tick", 0.1)`.
+* Step 2: The Evaluator enqueues a future at `wallTime + 0.1` carrying `{ _isLocalTick: true, _innerTickDelay: 0.1 }`.
+* Step 3: When the drain loop reaches `wallTime + 0.1`, the node receives the message named `"tick"` (the first argument you passed — not a fixed `__local_tick` name).
+* Step 4: The node's handler calls `ctx.localReflector("tick", 0.1)` again, re-enqueuing for the next step.
 
 Is it truly recursive?
 
@@ -260,13 +260,15 @@ A wave is `stable` when its micro phase has fully drained — all pending future
 
 **Warp** handles the case where a new shared pulse arrives with `logicalTime > lastLT + 1` — the peer missed one or more pulses. The evaluator synthetically advances `wallTime` through the remaining queue entries until stable, then proceeds to the new pulse.
 
+Three conditions must all hold before warp fires: `pulse.logicalTime > lastLT + 1` (gap detected), `lastLT > 0` (not the very first pulse), and `!world.isStable` (the previous tick did not fully settle). If the world already reached stability before the gap was noticed, warp is skipped.
+
 Warp does **not** fire on normal sequential pulses (`LT+1`). With pure logical time, a world may legitimately have pending futures when the next pulse arrives — those drain normally. Only genuine missed pulses trigger warp.
 
 Warp preserves determinism because the synthetic `wallTime` values injected during the loop are derived from the node queue's own `fireAt` entries — the same values that the heartbeat would have delivered in real time, in the same order. Both peers warp through the same sequence and reach the same state.
 
 ### Drain
 
-**Drain** exhausts all ready queue entries within a micro phase. Condition: stop when `_worldNextAt >= wallTime + SUBTICK_MS` — the next future is in the next tick or later. After the drain, an outbox flush delivers any pending `ctx.send()` messages.
+**Drain** exhausts all ready queue entries within a micro phase. Stop condition: `_worldNextAt(world) >= wallTime + SUBTICK_MS` — where `_worldNextAt` is the minimum `_nextAt` across all node states. When that minimum is beyond the current tick boundary, no node has any ready work. Queues may still contain entries — they are simply all future-dated. After the drain, an outbox flush runs an extra evaluate only if the outbox is non-empty, delivering any pending `ctx.send()` messages.
 
 ### Stability
 
@@ -276,7 +278,7 @@ A world is **stable** when three conditions all hold:
 2. No node is mid-feedback-loop (`_depth === 0` on all nodes)
 3. The shared outbox is empty — no `ctx.send()` message is pending delivery
 
-Conditions 1 and 2 are checked by `W.stable()` generically across all nodes. Condition 3 guards against a subtle timing issue: a `ctx.send()` written by one node during an evaluate pass lands in the outbox, not a queue — so the queue check alone would miss it. Without the outbox check, the drain loop exits while a message is in-flight, the receiving node never processes it, and the wave terminates prematurely. The application's own semantic completion condition (e.g. `stepsDone >= stepsTarget`) is defined by the user in `WORLD_PROGRAM` and combined with `W.stable()` in the `_isStable` expression.
+All three conditions are checked together inside `W.stable()` — the outbox check is not a separate step. Condition 3 guards against a subtle timing issue: a `ctx.send()` written by one node during an evaluate pass lands in the outbox, not a queue — so the queue check alone would miss it. Without the outbox check, the drain loop exits while a message is in-flight, the receiving node never processes it, and the wave terminates prematurely. The application's own semantic completion condition (e.g. `stepsDone >= stepsTarget`) is defined by the user in `WORLD_PROGRAM` and combined with `W.stable()` in the `_isStable` expression.
 
 ### Reflector
 
@@ -322,11 +324,12 @@ The **Reflector** is the Krestianstvo - equivalent, that stamps and broadcasts p
 
 `META_PROGRAM` is a Renkon program that runs *above* the world programs. It receives pulses from the Reflector via a queued receiver (`Events.receiver({queued: true})`), processes each pulse in order (backpressure-safe), and drives the wavefront for each registered world by calling `worldps.registerEvent` and `worldps.evaluate()` in a controlled loop.
 
-Order:
+For each pulse × world, in order:
 
-1. **WARP** — fires only when `logicalTime > lastLT + 1` (peer missed pulses). Drains world synchronously via `_worldNextAt` until stable. Catches up a lagged peer to authoritative state.
-2. **DRAIN** — fires all futures with `fireAt < wallTime + SUBTICK_MS`. Stops when next future is in the next tick.
-3. **Outbox flush** — one extra evaluate to deliver pending `ctx.send()` messages.
+1. **WARP** — fires only when `isNewPulse && lastLT > 0 && !world.isStable && pulse.logicalTime > lastLT + 1` (new pulse arrived, peer missed ticks, and prior tick didn't settle). Calls `registerEvent` + `evaluate()` in a loop using `_worldNextAt` as the advancing `wallTime`, with `isSubTick: true`. Safety cap: 1000 iterations.
+2. **MACRO** — fires on every new pulse (`isNewPulse || lastLT === 0`). Increments `_currentEvalGen`, calls `registerEvent(pulse)` + `evaluate()`.
+3. **DRAIN** — immediately after macro, loops while `!world.isStable && _worldNextAt(world) < wallTime + SUBTICK_MS`. Each iteration increments `_currentEvalGen`, calls `registerEvent` with advancing `wallTime` and `isSubTick: true`. Safety cap: 10000 iterations.
+4. **Outbox flush** — one extra evaluate, only if `world._outbox` is non-empty after drain. Uses `isSubTick: true` at current `wallTime` (no `wallTime` advance). Delivers pending `ctx.send()` messages before stability is checked.
 
 META_PROGRAM never knows the names of nodes inside a world. All world-level introspection goes through generic host helpers (`_worldNextAt`, `_worldSnapshot`).
 
@@ -334,18 +337,18 @@ META_PROGRAM never knows the names of nodes inside a world. All world-level intr
 
 `W` is the functional core of each node. Its `reduce` function takes `(state, pulse, nodeId, handlers)` and returns a new state. On each call it:
 
-1. Collects inbound outbox messages written by a *previous* evalGen — same-gen messages are deferred to the next evaluate pass, preventing a node from consuming a message written by another node in the same pass
-2. Collects inbound `send()` messages for this node from the outbox
-3. Splits the node's own queue into ready (fireAt ≤ wallTime) and later entries
-4. Injects `__macro` at the front of the ready list on non-sub-tick pulses — **once per `logicalTime`**. `W.reduce` tracks `_lt` (the last `logicalTime` for which `__macro` was injected) as infrastructure state alongside `_queue` and `_nextAt`. If `_lt === logicalTime`, `__macro` is skipped — preventing double-firing under warp replay. This makes incremental `__macro` the default: the handler is guaranteed to be called at most once per logical tick, and can freely choose to do nothing when its inputs haven't changed
-5. Runs each ready entry through its handler, collecting `future` and `send` effects
-6. Enqueues futures into the node's new queue; deposits sends into the outbox
-7. Returns the new state with updated `_queue`, `_nextAt`, `_depth`, and `_lt` (infrastructure fields stripped by `W.getState` before the view layer sees them)
+1. **Restore check** — if `pulse._restoreState[nodeId]` exists, return it immediately (snapshot replay, bypasses all normal logic).
+2. **Inbound outbox** — collects messages from `appRef._outbox[nodeId]` where `_evalGen < _currentEvalGen` (previous evalGen only). Consumed entries are removed from the outbox; remaining same-gen entries stay. This prevents a node from consuming a `ctx.send()` written in the same evaluate pass.
+3. **Queue split** — splits `state._queue` into `ready` (fireAt ≤ wallTime) and `later` (fireAt > wallTime). Merges `inbound` + `ownReady` into `allReady`.
+4. **`__macro` injection** — if `!isSubTick && (state._lt ?? -1) !== logicalTime`, prepends `{msg: "__macro", payload: pulse, _depth: 0}` to `allReady`. Skipped on sub-tick evaluates and if `_lt` already equals `logicalTime` (warp-replay guard). `_lt` is updated to `logicalTime` on macro pulses; preserved as-is on sub-tick pulses.
+5. **Handler dispatch** — iterates `allReady`, calls `handlers[entry.msg](userState, entry.payload, ctx)`. Unknown messages are silently skipped. `ctx.depth` equals the entry's `_depth`. Tracks `maxDepthSeen` across all entries.
+6. **Effect collection** — `ctx.future` pushes `{kind:"future", fireAt: wallTime+delay, ...}`. `ctx.send` pushes to `appRef._outbox[targetId]` stamped with `_currentEvalGen`. `ctx.feedback` pushes a future at `wallTime + _fbStepMs` with `_depth + 1`, silently no-ops if `entryDepth >= maxDepth`. `ctx.futureInf` pushes `fireAt: wallTime`. `ctx.localReflector` pushes `fireAt: wallTime + innerTickDelay` with `{_isLocalTick: true, _innerTickDelay, ...extraPayload}`.
+7. **Returns** `{ ...userState, _queue: newQueue, _nextAt: _Q.nextAt(newQueue), _depth: maxDepthSeen, _lt }` — infrastructure fields stripped by `W.getState` before the view layer sees them.
 
 
 `_nextAt` — the timestamp of the next pending entry — is the signal that `_worldNextAt` reads to drive the drain loop. It is written on every `reduce` call without any node-name coupling.
 
-Outbox entries are stamped with `_evalGen` (the evaluation generation at write time). When a node reads its inbound messages it only consumes entries from a **previous** evalGen — entries written in the current evaluate pass are left for the next pass. This ensures that a `ctx.send()` message written by node A is not destroyed before node B reads it, even when both nodes evaluate in the same `evaluate()` call.
+Outbox entries are stamped with `_evalGen` (the evaluation generation at write time). When a node reads its inbound messages it only consumes entries from a **previous** evalGen — entries written in the current evaluate pass are filtered out and discarded from the outbox. This means `ctx.send()` messages written in evaluate pass N are consumed in pass N+1 (the next `evaluate()` call or drain iteration), ensuring that a message written by node A is available to node B on the next pass rather than the same one.
 
 Each `Behaviors.collect` wraps one W node:
 
@@ -364,7 +367,12 @@ const counter = Behaviors.collect(
 
 ### Stability
 
-`W.stable(nodes, pulse)` returns `true` when all node queues have only future-dated entries, no node is mid-feedback, and the outbox is empty. World programs export `_isStable = W.stable([...nodes], reflector)` which META_PROGRAM reads via `world.isStable`.
+`W.stable(nodes, pulse)` returns `true` when:
+- `appRef._outbox` is empty (no pending `ctx.send()` messages)
+- every node's `_queue` has all entries with `fireAt > wallTime` (strictly future — nothing ready to fire)
+- every node's `_depth === 0` (no in-progress feedback loop)
+
+`nodes` may contain nested arrays — `W.stable` flattens them. A `null` node is treated as stable. World programs export `_isStable = W.stable([...nodes], reflector)` which META_PROGRAM reads via `world.isStable`.
 
 
 ## ctx Primitives
@@ -373,9 +381,42 @@ const counter = Behaviors.collect(
 |-----------|-----------|
 | `ctx.future(delay, msg, payload)` | Schedule `msg` after `delay` logical ticks |
 | `ctx.send(nodeId, msg, payload)` | Cross-node message via evalGen-gated outbox |
-| `ctx.feedback(msg, payload, maxDepth)` | Depth-tracked same-tick future (convergence loops) |
-| `ctx.futureInf(msg, payload)` | `fireAt = wallTime` — re-enqueues every drain pass |
-| `ctx.localReflector(tickMsg, delay)` | Sub-tick self-hosting clock step |
+| `ctx.feedback(msg, payload, maxDepth)` | Depth-tracked future at `wallTime + _fbStepMs` (convergence loops) |
+| `ctx.futureInf(msg, payload)` | `fireAt = wallTime` — re-enqueues every drain pass (bounded by the drain loop's 10000-iteration safety cap) |
+| `ctx.localReflector(tickMsg, delay, payload)` | Sub-tick self-hosting clock step, with optional user payload |
+
+### ctx.future — payload and idempotency guards
+
+`payload` is any plain serialisable value (scalar, array, or object). The handler receives it as the second argument `p`:
+
+```javascript
+ctx.future(delay, "beat", { depth: 2, cycleId: s.cycleId });
+
+beat: (s, p, ctx) => {
+  if (p.cycleId !== s.cycleId) return s;  // stale — ignore
+  // p.depth, p.cycleId available here
+}
+```
+
+**Why pass `cycleId` (or equivalent) in the payload?**  
+Sub-tick futures fire asynchronously within the drain loop. If a new macro pulse arrives and resets the cycle before an earlier future fires, the handler will see both the old and new futures in sequence. Without a guard, the stale future corrupts state. The pattern is: stamp the current cycle identity into every payload, and silently drop any future whose `cycleId` no longer matches `s.cycleId`.
+
+This is essential in cascading or recursive future chains — such as the **Fractal Heartbeat**, where each depth schedules the next:
+
+```javascript
+// ECG / Fractal Heartbeat — depth cascade via ctx.future
+beat: (s, p, ctx) => {
+  if (p.cycleId !== s.cycleId) return s;       // stale cycle guard
+  const { depth, delay } = p;
+  ctx.future(delay, "beat", { depth, delay, cycleId: s.cycleId });   // re-fire self
+  const childDelay = delay / 2;
+  ctx.future(childDelay, "beat",                                       // spawn child depth
+    { depth: depth + 1, delay: childDelay, cycleId: s.cycleId });
+  // ...
+}
+```
+
+Each level halves its delay, creating a self-similar cascade entirely within the sub-tick drain. `depth` in the payload lets the handler know which level of the hierarchy it is processing. `cycleId` lets it discard futures from the previous RR cycle the moment a new one begins.
 
 ---
 
@@ -386,6 +427,27 @@ A handler mixin creating a self-hosting clock node. Activates on `__macro`, driv
 ```javascript
 ...W.localReflector("tick", initialDelay)  // spread into W.reduce handlers
 ```
+
+> **Important**: `W.localReflector` defines a `__macro` handler that sets the `_localActive` guard flag. Do not also define `__macro` in the same handler object — the spread will silently overwrite one of them. Put all bootstrap logic inside the tick handler or use a separate node.
+
+The mixin sets `_localActive: true` and `localLt: 0` on first `__macro` so the local clock starts exactly once per world, even under warp replay. The `localLt` field is available in state for tracking inner tick count if needed.
+
+### ctx.localReflector — optional user payload
+
+`ctx.localReflector(tickMsg, delay, payload)` accepts an optional third argument that is merged into the tick pulse delivered to the handler. This lets the local clock carry application-specific state across ticks — for example a **phase accumulator** for oscillators or animation:
+
+```javascript
+// Phase-accumulating local clock
+...W.localReflector("tick", 0.05),
+
+tick: (s, p, ctx) => {
+  const phase = ((s.phase ?? 0) + 0.01) % 1;   // advance phase each tick
+  ctx.localReflector("tick", 0.05, { phase });   // pass phase forward in payload
+  return { ...s, phase };
+}
+```
+
+The payload is available on the next tick's pulse `p` as `p.phase`. Unlike state (which is the node's accumulated value), the payload travels *in the queue entry* — it is the message's data, not a side-effect. This is useful when you want the next tick to know something about the previous one without storing it in the main state object, or when you need to pass ephemeral per-step data (animation frame index, phase, seed) that does not belong in the canonical exported state.
 
 ## Sub-Tick Scheduling
 
@@ -508,7 +570,7 @@ Feedback loops are expressed through a dedicated effect type distinct from `ctx.
 ctx.feedback("respond", { value, cycleId }, 64);
 ```
 
-`ctx.feedback()` schedules a message at the same `wallTime` (like `ctx.future(0, ...)`), but increments the wave's depth counter by 1. If `depth >= maxDepth` the call is a silent no-op, enforcing termination without requiring the handler to check depth manually. The `maxDepth` parameter makes the termination budget explicit and local to each feedback relationship.
+`ctx.feedback()` schedules a message at `wallTime + _fbStepMs` (where `_fbStepMs` defaults to `0`, making it equivalent to `ctx.future(0, ...)` in the default case), but increments the wave's depth counter by 1. `_fbStepMs` is configurable via `makeMeta` and allows feedback steps to carry a small non-zero delay when needed. If `depth >= maxDepth` the call is a silent no-op, enforcing termination without requiring the handler to check depth manually. The `maxDepth` parameter makes the termination budget explicit and local to each feedback relationship.
 
 ### Depth as a first-class wave property
 
@@ -532,12 +594,15 @@ Depth propagates across node boundaries according to these rules:
 Logical time  T
               │
            pulse
-              ├── depth 0   __macro fires → ctx.send("corrector", "observe")
-              ├── depth 0   corrector.observe → ctx.feedback("respond")
-              ├── depth 1   corrector.respond → ctx.send("estimator", "refine")
-              ├── depth 1   estimator.refine → delta > ε → send back to corrector
-              ├── depth 2   ...loop continues...
-              └── depth N   delta < ε → no re-send → queues drain → stable
+              ├── depth 0   estimator.__macro  → ctx.future(0, "sendObserve")
+              ├── depth 0   estimator.sendObserve → ctx.send("corrector", "observe")
+              ├── depth 0   corrector.observe   → ctx.feedback("respond")
+              ├── depth 1   corrector.respond   → ctx.send("estimator", "refine")
+              ├── depth 1   estimator.refine    → delta > ε → ctx.feedback("continueRefine")
+              ├── depth 2   estimator.continueRefine → ctx.send("corrector", "observe")
+              ├── depth 2   corrector.observe   → ctx.feedback("respond")
+              ├── depth 3   ...loop continues...
+              └── depth N   delta < ε → no ctx.feedback → queues drain → stable
 ```
 
 ### Example: fixed-point bisection
@@ -550,26 +615,44 @@ The reference implementation uses two nodes — `estimator` and `corrector` — 
 ```javascript
 // estimator: proposes value, refines on correction
 __macro: (s, p, ctx) => {
-  if (p.logicalTime % 80 !== 1) return s;  // new cycle every 80 ticks
-  const initial = 50 + 49 * Math.sin(p.wallTime * 0.13);
-  ctx.future(0, "sendObserve", { value: initial, cycleId: p.logicalTime });
-  return { ...s, value: initial, iterations: 0, cycleId: p.logicalTime };
+  if (p.logicalTime % FB_CYCLE_MS !== 1) return s;
+  const initial = 50 + 49 * Math.sin(p.wallTime * 0.0023);
+  ctx.future(0, "sendObserve", { value: initial, cycleId: p.logicalTime, wt: p.wallTime });
+  return { ...s, value: initial, iterations: 0, cycleId: p.logicalTime, trace: [{n:0, v:initial}] };
+},
+sendObserve: (s, p, ctx) => {
+  if (p.cycleId !== s.cycleId) return s;
+  ctx.send("corrector", "observe", { value: p.value, cycleId: p.cycleId });
+  return s;
 },
 refine: (s, p, ctx) => {
   if (p.cycleId !== s.cycleId) return s;
   const delta = Math.abs(p.correction - s.value);
   const refined = (s.value + p.correction) / 2;
-  if (delta > EPSILON)
+  if (delta > 0.01)
     ctx.feedback("continueRefine", { value: refined, cycleId: s.cycleId }, MAX_FB_DEPTH);
-  return { ...s, value: refined, iterations: s.iterations + 1 };
+  const newIter = s.iterations + 1;
+  const newTrace = s.trace ? [...s.trace, {n: newIter, v: refined}] : [{n: newIter, v: refined}];
+  return { ...s, value: refined, iterations: newIter, trace: newTrace };
+},
+continueRefine: (s, p, ctx) => {
+  if (p.cycleId !== s.cycleId) return s;
+  ctx.send("corrector", "observe", { value: p.value, cycleId: p.cycleId });
+  return s;
 },
 
 // corrector: computes midpoint toward nearest integer
 observe: (s, p, ctx) => {
+  if (p.cycleId < s.cycleId) return s;
   const target = Math.round(p.value);
   const correction = (p.value + target) / 2;
   ctx.feedback("respond", { correction, cycleId: p.cycleId }, MAX_FB_DEPTH);
   return { ...s, correction, cycleId: p.cycleId };
+},
+respond: (s, p, ctx) => {
+  if (p.cycleId !== s.cycleId) return s;
+  ctx.send("estimator", "refine", { correction: p.correction, cycleId: p.cycleId });
+  return s;
 },
 ```
 Convergence ratio 3/4 per step. For `delta_0 = 0.48`, `EPSILON = 0.01`: ~14 iterations.
@@ -598,11 +681,75 @@ Macro time is shared and observable. Sub-tick time is local and transient. Feedb
 ---
 ## Deterministic Pseudo-Random Number Generator
 
-The Krestianstvo Wavefront Evaluator uses a deterministic XOROSHIRO128+ Pseudo-Random Number Generator (PRNG) to ensure that all peers in a distributed simulation arrive at the exact same state, even when "random" events occur. The PRNG is implemented as a core utility that can be seeded and restored to a specific state. 
+The Krestianstvo Wavefront Evaluator includes a deterministic **xorshift128+** PRNG (`W.rng`) to ensure all peers produce identical random sequences from the same seed. All peers seeded identically will generate the same values in the same order — guaranteed consensus on randomness.
 
 ![](/doc/img/prng.jpg)
 
->  WARNING: never use the default web browser internal Math.random() — non-deterministic PRNG inside nodes. As that will entail peers desync.
+> **WARNING**: never use `Math.random()` inside world nodes — it is non-deterministic and will cause peers to desync.
+
+### W.rng API
+
+```javascript
+W.rng.next()          // → float in [0, 1)
+W.rng.nextInt(n)      // → integer in [0, n)
+W.rng.seed(lt)        // re-seed from logicalTime (deterministic per-cycle reset)
+W.rng.state()         // → { s0, s1, s2, s3 }  (snapshot)
+W.rng.restore(state)  // restore from snapshot
+```
+
+The session seed is set once at startup via `makeMeta`:
+
+```javascript
+const SESSION_RNG_SEED = { s0: 0x12345678, s1: 0x9abcdef0, s2: 0xdeadbeef, s3: 0xcafebabe };
+const meta = makeMeta(peerId, SESSION_RNG_SEED, REFLECTOR_MS);
+// W.rng.restore(SESSION_RNG_SEED) is called internally
+```
+
+### RNG example — deterministic sequence per cycle
+
+The RNG example generates `RNG_STEPS=20` values per cycle, re-seeding from `cycleId` at the start of each cycle so every peer produces the same sequence:
+
+```javascript
+const rngNode = Behaviors.collect(
+  { values: [], cycleId: 0, started: false },
+  reflector,
+  (state, pulse) => W.reduce(state, pulse, "rngNode", {
+    __macro: (s, p, ctx) => {
+      if (s.started) return s;
+      ctx.future(0, "generate", { cycleId: 1, step: 0, values: [] });
+      return { ...s, started: true };
+    },
+    generate: (s, p, ctx) => {
+      if (p.cycleId !== s.cycleId && p.cycleId > 1) return s;  // stale guard
+      if (p.step === 0) W.rng.seed(p.cycleId);                 // re-seed per cycle
+      const v      = W.rng.next();
+      const values = [...(p.values || []), v];
+      if (values.length < RNG_STEPS) {
+        ctx.future(0, "generate", { cycleId: p.cycleId, step: p.step + 1, values });
+      } else {
+        ctx.future(RNG_CYCLE_TICKS, "generate", { cycleId: p.cycleId + 1, step: 0, values: [] });
+      }
+      return { ...s, values, cycleId: p.cycleId };
+    },
+  })
+);
+```
+
+**Architecture:**
+```
+rngNode.__macro   → once (started guard): ctx.future(0, "generate", {cycleId:1, step:0, values:[]})
+rngNode.generate  → stale guard (p.cycleId !== s.cycleId && p.cycleId > 1): drop
+                  → step=0: W.rng.seed(cycleId)         // deterministic re-seed
+                  → W.rng.next() → append to values[]   // carried in payload, not state
+                  → if values.length < RNG_STEPS:
+                      ctx.future(0, "generate", {cycleId, step+1, values})  // sub-tick chain
+                  → else:
+                      ctx.future(RNG_CYCLE_TICKS, "generate", {cycleId+1, step:0, values:[]})
+```
+
+Note: `values` accumulates in the **payload** across the sub-tick chain (not in node state) and is only committed to state on the final step. This avoids intermediate state exports mid-chain.
+
+Parameters: `RNG_STEPS=20`, `RNG_CYCLE_TICKS=80 ticks`
 ---
 
 ## W API Reference
@@ -635,8 +782,8 @@ ctx.depth                               // current feedback depth
 
 ctx.future(delay, msg, payload)         // schedule at wallTime + delay
 ctx.send(targetId, msg, payload)        // cross-node via outbox
-ctx.feedback(msg, payload, maxDepth)    // depth-tracked future (convergence)
-ctx.futureInf(msg, payload)             // fire every drain pass (capped at 10000)
+ctx.feedback(msg, payload, maxDepth)    // depth-tracked future at wallTime + _fbStepMs (convergence)
+ctx.futureInf(msg, payload)             // fireAt = wallTime — re-enqueues every drain pass
 ctx.localReflector(tickMsg, delay)      // sub-tick self-hosting clock step
 ```
 ---
@@ -768,10 +915,15 @@ Demonstrates the Krestianstvo consensus model. Two peers independently run sub-s
 
 **Architecture:**
 ```
-counter.__macro  → once (started guard): ctx.future(0, "newCycle", {cycleId:1})
-counter.newCycle → ctx.send("subcounter", "startSubCount", cycleId)
-                 → ctx.future(60, "newCycle", {cycleId+1})    // 60 ticks
-subcounter.step  → ctx.future(1, "step", cycleId)             // 1 tick/step × 50 steps
+counter.__macro      → once (started guard): ctx.future(0, "newCycle", {cycleId:1})
+counter.newCycle     → ctx.send("subcounter", "startSubCount", {cycleId})
+                     → ctx.future(COUNTER_CYCLE_MS, "newCycle", {cycleId+1})
+subcounter.startSubCount → guard (p.cycleId <= s.currentCycle): drop stale
+                         → ctx.future(0, "step", cycleId)        // bootstrap first step
+                         → reset subCount, stepsDone, stepsTarget
+subcounter.step      → payload is scalar cycleId (not object)
+                     → guard (cycleId !== s.currentCycle || stepsDone >= SUB_STEPS): drop
+                     → if next < SUB_STEPS: ctx.future(STEP_MS, "step", cycleId)
 ```
 
 Parameters: `STEP_MS=1 tick`, `SUB_STEPS=50`, `COUNTER_CYCLE_MS=60 ticks`
@@ -807,39 +959,43 @@ The number of refinement iterations varies per cycle depending on `|initial - ta
 
 Parameters: `EPSILON=0.01`, `MAX_FB_DEPTH=64`, `FB_STEP_MS=1 tick`, cycle every `80 ticks`
 
-### Example 3 — 2D Wavefront Stress (100 independent W nodes, zero inter-node communication)
+### Example 3 — 2D Wavefront Stress (225 independent W nodes, user-triggered waves)
 
 ![](/doc/img/wave2d.gif)
 
-This example is the purest demonstration of the local-queue-of-futures architecture: 100 fully autonomous cell nodes arranged in a 10×10 grid, each receiving the reflector pulse directly, each computing its own wave timing independently. There is no coordinator, no broadcast, no `ctx.send` between nodes (in auto simulation without mouse events).
+A 15×15 grid of cell nodes. Waves are triggered by user interaction (mouse/touch click). The `clock` node receives injected `cellClick` events and broadcasts a `wave` message to all 225 cells. Each cell independently schedules its own propagation delay based on distance from the click origin.
 
 ### Architecture
 
 ```
-clock.__macro    → once: ctx.future(0, "startWave", {wt: p.wallTime})
-clock.startWave  → ctx.send("cell_N", "wave", {ox, oy, wt}) × 100
-                 → ctx.future(80, "startWave", {wt+80})    // 80 ticks
-cell.wave        → ctx.future(dist * 2, "activate", {wt})   // 2 ticks/unit
-cell.activate    → ctx.future(12, "decay", {wt})            // 12 ticks
+clock (event)    → injectExternalEvent({type:"cellClick", ox, oy, wt, clientId})
+                   enqueued directly onto clock._queue as a "userWave" entry
+clock.userWave   → ctx.send("cell_N", "wave", {ox, oy, wt, clientId}) × 225
+clock.__macro    → once (_alive guard): ctx.future(1, "_keepalive", {})
+clock._keepalive → ctx.future(1, "_keepalive", {})   // perpetual heartbeat
+
+cell.wave        → dist = sqrt((cx-ox)²+(cy-oy)²)
+                   contribution = cos(dist*0.45) * exp(-dist*0.22) * 0.8
+                   ctx.future(max(1, floor(dist * WAVE_STEP_MS)), "activate", {contribution, clientId})
+cell.activate    → ctx.future(WAVE_DECAY_MS, "decay", {contribution})
+                   amp += contribution, _count++, active = true
+cell.decay       → _count--; amp -= contribution (or 0 if _count reaches 0)
+                   active = _count > 0
 ```
 
-Each cell permanently captures its grid position `(cx, cy)` in a closure at construction time (`cx = id % 10`, `cy = floor(id / 10)`). On every macro pulse each cell independently computes the same deterministic origin — a pure function of `logicalTime` — and derives its own propagation delay. No two cells share any computation or communicate in any way.
+Each cell captures its grid position `(cx, cy)` in a closure at construction time (`cx = id % GRID_W`, `cy = floor(id / GRID_W)`). The propagation delay `max(1, floor(dist × WAVE_STEP_MS))` is scheduled as a `ctx.future` in each cell's own local queue — 225 independent queues, no central structure.
 
-### Zero inter-node communication
+**Overlapping waves**: `activate` accumulates `amp` and increments `_count`; `decay` decrements both. Multiple in-flight waves from the same or different users overlap additively and decay independently.
 
-Wave origin evolves over logical time: `ox = sin(wt * 0.07)`, `oy = sin(wt * 0.05)`. Cells guard with `wt` (the `wallTime` of their wave) not `logicalTime` — correctly ignoring stale futures from previous waves. The origin formula is a pure deterministic function of `logicalTime` — every cell computes it independently and gets the same result. All worlds share the single main reflector — no separate shim.
+### Node generation via multi-script array
 
-The wave propagation delay `floor(dist × 80ms)` is scheduled as a `ctx.future` entry in each cell's own local queue. Cell 0 (at the origin) schedules `activate` at `wallTime + 0ms`. A corner cell at distance 8 schedules at `wallTime + 640ms`. These 100 different `fireAt` values live in 100 independent queues — there is no central structure holding all of them. The heartbeat advances `wallTime` and `_worldNextAt` finds the minimum across all 100 `_nextAt` values to know when to fire next. Propagation timing is genuinely distributed across 100 independent queues.
+The 225 cell declarations are generated programmatically by `makeWave2dScripts()`, which builds a second script string via `Array.from({ length: GRID_W * GRID_H }, ...)` and returns `[wave2dWorldProgram, cellScript, avatarScript]`. The multi-script array is passed to `makeWorld` — each script is evaluated in the same Renkon scope, so `_makeCell` defined in script 1 is available when cell declarations in script 2 call it.
 
-### W.stable and _worldNextAt under load
+### W.stable under load
 
-`W.stable([cell_0, ..., cell_99], reflector)` checks all 100 node queues on every evaluate call. The world is stable only when every cell has both fired its `activate` and its `decay` — all 100 queues are empty and all `_depth` values are 0. This is a genuine distributed fixed point, not a flag set by a central node.
+`W.stable([clock, cell_0, ..., cell_224], reflector)` checks all 226 node queues on every evaluate call. The world is stable only when every cell has both fired `activate` and `decay` for all in-flight waves — all queues empty, all `_depth` values 0.
 
-### Node generation via `updateProgram`
-
-The 100 cell declarations cannot be written as a static list in the source — that would require hardcoded `const cell_0 = ...` through `const cell_99 = ...`. Instead, `_waveScript2` is a JavaScript string built at load time by `Array.from({ length: GRID_W * GRID_H }, ...)`, and injected into the world's program via `updateProgram([script1, script2])`. This is the correct call site: outside any evaluation cycle, no mid-evaluation conflict.
-
-Parameters: `GRID_W=10`, `WAVE_STEP_MS=2 ticks`, `WAVE_DECAY_MS=12 ticks`, `WAVE_CYCLE_MS=80 ticks`
+Parameters: `GRID_W=15`, `GRID_H=15`, `WAVE_STEP_MS=2 ticks`, `WAVE_DECAY_MS=28 ticks`
 
 ### Example 4 — Zeno Series (Sub-Tick Futures + Local Reflector)
 
@@ -860,23 +1016,25 @@ Uses `W.localReflector` — a handler mixin bootstrapping a self-hosting clock n
 
 ```javascript
 const zeno = Behaviors.collect(
-  { n: 0, sum: 0, localLt: 0, _localActive: false },
+  { n: 0, sum: 0, localLt: 0, cycleId: 0, _localActive: false },
   reflector,
   (state, pulse) => W.reduce(state, pulse, "zeno", {
-    ...W.localReflector("tick", 0.5),      // activate on first __macro
+    ...W.localReflector("tick", ZENO_INITIAL_DELAY),  // activate on first __macro
 
     tick: (s, p, ctx) => {
-      const nextDelay = p._innerTickDelay / 2;
-      if (nextDelay > MIN_DELAY)
-        ctx.localReflector("tick", nextDelay);       // halve and reschedule
+      const delay     = p._innerTickDelay ?? ZENO_INITIAL_DELAY;
+      const newSum    = s.sum + delay;
+      const nextDelay = delay / 2;
+      if (nextDelay > ZENO_MIN_DELAY)
+        ctx.localReflector("tick", nextDelay);              // halve and reschedule
       else
-        ctx.future(CYCLE_TICKS, "restart", {});      // new series
-      return { ...s, n: s.n + 1, sum: s.sum + p._innerTickDelay };
+        ctx.future(ZENO_CYCLE_TICKS, "restart", {});        // series done, wait for next
+      return { ...s, localLt: s.localLt + 1, n: s.n + 1, sum: newSum };
     },
 
     restart: (s, p, ctx) => {
-      ctx.localReflector("tick", 0.5);
-      return { ...s, n: 0, sum: 0 };
+      ctx.localReflector("tick", ZENO_INITIAL_DELAY);
+      return { ...s, n: 0, sum: 0, cycleId: s.cycleId + 1 };
     },
   })
 );
