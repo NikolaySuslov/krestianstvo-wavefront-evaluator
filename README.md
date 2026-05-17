@@ -1,4 +1,4 @@
-# Krestianstvo Wavefront Evaluator
+## Krestianstvo Wavefront Evaluator
 
 *Architecture overview and core concepts*
 
@@ -8,9 +8,11 @@ The Krestianstvo Wavefront Evaluator is a deterministic reactive collaborative c
 
 It replaces the Krestianstvo VM with a fundamentally different approach to time, computation, and inter-node communication — one where causality propagates as a *wavefront* through a graph of locally autonomous nodes, rather than being routed through a central message dispatcher.
 
-#### Live demo: https://wavefront.krestianstvo.org
+> Live demo: https://wavefront.krestianstvo.org 
 
-![](/doc/img/wave2d.gif)
+Source code: https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator
+
+![Wave 2D demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l6lqb0ei3pcz92fwkrzh.gif)
 
 ---
 
@@ -18,6 +20,7 @@ It replaces the Krestianstvo VM with a fundamentally different approach to time,
 
 - [The Relation to Physics](#the-relation-to-physics)
 - [Fractal Heartbeat](#fractal-heartbeat-and-local-reflector)
+- [Fractal IFS-based clock](#fractal-ifs-based-clock)
 - [From Virtual Machine to Wavefront Evaluator](#from-krestianstvo-vm-to-krestianstvo-wavefront-evaluator)
 - [Core Vocabulary](#core-vocabulary)
 - [Architecture Layers](#architecture-layers)
@@ -39,7 +42,7 @@ It replaces the Krestianstvo VM with a fundamentally different approach to time,
 
 The Wavefront Evaluator isn’t just a clever way to sync avatars; it is deeply rooted in computational physics and hardware architecture. It mimics how information naturally propagates through space-time. 
 
-![](/doc/img/fractal.gif)
+![Lorenz_clock](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rsono3aijw0njan7vqbl.gif)
 
 ### The Relation to Physics
 
@@ -118,6 +121,8 @@ This is why the system feels so "solid" — it isn't just following a list of in
 
 Local Reflector is recursive in its logic, and it can indeed trigger other reflectors or "nest" emulated ticks. Because the Wavefront Evaluator treats time as a continuous priority queue rather than a fixed set of slots, you can think of the local reflector as a "fractal" heartbeat.
 
+![hb2](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/swuy8y8i4t23agg54evs.gif)
+
 #### Generating Fractal Heartbeats
 
 Fractal heartbeats form a vector space; they can be added together to yield an object of the same nature. This stands in contrast to harmonic oscillations of different frequences, the sum of which is not a harmonic oscillation.  
@@ -142,6 +147,8 @@ Is it truly recursive?
 
 #### 2. Cascading Reflectors (The "Nesting")
 
+![Fractal Heartbeat demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/h02d3fltdao7xa3i9hd0.gif)
+
 You can have multiple nodes, each running its own local reflector, and they can trigger each other. This creates a "Reflector within a Reflector" behavior.
 
 * Node A (running at 0.1 intervals) calculates a physics state.
@@ -157,7 +164,7 @@ The system allows you to create **"Nested Time Scales"** using the Zeno sub-tick
 If you want a "Local Reflector" to emulate a whole second's worth of logic inside a single sub-tick, you use Temporal Compression:
 
 1. The Global Reflector is at T=100.
-2. Your node uses W.future(0.001, msg) to run a local loop.3. Each loop only advances the internal state, while the logical time only moves by 0.001.
+2. Node uses W.future(0.001, msg) to run a local loop.3. Each loop only advances the internal state, while the logical time only moves by 0.001.
 
 > **This allows you to run a "Virtual World" inside a single tick of the "Real World."**
 
@@ -176,6 +183,111 @@ Even if your recursive reflectors create 1,000,000 sub-ticks, the Evaluator will
 Think of it like this: You can't create a **"Reflector inside a Reflector"** in terms of code structure, but you can create a **"Wavefront that triggers another Wavefront."**.
 
 Because every message in the Evaluator is just a **(time, target, data)** tuple, the system doesn't care if a message came from a real human, a global heartbeat, or a recursive local sub-tick. It treats them all as equal "waves" moving through the graph.
+
+## Fractal IFS-based clock
+
+The Fractal Heartbeat has been generalised into **`makeIfsClock`** — a deterministic, multiplayer-synchronised fractal cascade that alters the fundamental relationship between time and chaotic flows, suited for non-uniform, fractal time-reparametrisation of any continuous dynamical system. This is a highly suitable for investigating chaotic systems, establishing a canvas where time is no longer a linear axis, but a self-similar fractal landscape. 
+
+![ifs](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l5d1ek5rs0bmfh3qpk20.jpg)
+
+In standard physics, to see the inner core of a Lorenz lobe one simply has to wait a long time for a uniform clock to eventually pass through it. In the Krestianstvo Wavefront Evaluator, space and time are coupled through the fractal depth: the system enters the deep structure of the attractor precisely because it enters the deep structure of the clock.
+
+### Implementation: makeIfsClock
+
+`makeIfsClock` is a stochastic Iterated Function System (IFS) running deterministically inside a discrete-event priority queue. It is a composable primitive — callers supply `onCycle` and `onBeat` callbacks to plug in any ODE or dynamical system, while all clock mechanics are handled internally.
+
+**Multiplayer determinism.** A classic problem with randomised IFS cascades in distributed environments is state divergence. This is solved by reseeding `W.rng` at the start of every cycle using a bijective MurmurHash3 finalizer on the logical time:
+
+```js
+let h = (cycleCount ^ (p.logicalTime >>> 0)) >>> 0;
+h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+h = (h ^ (h >>> 16)) >>> 0;
+W.rng.seed(h);
+```
+
+Unconditionally consuming exactly two RNG values per beat (`selfRatio` and `childRatio`) guarantees that every peer follows the identical randomised execution branch, satisfying strict state-replication requirements.
+
+**Cascade mechanics.** The tree branching logic splits generation into controlled sequences:
+
+- `gen < genCap` schedules self-loops at the current depth, scaled by a random contraction ratio `selfRatio`.
+- `gen === 0 && depth + 1 < depth` spawns a child branch into the next nested layer at temporal offset `selfDelay + childDelay`.
+
+This prevents exponential event explosion while ensuring every tier of the fractal cascade is systematically visited.
+
+**Irrational base and contraction ratios.** No finite integer product of the contraction ratios can equal an integer multiple of the base delay. This guarantees that scheduled event times (`ctx.future(delay, ...)`) are dense and do not collapse onto a periodic lattice. The time increments are truly fractal-distributed, yielding a discrete point process whose temporal structure mirrors the Hausdorff measure of the underlying IFS attractor.
+
+### Multi-resolution time
+
+The wavefront engine with nested `ctx.future` ticks is not discrete-time in the classical sense. It is a multi-resolution time where ticks exist at every scale simultaneously:
+
+```
+coarse:  t = 0,    4.28,  6.47,  7.61...    (D0 beats)
+medium:  t = 2.14, 3.47,  4.82,  5.63...    (D1 beats)
+fine:    t = 1.32, 2.06,  2.57,  3.02...    (D2 beats)
+finer:   ...                                 (D3, D4)
+```
+
+All these ticks coexist on the same continuous time axis — they interleave rather than separate into levels. The system has events at arbitrarily fine temporal resolution, bounded only by `FRACTAL_MIN_DELAY`. This is structurally similar to a wavelet decomposition — multi-scale analysis where coarse and fine scales coexist — or to a Cantor function clock that runs at fractal density on the time axis.
+
+### Modulating the SRB Measure
+
+In a traditional system, a chaotic ODE like Lorenz or Rössler flows through phase space in uniform continuous time. According to the ergodic theorem, a single long trajectory samples the strange attractor according to its natural SRB (Sinai-Ruelle-Bowen) measure — the probability density of the trajectory's position over uniform intervals of time `dt`.
+
+By driving the integration step from the fractal delay (`dt = delay * SCALE / STEPS`) via the `onBeat` hook, the sampling density on the attractor is no longer uniform. Because the density of IFS clock ticks is governed by the IFS invariant measure, the point cloud captured in `tickEvents` is a convolution of two distinct measures:
+
+- **The Geometry of the Flow** — the spatial constraints of the classical attractor (the SRB measure).
+- **The Chronology of the Clock** — the temporal constraints of the contraction mapping (the IFS Hausdorff measure).
+
+The resulting object is a trajectory tracing a classical attractor embedded in a non-Archimedean, fractal temporal topology — a state distribution that cannot be replicated by any standard uniform numerical solver.
+
+### The three-layer insight
+
+**Layer 1 — What standard visualization does.**
+A single trajectory with fixed `dt` steps through the ODE at one resolution. Every point is equally spaced in ODE time. Ergodic coverage is eventual but uniform — no sense of which regions are visited more often at different scales.
+
+**Layer 2 — What fractal time adds.**
+The IFS heartbeat generates beats at multiple delay scales simultaneously within one cycle:
+
+| Depth | Delay | dt_ODE |
+|---|---|---|
+| D0 | ≈ 2.14t | ≈ 1.07 (coarse) |
+| D1 | ≈ 0.88t | ≈ 0.44 |
+| D2 | ≈ 0.36t | ≈ 0.18 |
+| D3 | ≈ 0.15t | ≈ 0.075 |
+| D4 | ≈ 0.06t | ≈ 0.03 (fine) |
+
+Each depth integrates the same trajectory continuation but samples it at a different temporal grain. The coarse levels skip over fast oscillations; the fine levels resolve them. The attractor is being measured simultaneously with five rulers of different lengths.
+
+**Layer 3 — What the IFS random map selection does on top.**
+At each beat, `selfRatio` is drawn randomly from `[√2-1, 1/φ, √3-1]`. The next self-loop delay contracts by a randomly chosen irrational ratio. The set of all possible delay sequences forms an IFS in delay-space whose invariant set is the Cantor-like attractor visible in the IFS canvas.
+
+The sampling density on the Lorenz attractor is therefore not uniform — it is weighted by the invariant measure of the IFS in delay-space. The two attractors — one in (X,Z) space, one in delay-space — are coupled through the shared trajectory.
+
+### Fractal magnifying lens
+
+A standard ergodic theorem says a single long trajectory samples the attractor according to its natural measure (the SRB measure). Here the sampling measure on the Lorenz attractor is **modulated by the IFS invariant measure in time**. The system is not just tracing the attractor — it is tracing it with a fractal magnifying glass that zooms in and out at irrational ratios, producing a point cloud whose density reflects both the Lorenz SRB measure and the IFS Hausdorff measure simultaneously.
+
+That is what the colour-coded depth layers reveal visually:
+
+- **D0 (red/orange)** — coarse time steps, broad skeletal structure of the butterfly lobes.
+- **D4 (grey/white)** — fine time steps, intricate spiral structures inside each lobe.
+
+The butterfly is not one attractor but **five nested samplings of the same attractor at five fractal time scales**. You are looking at five simultaneous geometric windows into how the chaotic flow resolves at different scales of temporal magnification.
+
+### Parallel ensemble and multi-peer mapping
+
+Each cycle launches an independent trajectory with slightly different initial conditions (seeded from RNG). The IFS randomly selects integration step sizes from the map set. Each trajectory traces the attractor independently — this is the ensemble approach.
+
+The accumulated point cloud shows the ensemble density — where all trajectories spend their time. For a true strange attractor this density is the SRB measure — the physically observable invariant measure of the chaotic system.
+
+This maps directly to the multi-peer architecture: **different peers literally run different ensemble members**. The collective visualisation is the ergodic average across the ensemble.
+
+- No numerical stability problem — each trajectory is self-consistent.
+- Naturally multi-peer — peers run different ensemble members.
+- The visualisation density is exactly the SRB measure — what physicists want from a strange attractor.
+- It proves the wavefront engine can explore measure-theoretic properties of dynamical systems, not just trajectories.
+- Various forms of self-similar Fractal Time can be generated follwing the objectives of the dynamic system under investigation. This approach can be utilized in physiology to study heart rhythms, the nervous system and other homeostatic processes.
 
 
 ## From Virtual Machine to Wavefront Evaluator
@@ -683,7 +795,7 @@ Macro time is shared and observable. Sub-tick time is local and transient. Feedb
 
 The Krestianstvo Wavefront Evaluator includes a deterministic **xorshift128+** PRNG (`W.rng`) to ensure all peers produce identical random sequences from the same seed. All peers seeded identically will generate the same values in the same order — guaranteed consensus on randomness.
 
-![](/doc/img/prng.jpg)
+![Deterministic Pseudo-Random Number Generator](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/r0e9qenfag5wvx3i5tkz.jpg)
 
 > **WARNING**: never use `Math.random()` inside world nodes — it is non-deterministic and will cause peers to desync.
 
@@ -909,7 +1021,7 @@ Animation resumes seamlessly. If any world diverged, warp fires and replays the 
 
 ### Example 1 — Counter (Wavefront Integrity Physical Trace)
 
-![](/doc/img/counter.gif)
+![Counter demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lb2cuyz2rozovpzio49w.gif)
 
 Demonstrates the Krestianstvo consensus model. Two peers independently run sub-step chains. The view shows each peer's progress and marks **SUCCESS** only when both reach the same target — confirming deterministic consensus.
 
@@ -930,7 +1042,7 @@ Parameters: `STEP_MS=1 tick`, `SUB_STEPS=50`, `COUNTER_CYCLE_MS=60 ticks`
 
 ### Example 2 — Fixed-Point Bisection (Feedback Loop Convergence)
 
-![](/doc/img/feedback_loop.gif)
+![Feedback Loop demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t7ocpkhenkqms6n4f0lh.gif)
 
 Demonstrates `ctx.feedback` — a convergence loop that animates step by step. Depth is a first-class observable property of the wavefront.
 
@@ -961,7 +1073,7 @@ Parameters: `EPSILON=0.01`, `MAX_FB_DEPTH=64`, `FB_STEP_MS=1 tick`, cycle every 
 
 ### Example 3 — 2D Wavefront Stress (225 independent W nodes, user-triggered waves)
 
-![](/doc/img/wave2d.gif)
+![Wave 2D demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l6lqb0ei3pcz92fwkrzh.gif)
 
 A 15×15 grid of cell nodes. Waves are triggered by user interaction (mouse/touch click). The `clock` node receives injected `cellClick` events and broadcasts a `wave` message to all 225 cells. Each cell independently schedules its own propagation delay based on distance from the click origin.
 
@@ -999,7 +1111,8 @@ Parameters: `GRID_W=15`, `GRID_H=15`, `WAVE_STEP_MS=2 ticks`, `WAVE_DECAY_MS=28 
 
 ### Example 4 — Zeno Series (Sub-Tick Futures + Local Reflector)
 
-![](/doc/img/zeno.jpg)
+
+![Zeno Series demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5fu9ktvx2hmzxepqyk5q.jpg)
 
 Demonstrates sub-tick scheduling and the `W.localReflector` primitive.
 
@@ -1044,7 +1157,7 @@ All `tick` steps fire within the current drain pass (`delay < SUBTICK_MS = 1`). 
 
 ### Example 5: Fractal Heartbeat demo
 
-![](/doc/img/fractal.gif)
+[hb2](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/swuy8y8i4t23agg54evs.gif)
 
 Demo that creates a "symphony" of events where the high-frequency notes are perfectly synchronized and nested within the low-frequency beats, all managed by the deterministic Wavefront algorithm.
 
@@ -1082,7 +1195,7 @@ In geometry, a fractal is a shape where the small parts look like the whole. In 
 
 ...and so on.
 
-Because each level spawns its own sub-levels, a single initial trigger creates a "shower" of events. This is why the totalBeats counter in your code rises exponentially.
+Because each level spawns its own sub-levels, a single initial trigger creates a "shower" of events. This is why the totalBeats counter rises exponentially.
 
 **3. The "Zeno" Connection**
 
