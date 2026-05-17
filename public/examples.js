@@ -2319,6 +2319,15 @@ export const APPS = {
     makeRenderer: makeWave2dRenderer,
     wrapId: 'wave-wrap',
   },
+    fractal0: {
+    title:      'Local Reflector',
+    selo:       'fractal0',
+    reflectorMs: REFLECTOR_MS,
+    metaOptions: { _subtickMs: SUBTICK_MS },
+    makeScripts: (av) => [fractalHeartbeatWorldProgram0 + av],
+    makeRenderer: makeFractalHeartbeatRenderer0,
+    wrapId: 'fractal-wrap',
+  },
   fractal1: {
     title:      'Fractal Heartbeat',
     selo:       'fractal',
