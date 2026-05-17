@@ -10,7 +10,8 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 // Built on Renkon (reactive programs) + Krestianstvo - Renkon VM | Croquet synchronisation model.
 //
 // Exports: W, makeRng, makeMeta, makeWorld, makeView, makeShim, makePeer,
-//          _worldNextAt, _worldSnapshot, META_PROGRAM, _VIEW_PROGRAM
+//          _worldNextAt, _worldSnapshot, META_PROGRAM, _VIEW_PROGRAM,
+//          makeIfsClock
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { ProgramState } from "./renkon-core-0.10.7.js";
@@ -748,4 +749,125 @@ export const makePeer = (meta, wsUrl, seloId = 'default') => {
 
   return { ps, disconnect, injectExternalEvent, seloId };
 };
+
+// ── IFS Clock ─────────────────────────────────────────────────────────────────
+// Returns a Renkon world-program string that runs an IFS fractal heartbeat clock.
+//
+// The clock fires "beat" events at self-similar delays derived from the IFS maps.
+// Each beat carries { depth, delay, gen, cycleId } plus any payload returned by
+// the user-supplied onBeat function — enabling the clock to drive arbitrary
+// continuous dynamical systems (Lorenz, Rössler, neural oscillators, etc.).
+//
+// Parameters:
+//   depth     — number of fractal depth levels (default 5)
+//   baseDelay — root delay in logical-time ticks (default π-2 ≈ 2.14, transcendental)
+//   minDelay  — contraction floor; beats below this are dropped (default 0.1)
+//   cycle     — logical ticks between cycle restarts (default 8)
+//   decay     — energy decay per tick, 0..1 (default 0.1)
+//   maps      — IFS contraction ratios; defaults to [√2-1, 1/φ, √3-1] (mutually
+//               incommensurable algebraic irrationals — no integer products with π base)
+//   genCap    — max self-loop generations before stopping chain (default 6)
+//   onBeat    — JS source string of a function (p, ctx, W) => extraFields.
+//               Called at every beat; return value is merged into each tickEvent.
+//               p = beat payload { depth, delay, gen, cycleId, ...user fields }
+//               ctx = W.reduce context { future, wallTime }
+//               W = the W runtime (for W.rng etc.)
+//               Must always consume a fixed number of W.rng.next() calls for
+//               determinism across peers.
+//   onCycle   — JS source string of a function (cycleCount, p, W) => extraFields.
+//               Called at the start of each cycle (after RNG is reseeded).
+//               Return value is spread into the initial beat payload.
+//               Use this to set initial conditions for your dynamical system.
+//
+// Usage:
+//   import { makeIfsClock } from './krestianstvo-wavefront-evaluator.js';
+//   const prog = makeIfsClock({
+//     onCycle: `(cycleCount, p, W) => {
+//       const lx0 = (W.rng.next() - 0.5) * 2;
+//       const ly0 = 1 + (W.rng.next() - 0.5) * 2;
+//       const lz0 = (W.rng.next() - 0.5) * 2;
+//       return { lx: lx0, ly: ly0, lz: lz0 };
+//     }`,
+//     onBeat: `(p, ctx, W) => {
+//       const { delay, lx = 0.1, ly = 0, lz = 25 } = p;
+//       const SIGMA = 10, RHO = 28, BETA = 2.6667, SCALE = 0.5;
+//       const dt = delay * SCALE / 8;
+//       // ... RK4 steps ...
+//       return { lx: nlx, ly: nly, lz: nlz };
+//     }`,
+//   });
+//   const world = makeWorld('myWorld', [prog]);
+//
+export const makeIfsClock = ({
+  depth    = 5,
+  baseDelay = 2.1415926535,
+  minDelay  = 0.1,
+  cycle     = 8,
+  decay     = 0.1,
+  maps      = [0.4142135623, 0.6180339887, 0.7320508075],
+  genCap    = 6,
+  onBeat    = '(p, ctx, W) => ({})',
+  onCycle   = '(cycleCount, p, W) => ({})',
+} = {}) => `
+  const W         = Renkon.app.W;
+  const reflector = Events.receiver();
+
+  const fractal = Behaviors.collect(
+    { energy: Array(${depth}).fill(0), cycleId: 0, totalBeats: 0, cycleCount: 0, tickEvents: [] },
+    reflector,
+    (state, pulse) => W.reduce(state, pulse, "fractal", {
+
+      __macro: (s, p, ctx) => {
+        const energy = (s.energy || []).map(e => Math.max(0, e - ${decay}));
+        if (p.logicalTime % ${cycle} === 1) {
+          const cycleCount = (s.cycleCount ?? 0) + 1;
+          // MurmurHash3 finalizer — bijective hash for uncorrelated per-cycle RNG seeds
+          let h = (cycleCount ^ (p.logicalTime >>> 0)) >>> 0;
+          h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+          h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+          h = (h ^ (h >>> 16)) >>> 0;
+          W.rng.seed(h);
+          const _onCycle = ${onCycle};
+          const extra = _onCycle(cycleCount, p, W) ?? {};
+          ctx.future(0, "beat", { depth: 0, delay: ${baseDelay}, cycleId: p.logicalTime,
+                                  gen: 0, ...extra });
+          return { ...s, energy, cycleId: p.logicalTime, cycleCount, tickEvents: [] };
+        }
+        return { ...s, energy, tickEvents: [] };
+      },
+
+      beat: (s, p, ctx) => {
+        if (p.cycleId !== s.cycleId) return s;
+        const { depth, delay, gen = 0 } = p;
+        if (depth >= ${depth}) return s;
+        const _maps = ${JSON.stringify(maps)};
+        const _onBeat = ${onBeat};
+        const extra = _onBeat(p, ctx, W) ?? {};
+        const energy = [...(s.energy || Array(${depth}).fill(0))];
+        energy[depth] = 1.0;
+        const subT = ctx.wallTime % 1;
+        const wt   = ctx.wallTime;
+        const tickEvents = [...(s.tickEvents || []),
+          { d: depth, t: subT, wt, delay, ...extra }];
+        // Always consume exactly 2 RNG values unconditionally for peer determinism
+        const selfRatio  = _maps[Math.floor(W.rng.next() * _maps.length)];
+        const childRatio = _maps[Math.floor(W.rng.next() * _maps.length)];
+        const selfDelay  = delay * selfRatio;
+        const childDelay = delay * childRatio;
+        if (gen < ${genCap} && selfDelay > ${minDelay}) {
+          ctx.future(selfDelay, "beat", { depth, delay: selfDelay, gen: gen + 1,
+                                         cycleId: s.cycleId, ...extra });
+        }
+        if (gen === 0 && depth + 1 < ${depth}) {
+          const childOffset = selfDelay + childDelay;
+          if (childDelay > ${minDelay}) {
+            ctx.future(childOffset, "beat", { depth: depth + 1, delay: childDelay, gen: 0,
+                                             cycleId: s.cycleId, ...extra });
+          }
+        }
+        return { ...s, energy, totalBeats: s.totalBeats + 1, tickEvents };
+      },
+    })
+  );
+`;
 
