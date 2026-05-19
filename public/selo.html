@@ -65,10 +65,11 @@ const v = makeView(seloId + 'View', core._VIEW_PROGRAM, { renderFn: r });
 world.ps.app._viewPs = v.ps;
 
 // ── Connect/disconnect bar ────────────────────────────────────────────────────
-makePeerControl(
+const { el: ctrlEl } = makePeerControl(
   [meta], seloId, WS_URL, peerState,
   [meta], app.reflectorMs
 );
+if (app.hideTopBar) ctrlEl.style.display = 'none';
 </script>
 </body>
 </html>
