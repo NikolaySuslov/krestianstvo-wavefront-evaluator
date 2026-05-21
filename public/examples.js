@@ -15,7 +15,11 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 //   makeRenderer(core)        → rendererFactory
 //   wrapId          — DOM id of the flex container that holds both peer panels
 
-import hologramApp  from "./apps/hologram.js";
+import hologram2App  from "./apps/hologram2.js";
+import hologram3App  from "./apps/hologram3.js";
+import nls3App        from "./apps/nls3.js";
+import instanton3App  from "./apps/instanton3.js";
+import wavelet1App   from "./apps/wavelet1.js";
 import counterApp   from "./apps/counter.js";
 import feedbackApp from "./apps/feedback.js";
 import zenoApp     from "./apps/zeno.js";
@@ -27,7 +31,11 @@ import rosslerApp  from "./apps/rossler.js";
 import fractal1App from "./apps/fractal1.js";
 
 export const APPS = {
-  hologram:  hologramApp,
+  hologram2:  hologram2App,
+  hologram3:  hologram3App,
+  nls3:       nls3App,
+  instanton3: instanton3App,
+  wavelet1:   wavelet1App,
   wave2d:    wave2dApp,
   fractal0: fractal0App,
   fractal1: fractal1App,

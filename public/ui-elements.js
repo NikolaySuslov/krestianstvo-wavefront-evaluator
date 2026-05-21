@@ -153,11 +153,14 @@ export const makePeerControl = (metas, seloId, wsUrl, peerState, allMetas, refle
 
   const connect = () => {
     if (peerState.peers) return;
+    // Start autonomous immediately so the world runs while WebSocket is connecting.
+    // makePeer will drive ticks via the reflector once the socket opens;
+    // we stop autonomous then and restart it on close/error.
+    allMetas.forEach(m => m.startAutonomous());
     peerState.peers = [];
     metas.forEach((meta) => {
       const p = makePeer(meta, wsUrl, seloId);
       peerState.peers.push(p);
-      meta.stopAutonomous();
     });
     update();
   };
