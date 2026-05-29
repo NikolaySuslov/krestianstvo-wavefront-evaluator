@@ -1,6 +1,6 @@
 {
   "name": "krestianstvo-wavefront-evaluator",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Croquet-TeaTime-inspired, Renkon-driven collaborative computational engine",
   "type": "module",
   "exports": {
