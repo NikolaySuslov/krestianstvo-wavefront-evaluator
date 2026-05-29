@@ -2,26 +2,25 @@
 The MIT License (MIT)
 Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 */
-// ── NLS3 | IFS-Native Laplacian — Emergent Fractional Order ──────────────────
+// ── NLS4 | Split-View Distributed Soliton ────────────────────────────────────
 //
-// The IFS beat cascade IS the Laplacian. No external Riesz kernel K(r)=1/r^{2s}
-// is imposed. Instead the IFS empirical measure (visit-count distribution over
-// radii) defines the kernel weights directly:
+// Two peers run the identical NLS simulation (Croquet determinism).
+// Each peer renders only its own half of the 64×64 field:
+//   peer index 0 → left  half (columns 0  .. GRID/2-1)  — soliton moves right →
+//   peer index 1 → right half (columns GRID/2 .. GRID-1) — soliton moves left  ←
 //
-//   w(r) = FRAC_ALPHA × count(r) / totalBeats
+// The two browser windows placed side-by-side form a single seamless view.
+// The soliton crosses the visual boundary between screens as it propagates.
 //
-// The IFS attractor has log-uniform density ρ(r)~1/r → effective s≈0.5.
-// But s is NOT a free parameter here — it EMERGES from the IFS contraction
-// ratios each cycle. Different IFS geometry → different emergent fractional order.
-//
-// Animation model: perpetual _physStep chain driven by the IFS kernel.
-// The IFS clock fires continuously every cycle; each finalizeFresnelm updates
-// cachedRadii/Weights and restarts the physics chain if it stopped.
-//
-// Click on intensity canvas → inject new soliton (replicated to all peers).
+// Initial condition: two sech-envelope solitons placed at ±30% of grid width,
+// moving toward each other along x with equal and opposite momenta.
+// They collide at the center (the screen boundary) and pass through with a
+// phase shift — demonstrating soliton stability under IFS fractional dispersion.
 
-import { FRAG, colormaps, IFS_MAPS_DEFAULT } from '../krestianstvo-wavefront-physics.js';
+import { FRAG, colormaps, IFS_MAPS_DEFAULT, kernel } from '../krestianstvo-wavefront-physics.js';
 import { makeIFSClockPanel, IFS_DEPTH_COLORS } from '../krestianstvo-wavefront-renderer.js';
+
+
 
 // ── Infrastructure ────────────────────────────────────────────────────────────
 const REFLECTOR_MS = 50;
@@ -30,6 +29,7 @@ const SUBTICK_MS   = 0.09;
 // ── Grid ─────────────────────────────────────────────────────────────────────
 const GRID    = 42;
 const N_CELLS = GRID * GRID;
+const HALF    = GRID >> 1;
 
 // ── Physical parameters ───────────────────────────────────────────────────────
 const WAVELENGTH  = 5.0;
@@ -38,7 +38,7 @@ const GAMMA       = -0.25;
 const ISAT        = 20.0;
 const DT          = 0.1;
 
-// ── Soliton initial conditions ────────────────────────────────────────────────
+// ── Soliton initial conditions — nls3 _initField2: two solitons colliding ────
 const SOL_AMP = 1.0;
 const SOL_W   = 2;
 const SOL_V   = 1.0;
@@ -51,15 +51,15 @@ const IFS_MIN_DELAY  = 0.25;
 const IFS_BASE_DELAY = parseFloat((DELAY_SCALE * GRID * 0.35).toFixed(6));
 const FRESNEL_DONE_DELAY = parseFloat((IFS_BASE_DELAY * 8).toFixed(4));
 const N_FRESNEL_ROOTS  = 4;
-const CYCLE            = 16;
-const PHYS_STEPS       = 1;
-const NEXT_STEP_DELAY  = 1;
+const CYCLE            = 16;  // refresh IFS kernel every N physics ticks (must exceed FRESNEL_DONE_DELAY≈11)
+const PHYS_STEPS       = 1;   // 1 step per tick — chain spreads across ticks via NEXT_STEP_DELAY
+const NEXT_STEP_DELAY  = 1;   // ms > SUBTICK_MS — each step fires in its own reflector tick
 const LOD              = [1, 1, 1, 1];
 const FRAC_ALPHA       = 0.08;
-const MAX_IFS_BANDS    = 4;
+const MAX_IFS_BANDS    = 4;   // cap kernel bands for Safari JIT performance
 
 // ── World program ─────────────────────────────────────────────────────────────
-const nls3WorldProgram = `
+const nls4WorldProgram = `
   const W         = Renkon.app.W;
   const reflector = Events.receiver();
 
@@ -104,20 +104,7 @@ const nls3WorldProgram = `
     return psi;
   };
 
-  const _initField3 = () => {
-    const cx = GRID / 2, cy = GRID / 2, r0 = GRID * 0.28;
-    let psi = new Float64Array(2 * NCELLS);
-    const pi23 = TWO_PI / 3;
-    [
-      { sx: cx,             sy: cy - r0,     vx: 0,         vy:  SOL_V,      ph: 0        },
-      { sx: cx - r0*0.866,  sy: cy + r0*0.5, vx:  SOL_V*0.866, vy: -SOL_V*0.5, ph: pi23  },
-      { sx: cx + r0*0.866,  sy: cy + r0*0.5, vx: -SOL_V*0.866, vy: -SOL_V*0.5, ph: 2*pi23 },
-    ].forEach(({ sx, sy, vx, vy, ph }) => {
-      psi = _addSoliton(psi, sx, sy, SOL_AMP, vx, vy, SOL_W, ph);
-    });
-    return psi;
-  };
-
+  // Launch one IFS slot (A or B). slot='A'|'B'. Uses a unique cycleId per launch.
   const _launchSlot = (s, ctx, slot, cycleId) => {
     const psi_nl   = _nlHalf(s.psi, DT * 0.5);
     const power_nl = _power(psi_nl);
@@ -133,6 +120,7 @@ const nls3WorldProgram = `
       ctx.future(0, 'fresnelBeat', { depth: 0, delay, gen: 0, cycleId, slot });
     }
     ctx.future(FRESNEL_DONE_DELAY, 'finalizeFresnelm', { cycleId, slot, power_nl });
+    // Each slot stores its own psi_nl snapshot independently
     return {
       ...s,
       ['slotPsiNl_'  + slot]: psi_nl,
@@ -153,12 +141,14 @@ const nls3WorldProgram = `
       time:     0,
       power0:   1,
       cycleCount: 0,
+      // Dual-slot IFS overlap — A and B staggered by CYCLE/2
       slotId_A: -1, slotActive_A: false, slotPsiNl_A: null, slotPowerNl_A: 1,
       slotKernel_A: [], slotEnergy_A: new Array(${IFS_DEPTH}).fill(0),
       slotEvents_A: [], slotPhase_A:  new Array(${IFS_DEPTH}).fill(null),
       slotId_B: -2, slotActive_B: false, slotPsiNl_B: null, slotPowerNl_B: 1,
       slotKernel_B: [], slotEnergy_B: new Array(${IFS_DEPTH}).fill(0),
       slotEvents_B: [], slotPhase_B:  new Array(${IFS_DEPTH}).fill(null),
+      // Current finalized kernel (from whichever slot last completed)
       cachedRadii: [],
       cachedWeights: [],
       cachedOffsets: [],
@@ -175,10 +165,10 @@ const nls3WorldProgram = `
       let s = state;
       if (pulse?._isEvent && !pulse.isSubTick) {
         const t = pulse._eventPayload?.type;
-        if (t === 'inject' || t === 'reset' || t === 'reset3' || t === 'nextCycle')
+        if (t === 'inject' || t === 'reset' || t === 'nextCycle')
           s = { ...s, _queue: [{ fireAt: pulse.wallTime, msg: t, payload: pulse._eventPayload ?? {} }, ...(s._queue ?? [])] };
       }
-      return W.reduce(s, pulse, 'nls3', {
+      return W.reduce(s, pulse, 'nls4', {
 
         __macro: (s, p, ctx) => {
           if (p.isSubTick) return s;
@@ -187,6 +177,7 @@ const nls3WorldProgram = `
             ctx.future(100, '_keepalive', {});
             const psi    = _initField();
             const power0 = _power(psi);
+            // Launch slot A; slot B starts after FRESNEL_DONE_DELAY/2
             let s2 = _launchSlot({ ...s, psi, power0 }, ctx, 'A', tick);
             ctx.future(Math.floor(FRESNEL_DONE_DELAY / 2), '_launchB', { cycleId: tick + 1 });
             return s2;
@@ -218,6 +209,8 @@ const nls3WorldProgram = `
           } else if (s.cachedRadii.length > 0) {
             ctx.future(NEXT_STEP_DELAY, '_physStep', { stepsLeft: PHYS_STEPS, fRadii: s.cachedRadii, fWeights: s.cachedWeights, fOffs: s.cachedOffsets });
           }
+          // If cachedRadii empty (post-reset), chain stops here;
+          // finalizeFresnelm will restart it when the new kernel is ready.
           return { ...s, psi, time: (s.time ?? 0) + DT };
         },
 
@@ -251,12 +244,15 @@ const nls3WorldProgram = `
           const { fRadii, fWeights, sEff } = _buildNativeKernel(s['slotKernel_' + slot] ?? [], FRAC_ALPHA, MAX_IFS_BANDS);
           const fOffs = _buildRingOffsets(fRadii);
           const specCorr = _computeSpecCorr(psi_nl);
+          // Apply pending injection
           let psi = s.psi;
           const inj = s.pendingInject;
           if (inj) psi = _addSoliton(psi, inj.sx, inj.sy, inj.amp, inj.vx, inj.vy, inj.w);
+          // (Re)start physics chain — handles both first-ever finalize and post-reset
           if (!s.cachedRadii.length) {
             ctx.future(0, '_physStep', { stepsLeft: PHYS_STEPS, fRadii, fWeights, fOffs });
           }
+          // Schedule the opposite slot to start after half the IFS window
           const nextSlot    = slot === 'A' ? 'B' : 'A';
           const nextCycleId = p.cycleId + 2;
           if (!s['slotActive_' + nextSlot]) {
@@ -286,21 +282,8 @@ const nls3WorldProgram = `
         reset: (s, p, ctx) => {
           const psi    = _initField();
           const power0 = _power(psi);
-          ctx.future(NEXT_STEP_DELAY, '_launchA', { cycleId: ctx.wallTime + 1 });
-          ctx.future(NEXT_STEP_DELAY + Math.floor(FRESNEL_DONE_DELAY / 2), '_launchB', { cycleId: ctx.wallTime + 2 });
-          return {
-            ...s, psi, power0, time: 0, cycleCount: 0, pendingInject: null,
-            ifsNBands: 0, ifsRadiiStr: '', ifsWeightsStr: '', ifsSEff: 0,
-            cachedRadii: [], cachedWeights: [], cachedOffsets: [],
-            specCorr: new Array(IFS_DEPTH).fill(0), specN: new Array(IFS_DEPTH).fill(0),
-            slotActive_A: false, slotPsiNl_A: null, slotKernel_A: [], slotEnergy_A: new Array(IFS_DEPTH).fill(0), slotEvents_A: [], slotPhase_A: new Array(IFS_DEPTH).fill(null),
-            slotActive_B: false, slotPsiNl_B: null, slotKernel_B: [], slotEnergy_B: new Array(IFS_DEPTH).fill(0), slotEvents_B: [], slotPhase_B: new Array(IFS_DEPTH).fill(null),
-          };
-        },
-
-        reset3: (s, p, ctx) => {
-          const psi    = _initField3();
-          const power0 = _power(psi);
+          // Schedule slot launches at positive delays so they fire in future ticks,
+          // not as subtick drains in this turn.
           ctx.future(NEXT_STEP_DELAY, '_launchA', { cycleId: ctx.wallTime + 1 });
           ctx.future(NEXT_STEP_DELAY + Math.floor(FRESNEL_DONE_DELAY / 2), '_launchB', { cycleId: ctx.wallTime + 2 });
           return {
@@ -332,17 +315,17 @@ const nls3WorldProgram = `
   );
 
   const _isStable = W.stable([nls], reflector);
-  const _export   = W.export(Renkon, { nls3: nls }, _isStable);
+  const _export   = W.export(Renkon, { nls4: nls }, _isStable);
 `;
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
-function makeNls3Renderer(core) {
+function makeNls4Renderer(core) {
   const { _clientBadge, _renderAvatars } = core;
 
   return (world, peerId, containerId, sendCursorMove, injectEvent) => {
-    if (!document.getElementById('nls3-wrap')) {
+    if (!document.getElementById('nls4-wrap')) {
       const wrap = document.createElement('div');
-      wrap.id = 'nls3-wrap';
+      wrap.id = 'nls4-wrap';
       Object.assign(wrap.style, {
         display: 'flex', gap: '0', flexWrap: 'nowrap',
         alignItems: 'stretch', height: '100vh', width: '100%', overflow: 'hidden',
@@ -358,53 +341,63 @@ function makeNls3Renderer(core) {
       flex: '1', minWidth: '0', minHeight: '0', boxSizing: 'border-box',
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
     });
-    document.getElementById('nls3-wrap').appendChild(root);
+    document.getElementById('nls4-wrap').appendChild(root);
 
+    // ── Side selection — default left, switchable live ────────────────────
+    let _peerSide = 'left';
+
+    // ── Main UI — visible immediately ────────────────────────────────────
     const main = document.createElement('div');
     Object.assign(main.style, { display: 'flex', flex: '1', flexDirection: 'row', minHeight: '0' });
     root.appendChild(main);
 
-    // ── Canvas column ─────────────────────────────────────────────────────
+    // ── Canvas column — flushes to the inner browser edge ────────────────
     const canvasCol = document.createElement('div');
     Object.assign(canvasCol.style, {
       flex: '1', minWidth: '0', minHeight: '0',
-      display: 'flex', flexDirection: 'row', alignItems: 'stretch',
-      justifyContent: 'center',
+      display: 'flex', flexDirection: 'row',
+      alignItems: 'stretch',
+      // justifyContent is set per side by _applySide()
     });
 
-    const RENDER_SCALE = 4;
-    const RW = GRID * RENDER_SCALE;
+    // Canvas wrapper — full height, canvas pinned to the inner edge
+    const canvasSlot = document.createElement('div');
+    Object.assign(canvasSlot.style, {
+      position: 'relative', height: '100%',
+      display: 'flex', alignItems: 'stretch',
+    });
+    canvasCol.appendChild(canvasSlot);
+
+    const RENDER_SCALE = 4; // upsample factor — pure visual, no physics change
+    const RW = HALF * RENDER_SCALE;
     const RH = GRID * RENDER_SCALE;
 
     const mkCanvas = () => {
       const c = document.createElement('canvas');
-      c.width = RW; c.height = RH;
+      c.width  = RW; c.height = RH;
       Object.assign(c.style, {
         height: '100%', width: 'auto',
-        aspectRatio: `${GRID} / ${GRID}`,
+        aspectRatio: `${HALF} / ${GRID}`,
         imageRendering: 'auto', display: 'block', cursor: 'crosshair',
       });
       return c;
     };
-
-    let _showPhase = false;
-    let _smoothMaxI = 0;
-
-    const canvasSlot = document.createElement('div');
-    Object.assign(canvasSlot.style, { position: 'relative', height: '100%', display: 'flex', alignItems: 'stretch' });
     const intCanvas   = mkCanvas();
     const phaseCanvas = mkCanvas();
     phaseCanvas.style.display = 'none';
     canvasSlot.appendChild(intCanvas);
     canvasSlot.appendChild(phaseCanvas);
-    canvasCol.appendChild(canvasSlot);
 
     const intCtx2   = intCanvas.getContext('2d');
     const phaseCtx2 = phaseCanvas.getContext('2d');
     const intBuf2   = intCtx2.createImageData(RW, RH);
     const phaseBuf2 = phaseCtx2.createImageData(RW, RH);
 
-    // ── Clock column ──────────────────────────────────────────────────────
+    let _showPhase  = false;
+    let _viewOffset = 0; // default left offset; updated by side switch or slider
+    let _smoothMaxI = 0; // exponentially smoothed peak intensity for stable colormap
+
+    // ── Clock column — sits on the outer edge, with title + controls ─────
     const clockCol = document.createElement('div');
     Object.assign(clockCol.style, {
       flexShrink: '0', width: '120px', display: 'flex', flexDirection: 'column',
@@ -444,9 +437,39 @@ function makeNls3Renderer(core) {
       b.addEventListener('touchend', (e) => { e.preventDefault(); handler(e); }, { passive: false });
       return b;
     };
+    const _applySide = (side) => {
+      _peerSide = side;
+      _viewOffset = side === 'left' ? 0 : HALF;
+      offsetInput.value = _viewOffset;
+      while (main.firstChild) main.removeChild(main.firstChild);
+      if (side === 'left') {
+        // clock on left, canvas on right → canvas flush to RIGHT (inner) edge
+        main.appendChild(clockCol); main.appendChild(canvasCol);
+        canvasCol.style.justifyContent = 'flex-end';
+      } else {
+        // canvas on left, clock on right → canvas flush to LEFT (inner) edge
+        main.appendChild(canvasCol); main.appendChild(clockCol);
+        canvasCol.style.justifyContent = 'flex-start';
+      }
+      btnLeft.style.background  = side === 'left'  ? '#0cf' : '#1a1a1a';
+      btnLeft.style.color       = side === 'left'  ? '#000' : '#0cf';
+      btnRight.style.background = side === 'right' ? '#f80' : '#1a1a1a';
+      btnRight.style.color      = side === 'right' ? '#000' : '#f80';
+    };
 
     clockCol.appendChild(mkBtn('Reset  ↺', '#0d6', () => injectEvent?.({ type: 'reset' })));
-    clockCol.appendChild(mkBtn('3 Solitons ⌬', '#f80', () => injectEvent?.({ type: 'reset3' })));
+
+    const sideRow = document.createElement('div');
+    Object.assign(sideRow.style, { display: 'flex', gap: '4px' });
+    const btnLeft  = mkBtn('◀ L', '#0cf', () => _applySide('left'));
+    const btnRight = mkBtn('R ▶', '#1a1a1a', () => _applySide('right'));
+    btnLeft.style.color  = '#000';
+    btnRight.style.color = '#f80';
+    Object.assign(btnLeft.style,  { flex: '1' });
+    Object.assign(btnRight.style, { flex: '1' });
+    sideRow.appendChild(btnLeft);
+    sideRow.appendChild(btnRight);
+    clockCol.appendChild(sideRow);
 
     const toggleBtn = mkBtn('INTENSITY', '#1a1a1a', () => {
       _showPhase = !_showPhase;
@@ -458,29 +481,54 @@ function makeNls3Renderer(core) {
     toggleBtn.style.color = '#f84';
     clockCol.appendChild(toggleBtn);
 
-    main.appendChild(clockCol);
-    main.appendChild(canvasCol);
+    const offsetRow = document.createElement('div');
+    Object.assign(offsetRow.style, { display: 'flex', alignItems: 'center', gap: '4px' });
+    const offsetLbl = document.createElement('div');
+    Object.assign(offsetLbl.style, { fontSize: '7px', color: '#555', flexShrink: '0' });
+    offsetLbl.textContent = 'offset';
+    const offsetInput = document.createElement('input');
+    offsetInput.type = 'number'; offsetInput.value = 0; offsetInput.step = 1;
+    Object.assign(offsetInput.style, {
+      flex: '1', minWidth: '0', background: '#111', color: '#0cf',
+      border: '1px solid #333', borderRadius: '3px',
+      padding: '2px 4px', fontSize: '8px', fontFamily: 'ui-monospace,monospace',
+      textAlign: 'right',
+    });
+    offsetInput.addEventListener('input', () => { _viewOffset = parseInt(offsetInput.value) || 0; });
+    offsetRow.appendChild(offsetLbl);
+    offsetRow.appendChild(offsetInput);
+    clockCol.appendChild(offsetRow);
 
-    // ── Click / touch → inject soliton ───────────────────────────────────
+    // Unified pointer handler — works for both mouse and touch events
     const _clientXY = (e) => {
       if (e.changedTouches?.length) return { cx: e.changedTouches[0].clientX, cy: e.changedTouches[0].clientY };
       return { cx: e.clientX, cy: e.clientY };
     };
+
     const onCanvasClick = (canvas) => (e) => {
       e.preventDefault();
       const { cx, cy } = _clientXY(e);
-      const rect = canvas.getBoundingClientRect();
-      const px   = rect.width / GRID || 1;
-      const sx   = Math.floor((cx - rect.left) / px);
-      const sy   = Math.floor((cy - rect.top)  / px);
+      const rect    = canvas.getBoundingClientRect();
+      const px      = rect.width / HALF || 1;
+      const lx      = Math.floor((cx - rect.left) / px);
+      const ly      = Math.floor((cy - rect.top)  / px);
+      const xOffset = _viewOffset;
+      const sx      = xOffset + lx;
+      const sy      = ly;
       if (sx >= 0 && sx < GRID && sy >= 0 && sy < GRID) {
         let h = (sx * 73856093) ^ (sy * 19349663);
         h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
         h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
         const angle = (h / 0xffffffff) * 2 * Math.PI;
-        injectEvent?.({ type: 'inject', sx, sy, vx: Math.cos(angle) * SOL_V, vy: Math.sin(angle) * SOL_V });
+        const vx = Math.cos(angle) * SOL_V;
+        const vy = Math.sin(angle) * SOL_V;
+        injectEvent?.({ type: 'inject', sx, sy, vx, vy });
       }
     };
+
+
+    // Initial layout + click/touch wiring (left by default)
+    _applySide('left');
     for (const c of [intCanvas, phaseCanvas]) {
       const h = onCanvasClick(c);
       c.addEventListener('click',      h);
@@ -488,14 +536,16 @@ function makeNls3Renderer(core) {
       c.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
     }
 
-    // ── Main render ───────────────────────────────────────────────────────
+    // ── Main render function ──────────────────────────────────────────────
     const _renderFrame = () => {
-      const n = world.getNodeState('nls3');
+      const n = world.getNodeState('nls4');
       if (!n?.psi || n.cycleCount < 1) return;
 
+      const xOffset = _viewOffset;
       const psi = n.psi;
       const lt  = world.ps.app.logicalTime ?? 0;
 
+      // Smoothed max-intensity normalisation — avoids brightness flicker at cycle boundaries
       let maxI = 1e-9;
       for (let j = 0; j < N_CELLS; j++) {
         const v = psi[j*2]*psi[j*2] + psi[j*2+1]*psi[j*2+1];
@@ -505,27 +555,38 @@ function makeNls3Renderer(core) {
       const norm = 1 / Math.sqrt(_smoothMaxI);
       const logS = 1 / Math.log(1 + 9);
 
+      // Color split: warm = left half of field, cool = right half.
+      // Purely visual spatial zone — solitons swap colors as they cross center.
+
+      // ── Render upsampled view — bilinear sample from physics grid ────────
       for (let ry = 0; ry < RH; ry++) {
+        // map render pixel centre to physics grid coordinate
         const fy = (ry + 0.5) / RENDER_SCALE - 0.5;
-        const y0 = Math.floor(fy); const ty = fy - y0; const y1 = y0 + 1;
+        const y0 = Math.floor(fy); const ty = fy - y0;
+        const y1 = y0 + 1;
         for (let rx = 0; rx < RW; rx++) {
           const fx = (rx + 0.5) / RENDER_SCALE - 0.5;
-          const lx0 = Math.floor(fx); const tx = fx - lx0; const lx1 = lx0 + 1;
+          const lx0 = Math.floor(fx); const tx = fx - lx0;
+          const lx1 = lx0 + 1;
           const bi = (ry * RW + rx) * 4;
+
+          // sample 4 corners with bilinear weights
           let re = 0, im = 0;
           for (let dy = 0; dy <= 1; dy++) {
             const cy2 = Math.max(0, Math.min(GRID - 1, dy === 0 ? y0 : y1));
             const wy  = dy === 0 ? (1 - ty) : ty;
             for (let dx = 0; dx <= 1; dx++) {
-              const gx = (dx === 0 ? lx0 : lx1);
+              const lx  = dx === 0 ? lx0 : lx1;
+              const gx  = xOffset + lx;
+              const wx  = dx === 0 ? (1 - tx) : tx;
               if (gx < 0 || gx >= GRID) continue;
-              const wx = dx === 0 ? (1 - tx) : tx;
-              const j  = cy2 * GRID + gx;
-              const w  = wx * wy;
+              const j = cy2 * GRID + gx;
+              const w = wx * wy;
               re += psi[j*2]   * w;
               im += psi[j*2+1] * w;
             }
           }
+
           const amp = Math.sqrt(re*re + im*im) * norm;
           const lv  = Math.log(1 + 9 * amp) * logS;
           const [hr, hg, hb] = colormaps.hot(lv);
@@ -544,9 +605,11 @@ function makeNls3Renderer(core) {
       phaseCtx2.putImageData(phaseBuf2, 0, 0);
 
       const isActive = !!(n.slotActive_A || n.slotActive_B);
+      const side     = _peerSide ?? '?';
       title.style.color = isActive ? '#fa0' : '#a70';
       title.textContent =
-        `PEER ${peerId} · NLS3  s≈${(n.ifsSEff ?? 0).toFixed(3)}  ` +
+        `PEER ${peerId} [${side.toUpperCase()}] · NLS4  ` +
+        `s≈${(n.ifsSEff ?? 0).toFixed(3)}  ` +
         (n.slotActive_A ? '[A]' : '') + (n.slotActive_B ? '[B]' : '');
 
       let power = 0;
@@ -555,20 +618,28 @@ function makeNls3Renderer(core) {
 
       const el = document.getElementById(containerId + '-stats');
       if (el) el.innerHTML =
-        `t=${(n.time ?? 0).toFixed(1)}  cycle=${n.cycleCount ?? 0}` +
-        `  power=${ratio.toFixed(4)}  bands=${n.ifsNBands ?? 0}` +
-        `  ${_clientBadge(world)}`;
+        `t=${(n.time ?? 0).toFixed(1)}  max|ψ|²=${maxI.toFixed(2)}` +
+        `  power=${ratio.toFixed(4)}  cycle=${n.cycleCount ?? 0}` +
+        `  side=${side}  ${_clientBadge(world)}`;
 
+      // Merge both slot energy/events for the IFS clock display
       const energyA = n.slotEnergy_A ?? [];
       const energyB = n.slotEnergy_B ?? [];
       const mergedEnergy = energyA.map((v, i) => Math.max(v, energyB[i] ?? 0));
       const mergedEvents = [...(n.slotEvents_A ?? []), ...(n.slotEvents_B ?? [])]
         .sort((a, b) => a.wt - b.wt).slice(-80);
 
-      ifsClock.update({ energy: mergedEnergy, events: mergedEvents, isActive, lt });
+      ifsClock.update({
+        energy: mergedEnergy,
+        events: mergedEvents,
+        isActive,
+        lt,
+      });
+
       _renderAvatars(world, root);
     };
 
+    // RAF loop — renders at 60fps using latest world state between reflector ticks
     let _rafId = null;
     const _rafLoop = () => { _renderFrame(); _rafId = requestAnimationFrame(_rafLoop); };
     _rafId = requestAnimationFrame(_rafLoop);
@@ -578,11 +649,12 @@ function makeNls3Renderer(core) {
 }
 
 export default {
-  title:       'NLS3 | IFS-Native Laplacian (Emergent s)',
-  selo:        'nls3',
+  title:       'NLS4 | Split-View Distributed Soliton',
+  selo:        'nls4',
   reflectorMs: REFLECTOR_MS,
   metaOptions: { _subtickMs: SUBTICK_MS },
-  makeScripts: (av) => [nls3WorldProgram + av],
-  makeRenderer: makeNls3Renderer,
+  makeScripts: (av) => [nls4WorldProgram + av],
+  makeRenderer: makeNls4Renderer,
+  wrapId:      'nls4-wrap',
   hideTopBar:  true,
 };

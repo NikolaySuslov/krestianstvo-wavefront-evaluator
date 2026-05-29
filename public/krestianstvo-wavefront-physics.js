@@ -73,7 +73,7 @@ export const FRAG = {
   nlsOps: (grid, ncells) => `
   // Exact NL half-step: ψ → ψ · exp(-i·γ·sat(|ψ|²)·dt)
   const _nlHalf = (psi, dt) => {
-    const out = psi.slice();
+    const out = new Float64Array(psi);
     for (let j = 0; j < ${ncells}; j++) {
       const re = psi[j*2], im = psi[j*2+1];
       const amp2 = re*re + im*im;
@@ -94,7 +94,7 @@ export const FRAG = {
   // Inject sech-envelope soliton at (sx,sy) with velocity (vx,vy)
   const _addSoliton = (psi, sx, sy, amp, vx, vy, w, ph0) => {
     ph0 = ph0 ?? 0;
-    const out = psi.slice();
+    const out = new Float64Array(psi);
     for (let cy = 0; cy < ${grid}; cy++) {
       for (let cx = 0; cx < ${grid}; cx++) {
         const dx = cx - sx, dy = cy - sy;
@@ -117,66 +117,102 @@ export const FRAG = {
   // Full-ring circumference sampling (isotropic) — no cross-shaped PSF artifact.
   ifsStencil: (grid) => `
   // IFS-driven fractional Laplacian: 3-step symplectic leapfrog, isotropic rings.
-  // fRadii[d], fWeights[d]: IFS-discovered rings and their kernel weights.
-  // Ring offsets precomputed once: nSteps = ceil(2π·r), uniformly sampled angles.
+  // fRadii[d]: ring radii. Offsets stored as flat Int16Array [dx0,dy0,dx1,dy1,...].
   const _buildRingOffsets = (fRadii) => fRadii.map(r => {
     const nSteps = Math.max(8, Math.ceil(2 * Math.PI * r));
-    const offs = [];
+    const flat = new Int16Array(nSteps * 2);
     for (let k = 0; k < nSteps; k++) {
-      offs.push([
-        Math.round(r * Math.cos(k * 2 * Math.PI / nSteps)),
-        Math.round(r * Math.sin(k * 2 * Math.PI / nSteps)),
-      ]);
+      flat[k*2]   = Math.round(r * Math.cos(k * 2 * Math.PI / nSteps));
+      flat[k*2+1] = Math.round(r * Math.sin(k * 2 * Math.PI / nSteps));
     }
-    return offs;
+    return flat;
   });
-  const _lapRing = (buf, cx, cy, offs, ch) => {
-    const G = ${grid};
-    let acc = 0;
-    for (const [dx, dy] of offs)
-      acc += buf[((((cy+dy)%G+G)%G)*G+(((cx+dx)%G+G)%G))*2+ch];
-    // Same convention as nearest-neighbour stencil: Σ_ring - n·center
-    // fWeights already calibrated for 4-point (n=4) convention via fracAlpha/totalBeats.
-    // Dividing by offs.length/4 keeps the effective coupling per ring at the same scale.
-    return (acc - offs.length * buf[(cy*G+cx)*2+ch]) * (4 / offs.length);
-  };
-  const _linearStepIFS = (psi, dt, fRadii, fWeights) => {
-    const out  = psi.slice();
+  const _linearStepIFS = (psi, dt, fRadii, fWeights, fOffs) => {
+    const out  = new Float64Array(psi);
     const h    = dt * 0.25;
     const f    = dt * 0.5;
     const nF   = fRadii.length;
     const G    = ${grid};
-    const offs = _buildRingOffsets(fRadii);
+    const offs = fOffs ?? _buildRingOffsets(fRadii);
+    // Precompute per-ring: point count and normalisation factor
+    const ringN    = new Int32Array(nF);
+    const ringNorm = new Float64Array(nF);
+    for (let d = 0; d < nF; d++) {
+      ringN[d]    = offs[d].length >> 1;
+      ringNorm[d] = fWeights[d] * 4 / ringN[d];
+    }
     // Step 1: Re -= (dt/4)·[∇²Im + Σ_d fw_d·ring_d Im]
     for (let y = 0; y < G; y++) {
+      const ym = ((y - 1 + G) % G) * G;
+      const yp = ((y + 1)     % G) * G;
       for (let x = 0; x < G; x++) {
-        const id = y*G + x;
-        let lap = out[(y*G+(x+1)%G)*2+1] + out[(y*G+(x-1+G)%G)*2+1]
-                + out[(((y+1)%G)*G+x)*2+1] + out[(((y-1+G)%G)*G+x)*2+1]
+        const id  = y*G + x;
+        const xm  = (x - 1 + G) % G;
+        const xp  = (x + 1)     % G;
+        let lap = out[(y*G+xp)*2+1] + out[(y*G+xm)*2+1]
+                + out[(yp+x)*2+1]   + out[(ym+x)*2+1]
                 - 4*out[id*2+1];
-        for (let d = 0; d < nF; d++) lap += fWeights[d] * _lapRing(out, x, y, offs[d], 1);
+        for (let d = 0; d < nF; d++) {
+          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
+          const cbase = out[id*2+1];
+          let acc = 0;
+          for (let i = 0; i < n; i++) {
+            const nx = ((x + flat[i*2]   % G) + G) % G;
+            const ny = ((y + flat[i*2+1] % G) + G) % G;
+            acc += out[(ny*G + nx)*2 + 1];
+          }
+          lap += sc * (acc - n * cbase);
+        }
         out[id*2] -= h * lap;
       }
     }
     // Step 2: Im += (dt/2)·[∇²Re_half + Σ_d fw_d·ring_d Re_half]
     for (let y = 0; y < G; y++) {
+      const ym = ((y - 1 + G) % G) * G;
+      const yp = ((y + 1)     % G) * G;
       for (let x = 0; x < G; x++) {
-        const id = y*G + x;
-        let lap = out[(y*G+(x+1)%G)*2] + out[(y*G+(x-1+G)%G)*2]
-                + out[(((y+1)%G)*G+x)*2] + out[(((y-1+G)%G)*G+x)*2]
+        const id  = y*G + x;
+        const xm  = (x - 1 + G) % G;
+        const xp  = (x + 1)     % G;
+        let lap = out[(y*G+xp)*2] + out[(y*G+xm)*2]
+                + out[(yp+x)*2]   + out[(ym+x)*2]
                 - 4*out[id*2];
-        for (let d = 0; d < nF; d++) lap += fWeights[d] * _lapRing(out, x, y, offs[d], 0);
+        for (let d = 0; d < nF; d++) {
+          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
+          const cbase = out[id*2];
+          let acc = 0;
+          for (let i = 0; i < n; i++) {
+            const nx = ((x + flat[i*2]   % G) + G) % G;
+            const ny = ((y + flat[i*2+1] % G) + G) % G;
+            acc += out[(ny*G + nx)*2];
+          }
+          lap += sc * (acc - n * cbase);
+        }
         out[id*2+1] += f * lap;
       }
     }
     // Step 3: Re -= (dt/4)·[∇²Im_new + Σ_d fw_d·ring_d Im_new]
     for (let y = 0; y < G; y++) {
+      const ym = ((y - 1 + G) % G) * G;
+      const yp = ((y + 1)     % G) * G;
       for (let x = 0; x < G; x++) {
-        const id = y*G + x;
-        let lap = out[(y*G+(x+1)%G)*2+1] + out[(y*G+(x-1+G)%G)*2+1]
-                + out[(((y+1)%G)*G+x)*2+1] + out[(((y-1+G)%G)*G+x)*2+1]
+        const id  = y*G + x;
+        const xm  = (x - 1 + G) % G;
+        const xp  = (x + 1)     % G;
+        let lap = out[(y*G+xp)*2+1] + out[(y*G+xm)*2+1]
+                + out[(yp+x)*2+1]   + out[(ym+x)*2+1]
                 - 4*out[id*2+1];
-        for (let d = 0; d < nF; d++) lap += fWeights[d] * _lapRing(out, x, y, offs[d], 1);
+        for (let d = 0; d < nF; d++) {
+          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
+          const cbase = out[id*2+1];
+          let acc = 0;
+          for (let i = 0; i < n; i++) {
+            const nx = ((x + flat[i*2]   % G) + G) % G;
+            const ny = ((y + flat[i*2+1] % G) + G) % G;
+            acc += out[(ny*G + nx)*2 + 1];
+          }
+          lap += sc * (acc - n * cbase);
+        }
         out[id*2] -= h * lap;
       }
     }
@@ -205,11 +241,29 @@ export const FRAG = {
   // IFS-native kernel: K(r) = fracAlpha * count(r) / totalBeats
   // The IFS empirical visit-frequency IS the kernel — no external 1/r^{2s}.
   // Fractional order s emerges from IFS geometry (log-log slope of w vs r).
-  const _buildNativeKernel = (fracKernel, fracAlpha) => {
+  const _buildNativeKernel = (fracKernel, fracAlpha, maxBands) => {
     const countMap = new Map();
     for (const r of fracKernel) countMap.set(r, (countMap.get(r) ?? 0) + 1);
     const totalBeats = fracKernel.length || 1;
-    const fRadii   = [...countMap.keys()].sort((a, b) => a - b);
+    let fRadii   = [...countMap.keys()].sort((a, b) => a - b);
+    // Merge excess bands by weight — keep top maxBands by count, add their weights
+    if (maxBands && fRadii.length > maxBands) {
+      const byCount = fRadii.slice().sort((a, b) => countMap.get(b) - countMap.get(a));
+      const kept = new Set(byCount.slice(0, maxBands));
+      const mergedCount = new Map();
+      for (const r of fRadii) {
+        if (kept.has(r)) { mergedCount.set(r, (mergedCount.get(r) ?? 0) + countMap.get(r)); }
+        else {
+          // merge into nearest kept radius
+          let nearest = byCount[0];
+          let minD = Math.abs(r - nearest);
+          for (const kr of kept) { const d = Math.abs(r - kr); if (d < minD) { minD = d; nearest = kr; } }
+          mergedCount.set(nearest, (mergedCount.get(nearest) ?? 0) + countMap.get(r));
+        }
+      }
+      fRadii = [...kept].sort((a, b) => a - b);
+      fRadii.forEach(r => countMap.set(r, mergedCount.get(r) ?? countMap.get(r)));
+    }
     const fWeights = fRadii.map(r => fracAlpha * countMap.get(r) / totalBeats);
     // Estimate emergent s: log-log slope of w(r) vs r; for ρ(r)~1/r → s≈0.5
     let sEff = 0;
@@ -529,14 +583,16 @@ export const colormaps = {
 
   // Phase + amplitude → HSV-like RGB.  norm = 1/sqrt(maxIntensity).
   phase: (re, im, norm) => {
+    if (!Number.isFinite(re) || !Number.isFinite(im) || !Number.isFinite(norm)) return [0, 0, 0];
     const amp = Math.sqrt(re*re + im*im) * norm;
-    if (amp < 0.015) return [0, 0, 0];
+    if (!(amp >= 0.015)) return [0, 0, 0];
     const hue = (Math.atan2(im, re) / (2 * Math.PI) + 1) % 1;
     const v   = Math.min(1, Math.log(1 + 6 * amp) / Math.log(7));
     const hi  = Math.floor(hue * 6) % 6;
     const f   = hue * 6 - Math.floor(hue * 6);
     const q   = v * (1 - f), t0 = v * f;
     const rgb = [[v,t0,0],[q,v,0],[0,v,t0],[0,q,v],[t0,0,v],[v,0,q]][hi];
+    if (!rgb) return [0, 0, 0];
     return rgb.map(x => Math.floor(x * 255));
   },
 

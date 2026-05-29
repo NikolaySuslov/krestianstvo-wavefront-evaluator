@@ -167,7 +167,7 @@ function makeFractalHeartbeatRenderer(core) {
       if (lt !== _historyLt) {
         _historyLt = lt;
         for (let d = 0; d < FRACTAL_DEPTH; d++) {
-          const periodTicks = (_lastDelay[d] > 0) ? _lastDelay[d] : FRACTAL_BASE_DELAY / Math.pow(2, d);
+          const periodTicks = FRACTAL_BASE_DELAY / Math.pow(2, d);
           _ltPhase[d] = (lt / periodTicks) % 1;
         }
         _cycleFrac  = (lt % FRACTAL_CYCLE) / FRACTAL_CYCLE;

@@ -359,34 +359,71 @@ export const makeMeta = (peerId, rngSeed = null, reflectorMs = 50) => {
         ? "⚡EVENT payload=" + JSON.stringify(pulse._eventPayload)
         : "♥HB")
     ) : {};
+    const _t0 = performance.now();
     ps.registerEvent("reflectorPulse", pulse);
     ps.evaluate();
+    const _tEval = performance.now() - _t0;
+    if (_tEval > 5 || pulse._isEvent) {
+      let nBands = '?';
+      for (const [, wps] of ps.app.registry) { const v = wps.app?.nls4; if (v) nBands = v.ifsNBands ?? '?'; }
+      console.log(`[META:injectPulse] lt=${pulse.logicalTime} isEvent=${!!pulse._isEvent} eval=${_tEval.toFixed(2)}ms nBands=${nBands}`);
+    }
+    if (pulse.logicalTime % 100 === 0) {
+      let worldAlarms = '?', worldResolved = '?', worldChangeList = '?';
+      for (const [, wps] of ps.app.registry) {
+        worldAlarms    = wps.evaluationAlarm?.length ?? '?';
+        worldResolved  = wps.resolved?.size ?? '?';
+        worldChangeList= wps.changeList?.size ?? '?';
+      }
+      console.log(`[PS] lt=${pulse.logicalTime} metaAlarms=${ps.evaluationAlarm?.length} metaResolved=${ps.resolved?.size} worldAlarms=${worldAlarms} worldResolved=${worldResolved} worldChangeList=${worldChangeList}`);
+    }
   };
 
   const startAutonomous = () => {
     if (_autoInterval) return;
-    _autoInterval = setInterval(() => {
-      _localLt++;
-      const pulse = Object.freeze({
-        logicalTime: _localLt,
-        wallTime:    _localLt,
-        wallMs:      _localLt * reflectorMs,
-        _isLocal:    true,
-      });
-      ps.registerEvent("reflectorPulse", pulse);
-      ps.evaluate();
-    }, reflectorMs);
+    let _lastFire = performance.now();
+    const _tick = (now) => {
+      if (!_autoInterval) return;
+      if (now - _lastFire >= reflectorMs) {
+        _lastFire += reflectorMs;
+        // prevent drift accumulation if tab was hidden
+        if (now - _lastFire > reflectorMs * 4) _lastFire = now;
+        _localLt++;
+        const pulse = Object.freeze({
+          logicalTime: _localLt,
+          wallTime:    _localLt,
+          wallMs:      _localLt * reflectorMs,
+          _isLocal:    true,
+        });
+        ps.registerEvent("reflectorPulse", pulse);
+        ps.evaluate();
+      }
+      _autoInterval = requestAnimationFrame(_tick);
+    };
+    _autoInterval = requestAnimationFrame(_tick);
   };
 
   const stopAutonomous = () => {
-    if (_autoInterval) { clearInterval(_autoInterval); _autoInterval = null; }
+    if (_autoInterval) { cancelAnimationFrame(_autoInterval); _autoInterval = null; }
   };
 
   const getLocalLt = () => _localLt;
 
   const takeSnapshot = () => {
     const _safeClone = (v) =>
-      JSON.parse(JSON.stringify(v, (k, val) => k === '_appRef' ? undefined : val));
+      JSON.parse(JSON.stringify(v, (k, val) => {
+        if (k === '_appRef') return undefined;
+        // Strip ephemeral wavefunction arrays — they are renderer-local and
+        // reconstructed on next tick. Keys: psi, refPsi, platePsi, cloudPsiC,
+        // cloudPsiF, objField, srcField, snapRefField, plateFastField, plateTierFields.
+        if (k === 'psi' || k === 'refPsi' || k === 'platePsi' ||
+            k === 'cloudPsiC' || k === 'cloudPsiF' ||
+            k === 'objField' || k === 'srcField' ||
+            k === 'snapRefField' || k === 'plateFastField' ||
+            k === 'plateTierFields' || k === 'depthTierFields') return undefined;
+        if (ArrayBuffer.isView(val) && !(val instanceof DataView)) return { __f64: Array.from(val) };
+        return val;
+      }));
     const snap = { time: _localLt, worlds: {} };
     console.group('%c[SNAP TAKE] peer=' + peerId + ' t=' + _localLt, 'color:#f90;font-weight:bold');
     for (const [worldId, worldPS] of ps.app.registry) {
@@ -429,11 +466,22 @@ export const makeMeta = (peerId, rngSeed = null, reflectorMs = 50) => {
         continue;
       }
       const app = worldPS.app;
+      const _revive = (val) => {
+        if (val && typeof val === 'object') {
+          if (Array.isArray(val.__f64)) return new Float64Array(val.__f64);
+          if (Array.isArray(val)) return val.map(_revive);
+          const out = {};
+          for (const [fk, fv] of Object.entries(val)) out[fk] = _revive(fv);
+          return out;
+        }
+        return val;
+      };
       const restoreState = {};
       for (const [k, v] of Object.entries(saved)) {
         if (k.startsWith('_')) continue;
-        restoreState[k] = v;
-        app[k] = v;
+        const rv = _revive(v);
+        restoreState[k] = rv;
+        app[k] = rv;
       }
       const prevLt = app.logicalTime || 0;
       app.logicalTime      = saved._logicalTime || snapTime;
@@ -635,7 +683,7 @@ const PEER_PROGRAM = `
       app.meta.injectPulse(msg);
     } else if (msg.type === 'selo_joined') {
       const r = app.meta.ps.app;
-      r.seloRoster = { myId: msg.clientId, clients: new Map([[msg.clientId, { joinedAt: Date.now() }]]), count: msg.clientsInSelo };
+      r.seloRoster = { myId: msg.clientId, clients: new Map([[msg.clientId, { joinedAt: Date.now() }]]), count: msg.clientsInSelo, joinOrder: msg.clientsInSelo };
       console.log('%c[PEER] joined selo:' + msg.seloId + ' as ' + msg.clientId + ' (' + msg.clientsInSelo + ' total)', 'color:#58a6ff');
       if (msg.clientsInSelo === 1) {
         // Sole member — no snapshot coming. Reset lt so reflector pulses pass isNewPulse.
@@ -715,9 +763,10 @@ export const makePeer = (meta, wsUrl, seloId = 'default') => {
     ws.send(JSON.stringify({ type: 'join_selo', seloId }));
   });
   ws.addEventListener('message', (event) => {
+    const _tMsg = performance.now();
     const msg = JSON.parse(event.data);
     if (msg.type === 'pulse') {
-      if (msg._isEvent) console.log('[PEER:' + seloId + '] ⚡pulse lt=' + msg.logicalTime + ' pulseId=#' + msg._pulseId);
+      if (msg._isEvent) console.log(`[PEER:${seloId}] ⚡pulse lt=${msg.logicalTime} arrived at ${_tMsg.toFixed(1)}ms`);
     } else if (msg.type === 'snapshot_apply') {
       console.log('%c[PEER:' + seloId + '] snapshot_apply t=' + (msg.snapshot?.time ?? '?'), 'color:#f90;font-weight:bold');
     } else if (msg.type !== 'selo_joined') {
@@ -725,7 +774,8 @@ export const makePeer = (meta, wsUrl, seloId = 'default') => {
     }
     if (messageResolvers.length > 0) messageResolvers.shift()(msg);
     else messageQueue.push(msg);
-    ps.evaluate();
+    // evaluate after microtask so the async generator resumes before we process
+    Promise.resolve().then(() => ps.evaluate());
   });
   ws.addEventListener('close', () => {
     console.log('%c[PEER:' + seloId + '] WS closed', 'color:#f85149');
@@ -743,8 +793,10 @@ export const makePeer = (meta, wsUrl, seloId = 'default') => {
   };
 
   const injectExternalEvent = (payload, targetWorldId = null, targetNodeId = null, targetWorldIds = null) => {
+    const _t0 = performance.now();
     ps.registerEvent('_outgoing', { payload, targetWorldId, targetNodeId, targetWorldIds });
     ps.evaluate();
+    console.log(`[INJECT] registerEvent+evaluate took ${(performance.now()-_t0).toFixed(2)}ms type=${payload?.type}`);
   };
 
   return { ps, disconnect, injectExternalEvent, seloId };
