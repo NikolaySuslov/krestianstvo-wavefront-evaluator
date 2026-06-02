@@ -45,19 +45,21 @@ export class IFSGpu {
     this._G  = grid;
     this._gl = null;
 
-    // GL resources
-    this._psiA  = null; this._fboA = null;  // ping
-    this._psiB  = null; this._fboB = null;  // pong
+    // GL resources — single retina psi ping-pong (was: separate main + sweep)
+    this._swA = null; this._fboSwA = null;  // ping
+    this._swB = null; this._fboSwB = null;  // pong
+    this._swSrc = 'A';
+    // Second independent eye soliton ping-pong — for LIVE eye row (no interference with main)
+    this._eyeA = null; this._fboEyeA = null;
+    this._eyeB = null; this._fboEyeB = null;
+    this._eyeSrc = 'A';
+    this._objEye = null; // eye soliton's own objField texture — independent from _obj
     this._ref   = null;                      // refField texture (RG32F)
     this._obj   = null;                      // objField texture (RG32F) — injection target
     this._plateA = null; this._fboPA = null; // plate ping (RGBA32F)
     this._plateB = null; this._fboPB = null; // plate pong (RGBA32F)
     this._plateSrc = 'A';
     this._plate = null; this._fboP = null;   // alias → current readable plate
-    // Sweep psi — independent ping-pong for plate accumulation sweep
-    this._swA = null; this._fboSwA = null;
-    this._swB = null; this._fboSwB = null;
-    this._swSrc = 'A';
     this._ringTex = null;                   // ring offsets (RGB32I)
     this._ringCount = 0;                    // total texels in ring texture
     this._ringMeta  = null;                 // Float32Array: [start, n, weight, pad] × nRings
@@ -78,12 +80,13 @@ export class IFSGpu {
     this._progStepHuygens     = null;
     this._progLensPhase       = null;
     this._progStepPlateKernel = null;
-    this._progPlatePhaseKick  = null;  // energy-conserving plate phase kick on sweep psi
-    this._progDemodPhaseKick  = null;  // phase kick by demodulated object wavefront phase
+    this._progPlatePhaseKick       = null;  // energy-conserving plate phase kick on sweep psi
+    this._progPlateAmpConstraint   = null;  // GS amplitude constraint: |psi| → sqrt(plate), keep phase
+    this._progDemodPhaseKick       = null;  // phase kick by demodulated object wavefront phase
+    this._progStepRecordHamiltonian = null; // IFS inject + exp(i·γ·plate) Hamiltonian in one pass
     this._progAddSources      = null;  // add point sources texture to psi
     this._srcTex              = null;  // RG32F source texture for beam injection
 
-    this._src  = 'A';  // which FBO currently holds latest psi
     this._nRings = 0;
   }
 
@@ -116,27 +119,27 @@ export class IFSGpu {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
-    // Create ping-pong psi textures
-    [this._psiA, this._fboA] = this._makePsiTex();
-    [this._psiB, this._fboB] = this._makePsiTex();
+    // Single retina psi ping-pong — used for everything (display, plate accum, recon)
+    [this._swA, this._fboSwA] = this._makePsiTex();
+    [this._swB, this._fboSwB] = this._makePsiTex();
+    this._swSrc = 'A';
+    // Eye soliton ping-pong — independent from main retina
+    [this._eyeA, this._fboEyeA] = this._makePsiTex();
+    [this._eyeB, this._fboEyeB] = this._makePsiTex();
+    this._eyeSrc = 'A';
+    this._objEye = this._makeRGF32Tex();
 
     // ref texture (RG32F, no FBO — read-only)
     this._ref = this._makeRGF32Tex();
 
-    // plate ping-pong (RGBA32F) — accumulate reads plateA, writes plateB, then swaps
+    // plate ping-pong (RGBA32F)
     [this._plateA, this._fboPA] = this._makePlateTex();
     [this._plateB, this._fboPB] = this._makePlateTex();
-    this._plateSrc = 'A';  // current readable plate
-    // Alias for backwards compat in destroy / readPlate
+    this._plateSrc = 'A';
     this._plate = this._plateA; this._fboP = this._fboPA;
 
     // obj texture (RG32F, no FBO — injection target, read-only in shader)
     this._obj = this._makeRGF32Tex();
-
-    // Sweep psi ping-pong (RG32F) — independent from display psi
-    [this._swA, this._fboSwA] = this._makePsiTex();
-    [this._swB, this._fboSwB] = this._makePsiTex();
-    this._swSrc = 'A';
     this._cplxA = this._makeRGF32Tex(); this._cplxB = this._makeRGF32Tex();
     this._fboCplxA = gl.createFramebuffer(); this._fboCplxB = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboCplxA);
@@ -159,11 +162,15 @@ export class IFSGpu {
     this._progStepHuygens = this._compileStep(GLSL_STEP_HUYGENS);
     this._progLensPhase       = this._compileStep(GLSL_LENS_PHASE);
     this._progStepPlateKernel = this._compileStep(GLSL_STEP_PLATE_KERNEL);
-    this._progPlatePhaseKick  = this._compileStep(GLSL_PLATE_PHASE_KICK);
-    this._progDemodPhaseKick  = this._compileStep(GLSL_DEMOD_PHASE_KICK);
-    this._progAddSources      = this._compileStep(GLSL_ADD_SOURCES);
+    this._progPlatePhaseKick      = this._compileStep(GLSL_PLATE_PHASE_KICK);
+    this._progPlateAmpConstraint  = this._compileStep(GLSL_PLATE_AMP_CONSTRAINT);
+    this._progDemodPhaseKick      = this._compileStep(GLSL_DEMOD_PHASE_KICK);
+    this._progStepRecordHamiltonian = this._compileStep(GLSL_STEP_RECORD_HAMILTONIAN);
+    this._progAddSources            = this._compileStep(GLSL_ADD_SOURCES);
     this._srcTex              = this._makeRGF32Tex();
     this._progRenderField = this._compileStep(GLSL_RENDER_FIELD);
+    this._progRenderDiff  = this._compileStep(GLSL_RENDER_DIFF);
+    this._progEyeHologram = this._compileStep(GLSL_EYE_HOLOGRAM);
     this._progRenderPhase = this._compileStep(GLSL_RENDER_PHASE);
     this._progRenderPlate = this._compileStep(GLSL_RENDER_PLATE);
 
@@ -181,11 +188,15 @@ export class IFSGpu {
       stepHuygens: { psi: ul(this._progStepHuygens, 'u_psi'), rings: ul(this._progStepHuygens, 'u_rings'), G: ul(this._progStepHuygens, 'u_G'), nRings: ul(this._progStepHuygens, 'u_nRings'), ringCount: ul(this._progStepHuygens, 'u_ringCount'), ringMeta: ul(this._progStepHuygens, 'u_ringMeta'), radii: ul(this._progStepHuygens, 'u_radii'), kwave: ul(this._progStepHuygens, 'u_kwave') },
       lensPhase:       { psi: ul(this._progLensPhase, 'u_psi'), kwave: ul(this._progLensPhase, 'u_kwave'), f: ul(this._progLensPhase, 'u_f'), G: ul(this._progLensPhase, 'u_G') },
       stepPlateKernel: { psi: ul(this._progStepPlateKernel, 'u_psi'), plate: ul(this._progStepPlateKernel, 'u_plate'), rings: ul(this._progStepPlateKernel, 'u_rings'), G: ul(this._progStepPlateKernel, 'u_G'), nRings: ul(this._progStepPlateKernel, 'u_nRings'), ringCount: ul(this._progStepPlateKernel, 'u_ringCount'), ringMeta: ul(this._progStepPlateKernel, 'u_ringMeta'), radii: ul(this._progStepPlateKernel, 'u_radii'), kwave: ul(this._progStepPlateKernel, 'u_kwave'), smoothMaxPlate: ul(this._progStepPlateKernel, 'u_smoothMaxPlate'), alpha: ul(this._progStepPlateKernel, 'u_alpha') },
-      platePhaseKick: { psi: ul(this._progPlatePhaseKick, 'u_psi'), plate: ul(this._progPlatePhaseKick, 'u_plate'), gamma: ul(this._progPlatePhaseKick, 'u_gamma'), smoothMaxPlate: ul(this._progPlatePhaseKick, 'u_smoothMaxPlate') },
+      platePhaseKick:    { psi: ul(this._progPlatePhaseKick,    'u_psi'), plate: ul(this._progPlatePhaseKick,    'u_plate'), gamma: ul(this._progPlatePhaseKick,    'u_gamma'), smoothMaxPlate: ul(this._progPlatePhaseKick,    'u_smoothMaxPlate') },
+      plateAmpConstraint:{ psi: ul(this._progPlateAmpConstraint,'u_psi'), plate: ul(this._progPlateAmpConstraint,'u_plate'), smoothMaxPlate: ul(this._progPlateAmpConstraint,'u_smoothMaxPlate') },
       demodPhaseKick: { psi: ul(this._progDemodPhaseKick, 'u_psi'), obj: ul(this._progDemodPhaseKick, 'u_obj'), gamma: ul(this._progDemodPhaseKick, 'u_gamma') },
+      stepRecHam: { psi: ul(this._progStepRecordHamiltonian, 'u_psi'), obj: ul(this._progStepRecordHamiltonian, 'u_obj'), plate: ul(this._progStepRecordHamiltonian, 'u_plate'), alpha: ul(this._progStepRecordHamiltonian, 'u_alpha'), gamma: ul(this._progStepRecordHamiltonian, 'u_gamma'), smoothMaxPlate: ul(this._progStepRecordHamiltonian, 'u_smoothMaxPlate') },
       addSources:  { psi: ul(this._progAddSources, 'u_psi'), src: ul(this._progAddSources, 'u_src') },
       copy:        { plate: ul(this._progCopy, 'u_plate') },
       renderField: { psi: ul(this._progRenderField, 'u_psi'), smoothMax: ul(this._progRenderField, 'u_smoothMax') },
+      renderDiff:  { psi: ul(this._progRenderDiff, 'u_psi'), obj: ul(this._progRenderDiff, 'u_obj'), alpha: ul(this._progRenderDiff, 'u_alpha'), smoothMax: ul(this._progRenderDiff, 'u_smoothMax') },
+      eyeHologram: { psi: ul(this._progEyeHologram, 'u_psi'), G: ul(this._progEyeHologram, 'u_G'), mode: ul(this._progEyeHologram, 'u_mode'), param: ul(this._progEyeHologram, 'u_param'), block: ul(this._progEyeHologram, 'u_block'), seed: ul(this._progEyeHologram, 'u_seed') },
       renderPhase: { psi: ul(this._progRenderPhase, 'u_psi'), smoothMax: ul(this._progRenderPhase, 'u_smoothMax') },
       renderPlate: { psi: ul(this._progRenderPlate, 'u_psi'), plate: ul(this._progRenderPlate, 'u_plate'), smoothMaxPlate: ul(this._progRenderPlate, 'u_smoothMaxPlate'), smoothMaxField: ul(this._progRenderPlate, 'u_smoothMaxField'), dir: ul(this._progRenderPlate, 'u_dir') },
     };
@@ -274,11 +285,13 @@ export class IFSGpu {
       f32[j*2]   = psi64[j*2];
       f32[j*2+1] = psi64[j*2+1];
     }
-    const tex = this._src === 'A' ? this._psiA : this._psiB;
+    const tex = this._swSrc === 'A' ? this._swA : this._swB;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
     gl.bindTexture(gl.TEXTURE_2D, null);
   }
+
+  setSweepPsi(psi64) { this.setPsi(psi64); }
 
   // ── Public: upload ref from JS Float64Array(2*G*G) ─────────────────────────
   setRef(ref64) {
@@ -316,8 +329,8 @@ export class IFSGpu {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, src32);
     gl.bindTexture(gl.TEXTURE_2D, null);
 
-    const psySrc = this._src === 'A' ? this._psiA : this._psiB;
-    const psyDst = this._src === 'A' ? this._fboB  : this._fboA;
+    const psySrc = this._swSrc === 'A' ? this._swA : this._swB;
+    const psyDst = this._swSrc === 'A' ? this._fboSwB : this._fboSwA;
     gl.bindFramebuffer(gl.FRAMEBUFFER, psyDst);
     gl.viewport(0, 0, G, G);
     gl.useProgram(this._progAddSources);
@@ -329,38 +342,19 @@ export class IFSGpu {
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._src = this._src === 'A' ? 'B' : 'A';
+    this._swSrc = this._swSrc === 'A' ? 'B' : 'A';
   }
 
   // ── Public: one leapfrog step + SRC_ALPHA injection toward objField ─────────
   // Equivalent to JS _physStep in RECORD mode: step psi, then mix toward obj.
   // alpha: SRC_ALPHA constant
-  stepRecord(dt, alpha) {
-    this.step(dt);
-    // Injection pass: psi += alpha * (obj - psi)  →  psi = (1-alpha)*psi + alpha*obj
-    const gl  = this._gl, G = this._G;
-    const src = this._src === 'A' ? this._psiA : this._psiB;
-    const fbo = this._src === 'A' ? this._fboB : this._fboA;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, G, G);
-    gl.useProgram(this._progStepRecord);
-    gl.uniform1i(this._u.stepRec.psi,   0);
-    gl.uniform1i(this._u.stepRec.obj,   1);
-    gl.uniform1f(this._u.stepRec.alpha, alpha);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
-    gl.bindVertexArray(this._vao);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-    gl.bindVertexArray(null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._src = this._src === 'A' ? 'B' : 'A';
-  }
+  stepRecord(dt, alpha) { this.stepRecordSweep(dt, alpha); }
 
   // ── Public: seed psi from plate for RECON (plate values as Re, Im=0) ────────
   seedRecon() {
     const gl  = this._gl, G = this._G;
     const plateTex = this._plateSrc === 'A' ? this._plateA : this._plateB;
-    const fbo = this._src === 'A' ? this._fboA : this._fboB;
+    const fbo = this._swSrc === 'A' ? this._fboSwA : this._fboSwB;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, G, G);
     gl.useProgram(this._progCopy);
@@ -373,10 +367,12 @@ export class IFSGpu {
   }
 
   // ── Public: async psi readback via PBO — for display only ───────────────────
-  readPsiAsync() {
+  readPsiAsync() { return this.readSweepPsiAsync(); }
+
+  _readPsiAsync_unused() {
     const gl = this._gl, G = this._G;
     const byteLen = G * G * 2 * 4; // RG32F
-    const fbo = this._src === 'A' ? this._fboA : this._fboB;
+    const fbo = this._fboSwA; // unused — kept for reference
 
     const pbo = gl.createBuffer();
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
@@ -566,6 +562,191 @@ export class IFSGpu {
     for (let i = 0; i < n; i++) this.stepSweep(dt);
   }
 
+  // ── Eye soliton — independent second texture, no interference with main retina ──
+  setEyeObjField(psi64) {
+    const gl = this._gl, G = this._G, N = G * G;
+    const f32 = new Float32Array(N * 2);
+    for (let j = 0; j < N; j++) { f32[j*2] = psi64[j*2]; f32[j*2+1] = psi64[j*2+1]; }
+    gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  setEyePsi(psi64) {
+    const gl = this._gl, G = this._G, N = G * G;
+    const f32 = new Float32Array(N * 2);
+    for (let j = 0; j < N; j++) { f32[j*2] = psi64[j*2]; f32[j*2+1] = psi64[j*2+1]; }
+    const tex = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  _runSubstepEye(prog, dt, u) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(prog);
+    gl.uniform1f(u.dt, dt);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._ringTex);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  stepEye(dt) {
+    const u = this._u;
+    this._runSubstepEye(this._progStep1, dt, u.step1);
+    this._runSubstepEye(this._progStep2, dt, u.step2);
+    this._runSubstepEye(this._progStep3, dt, u.step3);
+  }
+
+  stepRecordEye(dt, alpha) {
+    this.stepEye(dt);
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progStepRecord);
+    gl.uniform1i(this._u.stepRec.psi,   0);
+    gl.uniform1i(this._u.stepRec.obj,   1);
+    gl.uniform1f(this._u.stepRec.alpha, alpha);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  renderEyeField(smoothMax) {
+    const gl = this._gl, G = this._G;
+    const tex = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progRenderField);
+    gl.uniform1i(this._u.renderField.psi,       0);
+    gl.uniform1f(this._u.renderField.smoothMax,  smoothMax);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+  }
+
+  renderEyePhase(smoothMax) {
+    const gl = this._gl, G = this._G;
+    const tex = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progRenderPhase);
+    gl.uniform1i(this._u.renderPhase.psi,       0);
+    gl.uniform1f(this._u.renderPhase.smoothMax,  smoothMax);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+  }
+
+  // ── Public: N free leapfrog steps on the eye ping-pong (no injection) ────────
+  // Used by the plate-free round-trip eye: stepEyeN(T, +dt) then stepEyeN(T, -dt).
+  stepEyeN(n, dt) {
+    for (let i = 0; i < n; i++) this.stepEye(dt);
+  }
+
+  // ── Public: peak |ψ|² of the current eye texture (for self-normalization) ────
+  // Small synchronous readback — call only when the eye is recomputed, never per
+  // frame. Returns the max intensity so the display normalizes to its own field.
+  readEyePeakSq() {
+    const gl = this._gl, G = this._G;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeA : this._fboEyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const f32 = new Float32Array(G * G * 2);
+    gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let mx = 0;
+    for (let j = 0; j < G * G; j++) {
+      const m = f32[j*2]*f32[j*2] + f32[j*2+1]*f32[j*2+1];
+      if (m > mx) mx = m;
+    }
+    return mx;
+  }
+
+  // ── Public: download the current eye psi → Float64Array(2*G*G) (sync) ────────
+  // For the eye-as-observer pipeline: capture ψ_perceived to re-seed the soliton
+  // relaxation. Synchronous — call only on recompute, never per frame.
+  readEyePsi() {
+    const gl = this._gl, G = this._G;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeA : this._fboEyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const f32 = new Float32Array(G * G * 2);
+    gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const out = new Float64Array(G * G * 2);
+    for (let i = 0; i < G * G * 2; i++) out[i] = f32[i];
+    return out;
+  }
+
+  // ── Public: hologram-domain transform [H] on the eye field, in place ─────────
+  // Acts on ψ between the forward and backward legs of the eye round-trip — the slot
+  // where the wavefront is maximally spread, so operations here are holographic
+  // (local edit in H-space = distributed edit in object space). Modes:
+  //   0 = identity (no-op; round-trip stays exact)
+  //   1 = low-pass aperture  (keep radius < param·R: blurs/smooths the percept)
+  //   2 = high-pass aperture (keep radius > param·R: edge/detail emphasis)
+  //   3 = phase conjugate    (ψ → conj(ψ): time-reversal / twin)
+  // param ∈ [0,1] is the aperture fraction. Runs on the eye ping-pong, swaps buffers.
+  applyEyeHologram(mode, param, opts = {}) {
+    if (!mode) return;                 // mode 0 / falsy = identity, skip entirely
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyeHologram;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEyeHologram);
+    gl.uniform1i(u.psi,   0);
+    gl.uniform1i(u.G,     G);
+    gl.uniform1i(u.mode,  mode);
+    gl.uniform1f(u.param, param);
+    gl.uniform1i(u.block, opts.block ?? 8);     // random-block size px (modes 7/8)
+    gl.uniform1f(u.seed,  opts.seed  ?? 0.0);   // reshuffle the random pattern
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: render |ψ_eye + α·obj| to the canvas, fully on GPU (no readback) ─
+  // obj is uploaded into _objEye (the eye's scratch obj texture). Used by the eye
+  // DIFF panel so the synchronous readPsi()+CPU-mix path is eliminated.
+  renderEyeDiff(objField, alpha, smoothMax) {
+    this.setEyeObjField(objField);   // obj → _objEye
+    const gl = this._gl, G = this._G;
+    const tex = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progRenderDiff);
+    const ud = this._u.renderDiff;
+    gl.uniform1i(ud.psi,       0);
+    gl.uniform1i(ud.obj,       1);
+    gl.uniform1f(ud.alpha,     alpha);
+    gl.uniform1f(ud.smoothMax, smoothMax);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+  }
+
   // ── Public: leapfrog step + SRC_ALPHA injection on sweep ping-pong ───────────
   // Same as stepRecord but operates on _swA/_swB instead of _psiA/_psiB.
   stepRecordSweep(dt, alpha) {
@@ -581,6 +762,35 @@ export class IFSGpu {
     gl.uniform1f(this._u.stepRec.alpha, alpha);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._swSrc = this._swSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: Hamiltonian plate coupling — IFS step + inject + exp(i·γ·plate) ──
+  // psi' = (IFS·psi + α(obj−psi)) · exp(i·γ·plateNorm·2π)
+  // The plate acts as a spatially varying phase potential baked into the propagator,
+  // not a post-hoc kick. Unitary (phase-only), preserves amplitude after injection.
+  stepRecordSweepHamiltonian(dt, alpha, gamma, smoothMaxPlate) {
+    this.stepSweep(dt);
+    const gl  = this._gl, G = this._G;
+    const src = this._swSrc === 'A' ? this._swA : this._swB;
+    const fbo = this._swSrc === 'A' ? this._fboSwB : this._fboSwA;
+    const plateTex = this._plateSrc === 'A' ? this._plateA : this._plateB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progStepRecordHamiltonian);
+    gl.uniform1i(this._u.stepRecHam.psi,           0);
+    gl.uniform1i(this._u.stepRecHam.obj,           1);
+    gl.uniform1i(this._u.stepRecHam.plate,         2);
+    gl.uniform1f(this._u.stepRecHam.alpha,         alpha);
+    gl.uniform1f(this._u.stepRecHam.gamma,         gamma);
+    gl.uniform1f(this._u.stepRecHam.smoothMaxPlate, smoothMaxPlate);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, plateTex);
     gl.bindVertexArray(this._vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
@@ -625,6 +835,30 @@ export class IFSGpu {
     gl.uniform1i(u.psi,            0);
     gl.uniform1i(u.plate,          1);
     gl.uniform1f(u.gamma,          gamma);
+    gl.uniform1f(u.smoothMaxPlate, smoothMaxPlate);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, plateTex);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._swSrc = this._swSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: GS amplitude constraint on sweep psi ─────────────────────────────
+  // Replaces |psi[j]| with sqrt(plate[j]), keeping phase: psi' = sqrt(plate) · exp(i·arg(psi))
+  // This is the missing second half of every Gerchberg-Saxton round-trip.
+  plateAmpConstraintSweep(smoothMaxPlate) {
+    const gl  = this._gl, G = this._G;
+    const src      = this._swSrc === 'A' ? this._swA : this._swB;
+    const fbo      = this._swSrc === 'A' ? this._fboSwB : this._fboSwA;
+    const plateTex = this._plateSrc === 'A' ? this._plateA : this._plateB;
+    const u        = this._u.plateAmpConstraint;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progPlateAmpConstraint);
+    gl.uniform1i(u.psi,            0);
+    gl.uniform1i(u.plate,          1);
     gl.uniform1f(u.smoothMaxPlate, smoothMaxPlate);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, plateTex);
@@ -825,6 +1059,22 @@ export class IFSGpu {
     for (let i = 0; i < n; i++) this.step(dt);
   }
 
+  // ── Public: read peak |ψ|² from current sweep texture (sync, cheap-ish) ──────
+  readSwPeakSq() {
+    const gl = this._gl, G = this._G;
+    const fbo = this._swSrc === 'A' ? this._fboSwA : this._fboSwB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const f32 = new Float32Array(G * G * 2);
+    gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let mx = 0;
+    for (let j = 0; j < G * G; j++) {
+      const m = f32[j*2]*f32[j*2] + f32[j*2+1]*f32[j*2+1];
+      if (m > mx) mx = m;
+    }
+    return mx;
+  }
+
   // ── Internal: run one leapfrog substep ──────────────────────────────────────
   // The ping-pong strategy: read from src FBO, write to dst FBO, swap pointers.
   // All three substeps of one IFS step use the same ping-pong pair; we swap
@@ -835,8 +1085,8 @@ export class IFSGpu {
   _runSubstep(prog, dt, u) {
     const gl  = this._gl;
     const G   = this._G;
-    const src = this._src === 'A' ? this._psiA : this._psiB;
-    const fbo = this._src === 'A' ? this._fboB : this._fboA;
+    const src = this._swSrc === 'A' ? this._swA : this._swB;
+    const fbo = this._swSrc === 'A' ? this._fboSwB : this._fboSwA;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.useProgram(prog);
@@ -849,14 +1099,16 @@ export class IFSGpu {
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    this._src = this._src === 'A' ? 'B' : 'A';
+    this._swSrc = this._swSrc === 'A' ? 'B' : 'A';
   }
 
   // ── Public: accumulate plate |ψ+ref|² ───────────────────────────────────────
   // decay: PLATE_DECAY coefficient (applied to existing plate value)
-  accumulatePlate(decay) {
+  accumulatePlate(decay) { this.accumulatePlateSweep(decay); }
+
+  _accumulatePlate_unused(decay) {
     const gl  = this._gl, G = this._G;
-    const psiTex  = this._src      === 'A' ? this._psiA  : this._psiB;
+    const psiTex  = this._swSrc === 'A' ? this._swA : this._swB;
     const plateSrc = this._plateSrc === 'A' ? this._plateA : this._plateB;
     const plateDst = this._plateSrc === 'A' ? this._fboPB  : this._fboPA;
 
@@ -915,7 +1167,7 @@ export class IFSGpu {
   // Slow — avoid in hot path. Used for Croquet state sync when needed.
   readPsi() {
     const gl = this._gl, G = this._G;
-    const fbo = this._src === 'A' ? this._fboA : this._fboB;
+    const fbo = this._swSrc === 'A' ? this._fboSwA : this._fboSwB;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     const f32 = new Float32Array(G * G * 2);
     gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f32);
@@ -1017,9 +1269,9 @@ export class IFSGpu {
   destroy() {
     const gl = this._gl;
     if (!gl) return;
-    for (const t of [this._psiA, this._psiB, this._ref, this._obj, this._plateA, this._plateB, this._swA, this._swB, this._ringTex, this._cplxA, this._cplxB, this._srcTex])
+    for (const t of [this._swA, this._swB, this._ref, this._obj, this._plateA, this._plateB, this._ringTex, this._cplxA, this._cplxB, this._srcTex])
       if (t) gl.deleteTexture(t);
-    for (const f of [this._fboA, this._fboB, this._fboPA, this._fboPB, this._fboSwA, this._fboSwB, this._fboCplxA, this._fboCplxB])
+    for (const f of [this._fboSwA, this._fboSwB, this._fboPA, this._fboPB, this._fboCplxA, this._fboCplxB])
       if (f) gl.deleteFramebuffer(f);
     for (const p of [this._progStep1, this._progStep2, this._progStep3, this._progAccum, this._progAccumSweep, this._progCopy, this._progStepRecord, this._progReconCplx, this._progRenderField, this._progRenderPhase, this._progRenderPlate])
       if (p) gl.deleteProgram(p);
@@ -1029,46 +1281,10 @@ export class IFSGpu {
   // ── Public: render psi amplitude colormap to default framebuffer ────────────
   // Outputs hologram colormap of log-scaled |ψ|² to the WebGL canvas.
   // Call drawImage(gpu.canvas, 0, 0, RW, RH) afterward to blit to a 2D canvas.
-  renderField(smoothMax) {
-    const gl = this._gl, G = this._G;
-    const psiTex = this._src === 'A' ? this._psiA : this._psiB;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, G, G);
-    gl.useProgram(this._progRenderField);
-    gl.uniform1i(this._u.renderField.psi,       0);
-    gl.uniform1f(this._u.renderField.smoothMax, smoothMax);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, psiTex);
-    gl.bindVertexArray(this._vao);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-    gl.bindVertexArray(null);
-  }
+  renderField(smoothMax) { this.renderSweepField(smoothMax); }
+  renderPhase(smoothMax) { this.renderSweepPhase(smoothMax); }
 
-  // ── Public: render psi phase colormap to default framebuffer ────────────────
-  renderPhase(smoothMax) {
-    const gl = this._gl, G = this._G;
-    const psiTex = this._src === 'A' ? this._psiA : this._psiB;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, G, G);
-    gl.useProgram(this._progRenderPhase);
-    gl.uniform1i(this._u.renderPhase.psi,       0);
-    gl.uniform1f(this._u.renderPhase.smoothMax, smoothMax);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, psiTex);
-    gl.bindVertexArray(this._vao);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-    gl.bindVertexArray(null);
-  }
-
-  // Copy current sweep psi into display psi so renderField/renderPhase show frozen cube.
-  freezeSweepToPsi() {
-    const gl = this._gl, G = this._G;
-    const swFbo  = this._swSrc === 'A' ? this._fboSwA : this._fboSwB;
-    const dstTex = this._src   === 'A' ? this._psiA   : this._psiB;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, swFbo);
-    gl.bindTexture(gl.TEXTURE_2D, dstTex);
-    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, G, G);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  }
+  freezeSweepToPsi() { /* no-op: single retina texture, sweep IS display */ }
 
   renderSweepPlate(smoothMaxPlate, smoothMaxField) {
     const gl = this._gl, G = this._G;
@@ -1121,7 +1337,7 @@ export class IFSGpu {
   // dir: 1 = RECORD (show plate), -1 = RECON (show psi amplitude instead)
   renderPlate(smoothMaxPlate, smoothMaxField, dir) {
     const gl = this._gl, G = this._G;
-    const psiTex   = this._src === 'A' ? this._psiA : this._psiB;
+    const psiTex   = this._swSrc === 'A' ? this._swA : this._swB;
     const plateTex = this._plateSrc === 'A' ? this._plateA : this._plateB;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, G, G);
@@ -1432,6 +1648,56 @@ void main() {
   fragColor   = vec4(psi.x * mask, psi.y * mask, 0.0, 1.0);
 }`;
 
+// GS amplitude constraint: replace |psi| with sqrt(plate[j] / smoothMaxPlate) * REF_AMP_SCALE,
+// keeping the current phase. This is the plate-plane projection step of Gerchberg-Saxton.
+// After forward IFS propagation, this snaps the amplitude to match the recorded hologram,
+// then backward propagation brings the constrained field back to the object plane.
+const GLSL_PLATE_AMP_CONSTRAINT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_plate;
+uniform float     u_smoothMaxPlate;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  ivec2 coord  = ivec2(gl_FragCoord.xy);
+  vec2  psi    = texelFetch(u_psi,   coord, 0).xy;
+  float pl     = texelFetch(u_plate, coord, 0).x;
+  float curAmp = length(psi);
+  // Target amplitude = sqrt(plate / maxPlate) — matches recorded hologram intensity
+  float tgtAmp = sqrt(max(pl, 0.0) / max(u_smoothMaxPlate, 1e-18));
+  // Keep phase, replace amplitude (safe fallback to zero-phase if psi ≈ 0)
+  vec2  out_ = curAmp > 1e-12 ? (psi / curAmp) * tgtAmp : vec2(tgtAmp, 0.0);
+  fragColor  = vec4(out_.x, out_.y, 0.0, 1.0);
+}`;
+
+// Hamiltonian plate step: inject toward objField then apply exp(i·γ·plateNorm·2π).
+// Combines source injection and plate phase potential in one pass so the plate
+// acts as part of the propagator rather than a post-hoc correction.
+const GLSL_STEP_RECORD_HAMILTONIAN = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_obj;
+uniform sampler2D u_plate;
+uniform float     u_alpha;
+uniform float     u_gamma;
+uniform float     u_smoothMaxPlate;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2  psi   = texelFetch(u_psi,   coord, 0).xy;
+  vec2  obj   = texelFetch(u_obj,   coord, 0).xy;
+  float pl    = texelFetch(u_plate, coord, 0).x;
+  // Source injection: relax toward objField attractor
+  vec2  inj   = psi + u_alpha * (obj - psi);
+  // Plate Hamiltonian: exp(i·γ·plateNorm·2π) — unitary phase modulation
+  float norm  = pl / max(u_smoothMaxPlate, 1e-18);
+  float ph    = u_gamma * norm * 6.28318;
+  float cr = cos(ph), si = sin(ph);
+  fragColor = vec4(cr*inj.x - si*inj.y, si*inj.x + cr*inj.y, 0.0, 1.0);
+}`;
+
 // Plate phase kick: psi *= exp(i * gamma * plateNorm * 2π)
 // Energy-conserving — only shifts phase, fringe/non-fringe regions accumulate different phases.
 // IFS kernel then separates them by frequency — no amplitude drain.
@@ -1562,6 +1828,82 @@ void main() {
   float amp   = sqrt(psi.x*psi.x + psi.y*psi.y) * norm;
   float lv    = log(1.0 + 99.0 * amp) / log(100.0);
   fragColor   = vec4(hologramColor(lv), 1.0);
+}`;
+
+// Render |ψ + α·obj| amplitude — eye DIFF panel, computed entirely on GPU so the
+// synchronous readPsi()+CPU-mix path is removed. Same colormap as GLSL_RENDER_FIELD.
+const GLSL_RENDER_DIFF = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_obj;
+uniform float     u_alpha;
+uniform float     u_smoothMax;
+in vec2 v_uv;
+out vec4 fragColor;
+${GLSL_HOLOGRAM_COLORMAP}
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2  psi   = texelFetch(u_psi, coord, 0).xy;
+  vec2  obj   = texelFetch(u_obj, coord, 0).xy;
+  vec2  mix   = psi + u_alpha * obj;
+  float norm  = 1.0 / sqrt(max(u_smoothMax, 1e-18));
+  float amp   = sqrt(mix.x*mix.x + mix.y*mix.y) * norm;
+  float lv    = log(1.0 + 99.0 * amp) / log(100.0);
+  fragColor   = vec4(hologramColor(lv), 1.0);
+}`;
+
+// Hologram-domain transform [H] — operates on the spread eye wavefront between the
+// forward and backward legs. mode: 1=low-pass, 2=high-pass (radial aperture), 3=phase
+// conjugate, 7=random-block ZERO (scattered occlusion), 8=random-block NOISE (corruption).
+// u_param = aperture radius / masked-fraction; u_block = block size px; u_seed = reshuffle.
+const GLSL_EYE_HOLOGRAM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform int   u_G;
+uniform int   u_mode;
+uniform float u_param;
+uniform int   u_block;   // random-block size in pixels (modes 7/8)
+uniform float u_seed;    // reshuffle the random pattern (modes 7/8)
+out vec4 fragColor;
+// Deterministic per-value hash → [0,1). Stable across frames (no flicker) for a fixed
+// seed, so the cached snap holds; bump u_seed to draw a new random pattern.
+float hash(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21) + u_seed);
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2  psi = texelFetch(u_psi, c, 0).xy;
+  float halfG = float(u_G) * 0.5;
+  vec2  d   = vec2(float(c.x) - halfG, float(c.y) - halfG);
+  float r   = length(d) / halfG;            // normalized radius 0..~1.4
+  float rc  = max(u_param, 0.001);          // aperture cutoff fraction
+  if (u_mode == 1) {                        // low-pass: keep centre
+    if (r > rc) psi = vec2(0.0);
+  } else if (u_mode == 2) {                 // high-pass: keep outside
+    if (r < rc) psi = vec2(0.0);
+  } else if (u_mode == 3) {                 // phase conjugate
+    psi.y = -psi.y;
+  } else if (u_mode == 6) {                 // LEFT-COLUMN occlude: zero the left u_param
+    if (float(c.x) < u_param * float(u_G))  // fraction of columns (contiguous slab).
+      psi = vec2(0.0);
+  } else if (u_mode == 7 || u_mode == 8) {  // RANDOM-BLOCK mask (scattered, square pixels)
+    int b = max(u_block, 1);
+    vec2 blk = floor(vec2(c) / float(b));   // which block this cell belongs to
+    if (hash(blk) < u_param) {              // this block is masked (u_param = fraction)
+      if (u_mode == 7) {
+        psi = vec2(0.0);                    // mode 7: ZERO (random occlusion)
+      } else {
+        // mode 8: replace with random complex NOISE at the local amplitude scale.
+        float amp = length(psi) + 1e-4;
+        float a1 = hash(vec2(c) + 7.1);
+        float a2 = hash(vec2(c) + 19.7);
+        psi = amp * vec2(a1 - 0.5, a2 - 0.5) * 2.0;
+      }
+    }
+  }
+  fragColor = vec4(psi, 0.0, 1.0);
 }`;
 
 // Render psi phase: hue wheel with log-amplitude value — matches JS colormaps.phase().

@@ -25,807 +25,29 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 //   [RESET PLATE] button → clear accumulated exposure and return to init angle
 //   Dbl-click any canvas → manual IFS next-cycle
 
-import { FRAG, colormaps, IFS_MAPS_DEFAULT } from '../krestianstvo-wavefront-physics.js';
 import { makeIFSClockPanel, IFS_DEPTH_COLORS } from '../krestianstvo-wavefront-renderer.js';
 import { IFSGpu } from '../ifs-gpu.js';
-
-// ── Infrastructure ────────────────────────────────────────────────────────────
-const REFLECTOR_MS = 50;
-const SUBTICK_MS   = 0.09;
-
-// ── Grid ─────────────────────────────────────────────────────────────────────
-const GRID    = 128;
-const N_CELLS = GRID * GRID;
-
-// ── Physical parameters ───────────────────────────────────────────────────────
-const WAVELENGTH   = 2.0;
-const DELAY_SCALE  = 0.06;
-const GAMMA        = 0.0;     // linear — free-space paraxial propagation
-const ISAT         = 1e9;     // saturation disabled
-const DT           = 0.12;
-const REF_AMP      = 0.3;     // reference plane-wave amplitude
-const REF_KX       = 0.20;    // reference wave tilt (x-component of k-vector)
-const SRC_ALPHA    = 0.08;    // relaxation toward psiSnap — bounded steady state
-const PLATE_DECAY  = 0.994;   // time-exposure decay per physics step
-
-// ── IFS fractal clock ─────────────────────────────────────────────────────────
-const IFS_DEPTH      = 8;
-const IFS_MAPS       = IFS_MAPS_DEFAULT;
-const IFS_GEN_CAP    = 3;
-const IFS_MIN_DELAY  = 0.25;
-const IFS_BASE_DELAY = parseFloat((DELAY_SCALE * GRID * 0.35).toFixed(6));
-const FRESNEL_DONE_DELAY = parseFloat((IFS_BASE_DELAY * 8).toFixed(4));
-const N_FRESNEL_ROOTS = 8;
-const PHYS_STEPS        = 1;
-const NEXT_STEP_DELAY   = 1;
-const RECON_STEP_DELAY  = 16;  // ms between backward steps (~60fps cadence)
-const RECON_HOLD_MS     = 1500; // ms hold before re-seeding
-const T_RECORD          = 100;  // IFS pulse steps: forward (record) = backward (reconstruct)
-const K_WAVE            = 0.35; // wave number for Huygens ring propagation
-
-// ── IFS-native Laplacian ──────────────────────────────────────────────────────
-const FRAC_ALPHA    = 0.03;   // less ring energy → tighter halos, sharper point features
-const MAX_IFS_BANDS = 4;
-
-// ── Depth tier encoding ───────────────────────────────────────────────────────
-const N_DEPTH_TIERS = 4;
-
-// ── Recording mode ────────────────────────────────────────────────────────────
-// TOMO_MODE = true:  per-tier IFS propagation — exact nonlinear dispersion,
-//                    enables depth cloud tomography. Cost: ~N/2 × T_RECORD steps.
-// TOMO_MODE = false: single-field phase modulation — linear depth encoding,
-//                    ~4× faster plate accumulation, no tomography.
-const TOMO_MODE = false;
-
-// ── Render ────────────────────────────────────────────────────────────────────
-const RENDER_SCALE = 5;
-
-// ── Cube geometry ─────────────────────────────────────────────────────────────
-const PTS_PER_EDGE = 50;
-const CAM_Z        = 4.5;
-const PROJ_SCALE   = 2 / (7 * (1 - 1 / GRID));
-const INIT_ANGLE_Y = 0.7853981634;
-const INIT_ANGLE_X = 0.5235987756;
-
-const CUBE_VERTS = [
-  [-1,-1,-1],[ 1,-1,-1],[ 1, 1,-1],[-1, 1,-1],
-  [-1,-1, 1],[ 1,-1, 1],[ 1, 1, 1],[-1, 1, 1],
-];
-const CUBE_EDGES = [
-  [0,1],[1,2],[2,3],[3,0],
-  [4,5],[5,6],[6,7],[7,4],
-  [0,4],[1,5],[2,6],[3,7],
-];
-
-const PYRAMID_VERTS = [
-  [ 0, 1.4, 0],   // apex
-  [-1,-1,-1],[ 1,-1,-1],[ 1,-1, 1],[-1,-1, 1], // base (standalone)
-];
-const PYRAMID_EDGES = [
-  [0,1],[0,2],[0,3],[0,4], // apex to base corners
-  [1,2],[2,3],[3,4],[4,1], // base ring
-];
-
-// Pyramid seated on top of cube — base corners match cube top face (Y=+1)
-const HOUSE_PYRAMID_VERTS = [
-  [ 0, 2.4, 0],   // apex (1 unit above cube top)
-  [-1, 1,-1],[ 1, 1,-1],[ 1, 1, 1],[-1, 1, 1], // base at cube top face
-];
-const HOUSE_PYRAMID_EDGES = [
-  [0,1],[0,2],[0,3],[0,4], // apex to base corners
-  [1,2],[2,3],[3,4],[4,1], // base ring (coincides with cube top — omit for cleaner look)
-];
-
-function _sampleEdgeList(verts, edges) {
-  const pts = [];
-  for (const [ai, bi] of edges) {
-    const a = verts[ai], b = verts[bi];
-    for (let t = 0; t < PTS_PER_EDGE; t++) {
-      const u = (t + 0.5) / PTS_PER_EDGE;
-      pts.push([a[0]+u*(b[0]-a[0]), a[1]+u*(b[1]-a[1]), a[2]+u*(b[2]-a[2])]);
-    }
-  }
-  return pts;
-}
-const CUBE_PTS           = _sampleEdgeList(CUBE_VERTS, CUBE_EDGES);
-const PYRAMID_PTS        = _sampleEdgeList(PYRAMID_VERTS, PYRAMID_EDGES);
-const HOUSE_PYRAMID_PTS  = _sampleEdgeList(HOUSE_PYRAMID_VERTS, HOUSE_PYRAMID_EDGES);
-const COMBINED_PTS       = [...CUBE_PTS, ...HOUSE_PYRAMID_PTS];
-const CUBE_PTS_JSON          = JSON.stringify(CUBE_PTS);
-const PYRAMID_PTS_JSON       = JSON.stringify(PYRAMID_PTS);
-const COMBINED_PTS_JSON      = JSON.stringify(COMBINED_PTS);
-
-
-// ── World program ─────────────────────────────────────────────────────────────
-const hologram4WorldProgram = `
-  const W         = Renkon.app.W;
-  const reflector = Events.receiver();
-
-  const GRID             = ${GRID};
-  const NCELLS           = ${N_CELLS};
-  const WAVELENGTH       = ${WAVELENGTH};
-  const DELAY_SCALE      = ${DELAY_SCALE};
-  const GAMMA            = ${GAMMA};
-  const ISAT             = ${ISAT};
-  const DT               = ${DT};
-  const REF_AMP          = ${REF_AMP};
-  const REF_KX           = ${REF_KX};
-  const SRC_ALPHA        = ${SRC_ALPHA};
-  const PLATE_DECAY      = ${PLATE_DECAY};
-  const IFS_DEPTH        = ${IFS_DEPTH};
-  const IFS_MAPS         = ${JSON.stringify(IFS_MAPS)};
-  const IFS_GEN_CAP      = ${IFS_GEN_CAP};
-  const IFS_MIN_DELAY    = ${IFS_MIN_DELAY};
-  const IFS_BASE_DELAY   = ${IFS_BASE_DELAY};
-  const FRESNEL_DONE_DELAY = ${FRESNEL_DONE_DELAY};
-  const N_FRESNEL_ROOTS  = ${N_FRESNEL_ROOTS};
-  const PHYS_STEPS       = ${PHYS_STEPS};
-  const NEXT_STEP_DELAY   = ${NEXT_STEP_DELAY};
-  const RECON_STEP_DELAY  = ${RECON_STEP_DELAY};
-  const RECON_HOLD_MS     = ${RECON_HOLD_MS};
-  const T_RECORD          = ${T_RECORD};
-  const FRAC_ALPHA       = ${FRAC_ALPHA};
-  const MAX_IFS_BANDS    = ${MAX_IFS_BANDS};
-  const TWO_PI           = 2 * Math.PI;
-  const CUBE_PTS         = ${CUBE_PTS_JSON};
-  const PYRAMID_PTS      = ${PYRAMID_PTS_JSON};
-  const COMBINED_PTS     = ${COMBINED_PTS_JSON};
-  const SHAPE_PTS        = { cube: CUBE_PTS, pyramid: PYRAMID_PTS, combined: COMBINED_PTS };
-  const CAM_Z            = ${CAM_Z};
-  const PROJ_SCALE       = ${PROJ_SCALE};
-  const INIT_ANGLE_Y     = ${INIT_ANGLE_Y};
-  const INIT_ANGLE_X     = ${INIT_ANGLE_X};
-
-  ${FRAG.nlsOps(GRID, N_CELLS)}
-  ${FRAG.ifsStencil(GRID)}
-  ${FRAG.ifsKernels}
-  ${FRAG.ifsScheduler}
-
-  // ── Project cube sources onto plate plane ────────────────────────────────
-  const _projectSources = (angleY, angleX, shape = 'cube') => {
-    const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
-    const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
-    const halfG = (GRID - 1) / 2;
-    const fscale = halfG * PROJ_SCALE;
-    const reconZ = Math.round(GRID / 16);   // λ²/reconZ > 2px keeps fringes above Nyquist
-    const pts    = SHAPE_PTS[shape] ?? CUBE_PTS;
-    const total  = pts.length;
-    return pts.map(([ox, oy, oz]) => {
-      const ry1 =  cosY * ox + sinY * oz;
-      const rz1 = -sinY * ox + cosY * oz;
-      const rx  =  ry1;
-      const ry  =  cosX * oy - sinX * rz1;
-      const rz  =  sinX * oy + cosX * rz1;
-      const z   =  CAM_Z - rz;
-      return {
-        sx:  halfG + (rx / z) * fscale * CAM_Z,
-        sy:  halfG - (ry / z) * fscale * CAM_Z,
-        sz:  z * (reconZ / CAM_Z),
-        amp: 200.0 * (0.5 + 0.5 * (rz + 1) / 2) / total,
-      };
-    });
-  };
-
-  // ── IFS-native source field ───────────────────────────────────────────────
-  // Exact spherical Huygens wavelets do not exist in this universe — light
-  // propagates via the fractional IFS Laplacian, not the standard wave eq.
-  // Sources are injected as depth-phase-encoded point sources; the IFS
-  // operator itself produces the native wavefronts (fractal diffraction tails,
-  // Riesz-kernel halos instead of Airy disks).
-  //
-  // _buildSrcField  — with reference plane wave  (drives live ψ)
-  // _buildSrcFieldIFS — object only, no reference  (drives _snapStep plate)
-  const _buildSrcField = (angleY, angleX, shape = 'cube') => {
-    const sources = _projectSources(angleY, angleX, shape);
-    const field   = new Float64Array(2 * NCELLS);
-    const kWav    = TWO_PI / WAVELENGTH;
-    for (let k = 0; k < sources.length; k++) {
-      const { sx, sy, sz, amp } = sources[k];
-      const ix = Math.round(sx) | 0, iy = Math.round(sy) | 0;
-      if (ix < 0 || ix >= GRID || iy < 0 || iy >= GRID) continue;
-      const j  = iy * GRID + ix;
-      const ph = sz * kWav;
-      field[j*2]   += amp * Math.cos(ph);
-      field[j*2+1] += amp * Math.sin(ph);
-    }
-    for (let j = 0; j < NCELLS; j++) {
-      const ph = REF_KX * (j % GRID);
-      field[j*2]   += REF_AMP * Math.cos(ph);
-      field[j*2+1] += REF_AMP * Math.sin(ph);
-    }
-    return field;
-  };
-  // IFS delay-tier depth encoding:
-  // Sources are partitioned into N_DEPTH_TIERS buckets by projected depth sz.
-  // Each tier d is independently evolved for T_d = T_RECORD * (d+1) / N_DEPTH_TIERS
-  // IFS steps before being added to the plate — so near and far sources imprint
-  // at different spatial-frequency bands in the hologram fringe pattern.
-  //
-  // Near (small sz, rz≈+1, tier 0) → fewest steps → high-frequency fringes.
-  // Far  (large sz, rz≈-1, tier N-1) → most steps → low-frequency fringes.
-  //
-  // _buildSrcFieldsByDepth returns Float64Array[N_DEPTH_TIERS][2*NCELLS].
-  // _buildSrcFieldIFS (legacy, RECON seed only) returns the flat sum of all tiers
-  // at t=0 — the reconstruction starts from this and propagates backward.
-  const N_DEPTH_TIERS = ${N_DEPTH_TIERS};
-  const TOMO_MODE     = ${TOMO_MODE};
-  const _buildSrcFieldsByDepth = (angleY, angleX, extraPoints, shape = 'cube') => {
-    const sources = _projectSources(angleY, angleX, shape);
-    // Measure actual depth range from the projected sources so tiers always
-    // spread across the full N_DEPTH_TIERS even when the cube is edge-on.
-    let szMin = Infinity, szMax = -Infinity;
-    for (const { sz } of sources) {
-      if (sz < szMin) szMin = sz;
-      if (sz > szMax) szMax = sz;
-    }
-    // Guarantee a minimum spread so a perfectly edge-on cube still partitions.
-    const szRange = Math.max(1e-4, szMax - szMin);
-    const tiers   = Array.from({ length: N_DEPTH_TIERS }, () => new Float64Array(2 * NCELLS));
-    for (let k = 0; k < sources.length; k++) {
-      const { sx, sy, sz, amp } = sources[k];
-      const ix = Math.round(sx) | 0, iy = Math.round(sy) | 0;
-      if (ix < 0 || ix >= GRID || iy < 0 || iy >= GRID) continue;
-      const j = iy * GRID + ix;
-      // t=0 → near (small sz), t=1 → far (large sz)
-      const t  = Math.max(0, Math.min(1, (sz - szMin) / szRange));
-      const d  = Math.min(N_DEPTH_TIERS - 1, Math.floor(t * N_DEPTH_TIERS));
-      // Depth-encode phase: sources at different depths carry different complex phase.
-      // This is physically correct — depth separation is encoded as phase delay (sz*kz).
-      const ph = t * Math.PI * 4;
-      tiers[d][j*2]   += amp * Math.cos(ph);
-      tiers[d][j*2+1] += amp * Math.sin(ph);
-    }
-    // Extra right-click points go into the nearest tier
-    for (const pt of (extraPoints ?? [])) {
-      const j = pt.gy * GRID + pt.gx;
-      const d = 0;
-      tiers[d][j*2]   += pt.amp * Math.cos(pt.ph);
-      tiers[d][j*2+1] += pt.amp * Math.sin(pt.ph);
-    }
-    return tiers;
-  };
-  const _buildSrcFieldIFS = (angleY, angleX, extraPoints, shape = 'cube') => {
-    const tiers = _buildSrcFieldsByDepth(angleY, angleX, extraPoints, shape);
-    const field = new Float64Array(2 * NCELLS);
-    for (const tier of tiers) {
-      for (let j = 0; j < 2 * NCELLS; j++) field[j] += tier[j];
-    }
-    return field;
-  };
-
-  // ── Build reconstruction initial field: (plate − DC) × analytic reference ─
-  // The plate was recorded as |ψ_obj_IFS + ψ_ref_IFS|² (fully native).
-  // For the reconstruction seed we use the analytic reference because it has
-  // uniform amplitude everywhere — the native ref (propagated from y=0) can
-  // have near-zero amplitude in grid regions the wave hasn't reached, making
-  // the seed vanishingly small and killing the reconstruction.
-  // The analytic reference here only seeds the initial psi; all propagation
-  // is IFS-native (same snapshot kernel as recording).
-  const _buildReconField = (plate, dKX = 0, rotAngle = 0) => {
-    let maxP = 1e-9, sumP = 0;
-    for (let j = 0; j < NCELLS; j++) {
-      if (plate[j] > maxP) maxP = plate[j];
-      sumP += plate[j];
-    }
-    const meanP  = sumP / NCELLS;
-    const rangeP = Math.max(1e-9, maxP - meanP);
-    const psi    = new Float64Array(2 * NCELLS);
-    const cosR = Math.cos(rotAngle), sinR = Math.sin(rotAngle);
-    const halfG = (GRID - 1) / 2;
-    for (let j = 0; j < NCELLS; j++) {
-      const cx = j % GRID, cy = (j / GRID) | 0;
-      // Rotate grid coordinates around center
-      const dx = cx - halfG, dy = cy - halfG;
-      const rx = dx * cosR - dy * sinR + halfG;
-      const ry = dx * sinR + dy * cosR + halfG;
-      // Bilinear sample from plate at rotated position
-      const x0 = Math.floor(rx), y0 = Math.floor(ry);
-      const x1 = x0 + 1, y1 = y0 + 1;
-      const tx = rx - x0, ty = ry - y0;
-      const inBounds = (x, y) => x >= 0 && x < GRID && y >= 0 && y < GRID;
-      const samplePlate = (x, y) => inBounds(x, y) ? Math.max(0, plate[y * GRID + x] - meanP) / rangeP : 0;
-      const mod = (1 - tx) * (1 - ty) * samplePlate(x0, y0)
-                + tx       * (1 - ty) * samplePlate(x1, y0)
-                + (1 - tx) * ty       * samplePlate(x0, y1)
-                + tx       * ty       * samplePlate(x1, y1);
-      const ph = (REF_KX + dKX) * cx;
-      psi[j*2]   = mod * Math.cos(ph);
-      psi[j*2+1] = mod * Math.sin(ph);
-    }
-    return psi;
-  };
-
-  // ── Depth-tier 3D point list ─────────────────────────────────────────────
-  // Returns [{ox,oy,oz,tier,amp}] — cube edge points with tier assigned at the
-  // current recording angle. Stored in state so the renderer can re-project at
-  // any angle, making the cloud rotate in sync with the main view.
-  const _buildTierPts3D = (angleY, angleX) => {
-    const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
-    const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
-    const total = CUBE_PTS.length;
-    // Compute sz for each point to assign tiers
-    const pts = CUBE_PTS.map(([ox, oy, oz]) => {
-      const ry1 =  cosY*ox + sinY*oz, rz1 = -sinY*ox + cosY*oz;
-      const rz  =  sinX*oy + cosX*rz1;
-      const z   =  CAM_Z - rz;
-      const amp = 40.0 * (0.5 + 0.5*(rz+1)/2) / total;
-      return { ox, oy, oz, sz: z, amp };
-    });
-    let szMin = Infinity, szMax = -Infinity;
-    for (const p of pts) { if (p.sz < szMin) szMin = p.sz; if (p.sz > szMax) szMax = p.sz; }
-    const szRange = Math.max(1e-4, szMax - szMin);
-    return pts.map(({ ox, oy, oz, sz, amp }) => {
-      const t    = Math.max(0, Math.min(1, (sz - szMin) / szRange));
-      const tier = Math.min(N_DEPTH_TIERS - 1, Math.floor(t * N_DEPTH_TIERS));
-      return { ox, oy, oz, tier, amp };
-    });
-  };
-
-  // ── Physical depth-tier tomographic cloud ────────────────────────────────
-  // Runs N_DEPTH_TIERS backward IFS sweeps from the hologram plate, each for
-  // T_d = T_RECORD*(d+1)/N_DEPTH_TIERS steps using tier-d's kernel.
-  // Finds 2D local maxima of |ψ|² in each reconstructed slice — these are the
-  // physical focal spots where the wavefront re-converges, not synthetic geometry.
-  const CLOUD_TOP_K = 24;
-  // Build half-resolution reconstruction seed from plate — 2×2 box-average downsample.
-  // Used as the coarse-pass input for fractal foveated rendering.
-  const _buildReconFieldHalf = (plate) => {
-    const GH  = GRID >> 1;
-    const GH2 = GH * GH;
-    let maxP = 1e-9, sumP = 0;
-    for (let j = 0; j < NCELLS; j++) { if (plate[j] > maxP) maxP = plate[j]; sumP += plate[j]; }
-    const meanP  = sumP / NCELLS;
-    const rangeP = Math.max(1e-9, maxP - meanP);
-    const psi = new Float64Array(2 * GH2);
-    for (let hy = 0; hy < GH; hy++) {
-      for (let hx = 0; hx < GH; hx++) {
-        const fx = hx * 2, fy = hy * 2;
-        // 2×2 box average
-        const p00 = Math.max(0, plate[ fy      * GRID + fx    ] - meanP) / rangeP;
-        const p10 = Math.max(0, plate[ fy      * GRID + fx + 1] - meanP) / rangeP;
-        const p01 = Math.max(0, plate[(fy + 1) * GRID + fx    ] - meanP) / rangeP;
-        const p11 = Math.max(0, plate[(fy + 1) * GRID + fx + 1] - meanP) / rangeP;
-        const mod = (p00 + p10 + p01 + p11) * 0.25;
-        const ph  = REF_KX * fx;  // reference phase at full-res x, preserved
-        psi[(hy * GH + hx) * 2]     = mod * Math.cos(ph);
-        psi[(hy * GH + hx) * 2 + 1] = mod * Math.sin(ph);
-      }
-    }
-    return psi;
-  };
-
-  // Precomputed focal step → tier index lookup (constant for fixed T_RECORD/N_DEPTH_TIERS).
-  // Index is step number (1-based), value is tier index or -1 (no harvest at that step).
-  const _focalStepToTier = new Int8Array(T_RECORD + 1).fill(-1);
-  for (let d = 0; d < N_DEPTH_TIERS; d++)
-    _focalStepToTier[Math.round(T_RECORD * (d + 1) / N_DEPTH_TIERS)] = d;
-
-  // Preallocated intensity buffer — avoids Float32Array allocation per harvest.
-  const _reconI = new Float32Array(NCELLS);
-
-  // Peak buffers — typed arrays avoid object heap churn (CLOUD_TOP_K entries max).
-  const _peakJ   = new Int32Array(NCELLS);
-  const _peakAmp = new Float32Array(NCELLS);
-
-  // Sub-pixel peak buffers — store floating-point grid coords after CoM refinement.
-  const _peakX = new Float32Array(NCELLS);  // sub-pixel x in grid coords
-  const _peakY = new Float32Array(NCELLS);  // sub-pixel y in grid coords
-
-  // Extract physically-correct local maxima with:
-  //   • SNR threshold: peak must exceed tier average * 1.5 (rejects speckle noise)
-  //   • Sub-pixel refinement: 3×3 intensity-weighted center-of-mass (Airy disk centroid)
-  // Returns array of {x, y, amp} with floating-point coordinates for renderer.
-  const _extractLocalMaxima = (psi) => {
-    let maxI = 1e-9, sumI = 0;
-    for (let j = 0; j < NCELLS; j++) {
-      const v = psi[j*2]*psi[j*2] + psi[j*2+1]*psi[j*2+1];
-      _reconI[j] = v;
-      if (v > maxI) maxI = v;
-      sumI += v;
-    }
-    const avgI  = sumI / NCELLS;
-    // Two-level threshold: must be above both the speckle noise floor (1.5× avg)
-    // and the global peak fraction (15%) to count as a structural point.
-    const thresh = Math.max(avgI * 1.5, maxI * 0.10);
-    const invMax = 1 / maxI;
-    let pc = 0;
-    for (let y = 1; y < GRID - 1; y++) {
-      for (let x = 1; x < GRID - 1; x++) {
-        const j = y * GRID + x;
-        const v = _reconI[j];
-        if (v < thresh) continue;
-        if (v > _reconI[j-1] && v > _reconI[j+1] &&
-            v > _reconI[j-GRID] && v > _reconI[j+GRID]) {
-          // 3×3 intensity-weighted center-of-mass — locates true Airy disk centroid
-          let wSum = 0, wX = 0, wY = 0;
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              const w = _reconI[(y+dy)*GRID + (x+dx)];
-              wSum += w; wX += dx * w; wY += dy * w;
-            }
-          }
-          _peakX[pc] = x + wX / wSum;
-          _peakY[pc] = y + wY / wSum;
-          _peakJ[pc] = j;
-          _peakAmp[pc] = Math.sqrt(v * invMax);
-          pc++;
-        }
-      }
-    }
-    // Fallback: flat field → top-4 by linear scan
-    if (pc === 0) {
-      let t0j=-1,t1j=-1,t2j=-1,t3j=-1, t0v=0,t1v=0,t2v=0,t3v=0;
-      for (let j = 0; j < NCELLS; j++) {
-        const v = _reconI[j];
-        if (v>t0v){t3v=t2v;t3j=t2j;t2v=t1v;t2j=t1j;t1v=t0v;t1j=t0j;t0v=v;t0j=j;}
-        else if(v>t1v){t3v=t2v;t3j=t2j;t2v=t1v;t2j=t1j;t1v=v;t1j=j;}
-        else if(v>t2v){t3v=t2v;t3j=t2j;t2v=v;t2j=j;}
-        else if(v>t3v){t3v=v;t3j=j;}
-      }
-      const invSqMax = 1/Math.sqrt(maxI);
-      for (const [j,v] of [[t0j,t0v],[t1j,t1v],[t2j,t2v],[t3j,t3v]]) {
-        if (j < 0) continue;
-        _peakX[pc] = j % GRID; _peakY[pc] = (j / GRID) | 0;
-        _peakJ[pc] = j; _peakAmp[pc] = Math.sqrt(v) * invSqMax; pc++;
-      }
-    }
-    // Partial selection sort for top-K
-    const k = Math.min(pc, CLOUD_TOP_K);
-    for (let i = 0; i < k; i++) {
-      let best = i;
-      for (let m = i+1; m < pc; m++)
-        if (_peakAmp[m] > _peakAmp[best]) best = m;
-      if (best !== i) {
-        let tj=_peakJ[i]; _peakJ[i]=_peakJ[best]; _peakJ[best]=tj;
-        let tx=_peakX[i]; _peakX[i]=_peakX[best]; _peakX[best]=tx;
-        let ty=_peakY[i]; _peakY[i]=_peakY[best]; _peakY[best]=ty;
-        let ta=_peakAmp[i]; _peakAmp[i]=_peakAmp[best]; _peakAmp[best]=ta;
-      }
-    }
-    const cells = [];
-    for (let i = 0; i < k; i++)
-      cells.push({ x: _peakX[i], y: _peakY[i], amp: _peakAmp[i] });
-    return cells;
-  };
-
-  const _buildReconCloud = (plate, rByTier, wByTier, oByTier, rFB, wFB, oFB) => {
-    if (!plate || !rFB?.length) return null;
-    const tiers = Array.from({ length: N_DEPTH_TIERS }, (_, d) => ({ d, cells: [] }));
-    let psi = _buildReconField(plate);
-    let anyCell = false;
-    for (let step = 1; step <= T_RECORD; step++) {
-      psi = _linearStepIFS(psi, -DT, rFB, wFB, oFB);
-      const d = _focalStepToTier[step];
-      if (d >= 0) {
-        const cells = _extractLocalMaxima(psi);
-        tiers[d].cells = cells;
-        if (cells.length) anyCell = true;
-      }
-    }
-    return anyCell ? tiers : null;
-  };
-
-  // ── Dual-slot IFS launcher (scheduler-native depth tiers) ───────────────
-  // Each depth tier d fires its own root set with delays scaled by tier:
-  //   tier 0 (near) → shortest delays → small ring radii → high-freq kernel
-  //   tier N-1 (far) → longest delays → large ring radii → low-freq kernel
-  // The IFS tree for each tier propagates independently through fresnelBeat,
-  // accumulating into slotKernelByTier[d]. finalizeFresnelm builds per-tier
-  // kernels so _keepalive can evolve each tier with its own dispersion relation.
-  const _launchSlot = (s, ctx, slot, cycleId) => {
-    let h = (cycleId | 0) ^ 0xdeadbeef;
-    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
-    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
-    W.rng.seed((h ^ (h >>> 16)) >>> 0);
-    const logMin = Math.log(IFS_MIN_DELAY * 2.0);
-    const logMax = Math.log(IFS_BASE_DELAY);
-    for (let d = 0; d < N_DEPTH_TIERS; d++) {
-      // Scale delay range per tier: tier 0 uses [logMin, logMid], tier N-1 uses full range.
-      const tierT  = (d + 1) / N_DEPTH_TIERS;
-      const logMid = logMin + tierT * (logMax - logMin);
-      const nRoots = Math.max(1, Math.round(N_FRESNEL_ROOTS / N_DEPTH_TIERS));
-      for (let i = 0; i < nRoots; i++) {
-        const t     = nRoots === 1 ? 1 : i / (nRoots - 1);
-        const delay = Math.exp(logMin + t * (logMid - logMin));
-        ctx.future(0, 'fresnelBeat', { depth: 0, delay, gen: 0, cycleId, slot, srcTier: d });
-      }
-    }
-    ctx.future(FRESNEL_DONE_DELAY, 'finalizeFresnelm', { cycleId, slot });
-    return {
-      ...s,
-      ['slotId_'            + slot]: cycleId,
-      ['slotKernelByTier_'  + slot]: Array.from({ length: N_DEPTH_TIERS }, () => []),
-      ['slotKernel_'        + slot]: [],
-      ['slotEnergy_'        + slot]: new Array(IFS_DEPTH).fill(0),
-      ['slotEvents_'        + slot]: [],
-      ['slotActive_'        + slot]: true,
-    };
-  };
-
-  // ── Build native IFS reference wave ─────────────────────────────────────
-  // A uniform line of unit-amplitude sources at y=0 (top row), propagated
-  // T_RECORD forward IFS steps.  Both object and reference now share the same
-  // fractional-Laplacian dispersion, so their interference is fully native.
-  const _initRefPsi = () => {
-    const psi = new Float64Array(2 * NCELLS);
-    for (let x = 0; x < GRID; x++) {
-      const w = 0.5 * (1 - Math.cos(2 * Math.PI * x / (GRID - 1)));
-      psi[x * 2] = w;
-    }
-    return psi;
-  };
-
-  const hologram4 = Behaviors.collect(
-    {
-      time:       0,
-      shape:      'cube',
-      angleY:     INIT_ANGLE_Y,
-      angleX:     INIT_ANGLE_X,
-      reconAngleY: INIT_ANGLE_Y,
-      reconAngleX: INIT_ANGLE_X,
-      lensF: 50,
-      cycleCount: 0,
-      direction:  1,
-      slotId_A: -1, slotActive_A: false,
-      slotKernel_A: [], slotKernelByTier_A: Array.from({ length: N_DEPTH_TIERS }, () => []),
-      slotEnergy_A: new Array(${IFS_DEPTH}).fill(0), slotEvents_A: [],
-      slotId_B: -2, slotActive_B: false,
-      slotKernel_B: [], slotKernelByTier_B: Array.from({ length: N_DEPTH_TIERS }, () => []),
-      slotEnergy_B: new Array(${IFS_DEPTH}).fill(0), slotEvents_B: [],
-      cachedRadii: [], cachedWeights: [], cachedOffsets: [],
-      cachedRadiiByTier: null, cachedWeightsByTier: null, cachedOffsByTier: null,
-      cachedRadiiVersion: 0,
-      plateResetSeq: 0,
-      plateSnapSeq: 0,
-      reconSeq: 0,
-      ifsNBands: 0, ifsSEff: 0, ifsRadiiStr: '',
-    },
-    reflector,
-    (state, pulse) => {
-      let s = state;
-      if (pulse?._isEvent && !pulse.isSubTick) {
-        const t = pulse._eventPayload?.type;
-        if (['rotate','toggleMode','resetPlate','snapPlate','nextCycle','addPoint','addBeam','setDepthProbe','dragStart','dragEnd','toggleTomo','setShape',
-             'setBreath','setPlateDriven','setNoHebb','setNullPlate','setPlateKernel','setDemodKick','setPlateSeedFree','setReconReset','setKickParams','setBackPlate'].includes(t))
-          s = { ...s, _queue: [{ fireAt: pulse.wallTime, msg: t, payload: pulse._eventPayload ?? {} }, ...(s._queue ?? [])] };
-      }
-      return W.reduce(s, pulse, 'hologram4', {
-
-        __macro: (s, p, ctx) => {
-          if (p.isSubTick) return s;
-          if (p.logicalTime !== 1) return s;
-          ctx.future(100, '_keepalive', {});
-          let s2 = _launchSlot({ ...s, time: 0 }, ctx, 'A', p.logicalTime);
-          ctx.future(Math.floor(FRESNEL_DONE_DELAY / 2), '_launchB', { cycleId: p.logicalTime + 1 });
-          return s2;
-        },
-
-        _keepalive: (s, p, ctx) => {
-          ctx.future(100, '_keepalive', {});
-          return s;
-        },
-
-
-        _launchB: (s, p, ctx) => {
-          if (s.slotActive_B) return s;
-          return _launchSlot(s, ctx, 'B', p.cycleId ?? ctx.wallTime);
-        },
-        _launchA: (s, p, ctx) => {
-          if (s.slotActive_A) return s;
-          return _launchSlot(s, ctx, 'A', p.cycleId ?? ctx.wallTime);
-        },
-
-        _physStep: (s, p, ctx) => {
-          ctx.future(NEXT_STEP_DELAY, '_physStep', {});
-          return { ...s, time: (s.time ?? 0) + DT };
-        },
-
-        fresnelBeat: (s, p, ctx) => {
-          const slot = p.slot ?? 'A';
-          if (p.cycleId !== s['slotId_' + slot]) return s;
-          const { depth, delay, srcTier } = p;
-          _ifsFireChildren(ctx, p, 'fresnelBeat', 'fresnelBeat');
-          const ri = Math.max(1, Math.round(delay / DELAY_SCALE));
-          // Accumulate into the merged kernel (for physics) AND the per-tier kernel.
-          const kernel    = s['slotKernel_' + slot] ?? [];
-          const newKernel = ri < (GRID >> 1) ? [...kernel, ri] : kernel;
-          // Per-tier: each srcTier accumulates its own ring radii independently.
-          const kbtSrc = s['slotKernelByTier_' + slot];
-          const kbt    = Array.from({ length: N_DEPTH_TIERS }, (_, d) =>
-            Array.isArray(kbtSrc?.[d]) ? [...kbtSrc[d]] : []);
-          const tier   = (srcTier ?? 0) % N_DEPTH_TIERS;
-          if (ri < (GRID >> 1)) kbt[tier].push(ri);
-          const energy = (s['slotEnergy_' + slot] ?? new Array(IFS_DEPTH).fill(0)).slice();
-          energy[depth] = Math.min(1, (energy[depth] ?? 0) + 0.3);
-          const events  = [...(s['slotEvents_' + slot] ?? []).slice(-80),
-            { d: depth, delay, wt: ctx.wallTime, t: tier }];
-          return { ...s,
-            ['slotKernel_'        + slot]: newKernel,
-            ['slotKernelByTier_'  + slot]: kbt,
-            ['slotEnergy_'        + slot]: energy,
-            ['slotEvents_'        + slot]: events,
-          };
-        },
-
-        finalizeFresnelm: (s, p, ctx) => {
-          const slot = p.slot ?? 'A';
-          if (p.cycleId !== s['slotId_' + slot]) return s;
-          const { fRadii, fWeights, sEff } = _buildNativeKernel(
-            s['slotKernel_' + slot] ?? [], FRAC_ALPHA, MAX_IFS_BANDS);
-          const fOffs = _buildRingOffsets(fRadii);
-          const kbtSrc2 = s['slotKernelByTier_' + slot];
-          const kbt = Array.from({ length: N_DEPTH_TIERS }, (_, d) =>
-            Array.isArray(kbtSrc2?.[d]) ? kbtSrc2[d] : []);
-          const tierKernels = kbt.map(tierK => {
-            const { fRadii: tr, fWeights: tw } = _buildNativeKernel(
-              tierK.length ? tierK : (fRadii.length ? fRadii : [1]),
-              FRAC_ALPHA, MAX_IFS_BANDS);
-            return { fRadii: tr, fWeights: tw, fOffs: _buildRingOffsets(tr) };
-          });
-          // Start time-tick clock on first kernel
-          if (!s.cachedRadii.length) {
-            ctx.future(0, '_physStep', {});
-          }
-          // Stagger opposite slot
-          const nextSlot    = slot === 'A' ? 'B' : 'A';
-          const nextCycleId = p.cycleId + 2;
-          if (!s['slotActive_' + nextSlot]) {
-            ctx.future(Math.floor(FRESNEL_DONE_DELAY / 2),
-              '_launch' + nextSlot, { cycleId: nextCycleId });
-          }
-          const newRadiiStr   = fRadii.join(',');
-          const kernelChanged = newRadiiStr !== s.ifsRadiiStr;
-          return { ...s,
-            ['slotActive_'       + slot]: false,
-            ['slotKernel_'       + slot]: [],
-            ['slotKernelByTier_' + slot]: Array.from({ length: N_DEPTH_TIERS }, () => []),
-            cachedRadii: fRadii, cachedWeights: fWeights, cachedOffsets: fOffs,
-            cachedRadiiByTier:   tierKernels.map(k => k.fRadii),
-            cachedWeightsByTier: tierKernels.map(k => k.fWeights),
-            cachedOffsByTier:    tierKernels.map(k => k.fOffs),
-            cachedRadiiVersion: kernelChanged ? (s.cachedRadiiVersion ?? 0) + 1 : (s.cachedRadiiVersion ?? 0),
-            ifsNBands: fRadii.length, ifsRadiiStr: newRadiiStr, ifsSEff: sEff,
-            cycleCount: (s.cycleCount ?? 0) + 1,
-          };
-        },
-
-        rotate: (s, p, ctx) => {
-          if ((s.direction ?? 1) < 0) {
-            return { ...s, reconAngleY: p.angleY ?? s.reconAngleY, reconAngleX: p.angleX ?? s.reconAngleX };
-          }
-          return { ...s, angleY: p.angleY ?? s.angleY, angleX: p.angleX ?? s.angleX };
-        },
-
-        // ── Add point source at grid coordinate ───────────────────────────
-        addPoint: (s, p, ctx) => {
-          const { gx, gy } = p;
-          if (gx === undefined || gy === undefined) return s;
-          const ph = ((gx * 7 + gy * 13) & 0xffff) / 0xffff * TWO_PI;
-          const amp = 40.0 / 96;
-          const extraPoints = [...(s.extraPoints ?? []), { gx, gy, ph, amp }];
-          return { ...s, extraPoints };
-        },
-
-        // ── Add coherent IFS ring emitter ────────────────────────────────────
-        // Pre-computes cells on each IFS ring radius around (gx,gy) and drives
-        // them with inward-converging phase each physics step.  Because the ring
-        // radii are taken from cachedRadii (the live IFS kernel), the beam speaks
-        // the same spatial frequencies the propagator uses — this creates visible
-        // resonance blooms and standing-wave halos where the beam's rings overlap
-        // the cube's own diffraction rings.
-        addBeam: (s, p, ctx) => {
-          const { gx, gy } = p;
-          if (gx === undefined || gy === undefined) return s;
-          const radii = (s.cachedRadii?.length ? s.cachedRadii : [2, 4, 6, 8]);
-          const freq  = TWO_PI / WAVELENGTH;
-          // Build ring cell lists with inward-converging phase offset per ring.
-          // Each ring r gets phase -kWav*r so waves focus toward centre (gx,gy).
-          const kWav  = TWO_PI / WAVELENGTH;
-          const rings = [];
-          for (const r of radii) {
-            const cells = [];
-            for (let dy = -r - 1; dy <= r + 1; dy++) {
-              for (let dx = -r - 1; dx <= r + 1; dx++) {
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                if (Math.abs(dist - r) > 0.65) continue;
-                const cx = ((gx + dx) % GRID + GRID) % GRID;
-                const cy = ((gy + dy) % GRID + GRID) % GRID;
-                cells.push(cy * GRID + cx);
-              }
-            }
-            // phase offset makes the ring converge inward
-            rings.push({ r, cells, phOff: -kWav * r });
-          }
-          const ph0  = ((gx * 7 + gy * 13) & 0xffff) / 0xffff * TWO_PI;
-          const amp  = 4.0;
-          const extraBeams = [...(s.extraBeams ?? []), { gx, gy, rings, ph0, amp, freq }];
-          return { ...s, extraBeams };
-        },
-
-        // ── Depth tier probe (renderer-local physics) ─────────────────────
-        // Just updates the probe param; renderer's local GPU loop reads it.
-        setDepthProbe: (s, p, ctx) => {
-          const { depthFraction } = p;
-          if (depthFraction === undefined) return { ...s, depthProbe: null };
-          const tierIdx = Math.min(N_DEPTH_TIERS - 1, Math.floor(depthFraction * N_DEPTH_TIERS));
-          return { ...s, depthProbe: { depthFraction, tierIdx } };
-        },
-
-        setLensF:   (s, p) => ({ ...s, lensF: p.f ?? s.lensF, reconSeq: (s.reconSeq ?? 0) + 1 }),
-        setShape:   (s, p) => ({ ...s, shape: p.shape ?? s.shape }),
-
-        dragStart: (s) => ({ ...s, isDragging: true }),
-        dragEnd:   (s) => ({ ...s, isDragging: false }),
-
-        // ── Manual plate snapshot trigger ─────────────────────────────────
-        snapPlate: (s, p, ctx) => {
-          return { ...s, plateSnapSeq: (s.plateSnapSeq ?? 0) + 1 };
-        },
-
-        // ── Toggle record / reconstruct ───────────────────────────────────
-        toggleMode: (s, p, ctx) => {
-          const newDir = (s.direction ?? 1) === 1 ? -1 : 1;
-          return { ...s, direction: newDir, reconSeq: (s.reconSeq ?? 0) + 1 };
-        },
-
-        // ── Clear plate and return to init ────────────────────────────────
-        resetPlate: (s, p, ctx) => {
-          return { ...s,
-            plateResetSeq: (s.plateResetSeq ?? 0) + 1,
-            reconSeq: (s.reconSeq ?? 0) + 1,
-            time: 0, direction: 1,
-            angleY: INIT_ANGLE_Y, angleX: INIT_ANGLE_X,
-            reconAngleY: INIT_ANGLE_Y, reconAngleX: INIT_ANGLE_X,
-            extraPoints: [], extraBeams: [], depthProbe: null,
-          };
-        },
-
-        // ── Toggle tomo / fast recording mode ─────────────────────────────
-        toggleTomo: (s, p, ctx) => {
-          return { ...s,
-            tomoMode: !(s.tomoMode ?? TOMO_MODE),
-            plateResetSeq: (s.plateResetSeq ?? 0) + 1,
-            reconSeq: (s.reconSeq ?? 0) + 1,
-            time: 0, direction: 1, depthProbe: null,
-          };
-        },
-
-        nextCycle: (s, p, ctx) => {
-          if (s.slotActive_A && s.slotActive_B) return s;
-          const slot = !s.slotActive_A ? 'A' : 'B';
-          return _launchSlot(s, ctx, slot, ctx.wallTime + 1);
-        },
-
-        setBreath:       (s, p) => ({ ...s, breathVis:       p.value ?? !(s.breathVis       ?? true) }),
-        setPlateDriven:  (s, p) => ({ ...s, plateDrivenMode: p.value ?? !(s.plateDrivenMode  ?? true) }),
-        setNoHebb:       (s, p) => ({ ...s, noHebbTest:      p.value ?? !(s.noHebbTest       ?? false) }),
-        setNullPlate:    (s, p) => ({ ...s, nullPlateTest:   p.value ?? !(s.nullPlateTest    ?? false) }),
-        setPlateKernel:  (s, p) => ({ ...s, plateKernelMode: p.value ?? !(s.plateKernelMode  ?? false), demodKickMode: false }),
-        setDemodKick:    (s, p) => ({ ...s, demodKickMode:   p.value ?? !(s.demodKickMode    ?? false), plateKernelMode: false }),
-        setPlateSeedFree:(s, p) => ({ ...s, plateSeedFree:   p.value ?? !(s.plateSeedFree    ?? false) }),
-        setReconReset:   (s, p) => ({ ...s, plateKernelMode: false, demodKickMode: false, plateSeedFree: false, backPlateMode: false, reconResetSeq: (s.reconResetSeq ?? 0) + 1 }),
-        setBackPlate:    (s, p) => ({ ...s, backPlateMode: p.value ?? !(s.backPlateMode ?? false), plateKernelMode: false, demodKickMode: false }),
-        setKickParams:   (s, p) => ({ ...s,
-          plateKernelGamma: p.gamma ?? s.plateKernelGamma,
-          plateKernelDT:    p.dt    ?? s.plateKernelDT,
-          plateKernelSteps: p.steps ?? s.plateKernelSteps,
-        }),
-
-      });
-    }
-  );
-
-  const _isStable = W.stable([hologram4], reflector);
-  const _export   = W.export(Renkon, { hologram4 }, _isStable);
-`;
-
+import {
+  hologramWorldProgram,
+  REFLECTOR_MS, SUBTICK_MS,
+  GRID, N_CELLS, DT, REF_AMP, REF_KX, SRC_ALPHA, PLATE_DECAY, K_WAVE,
+  T_RECORD, RENDER_SCALE, FRAC_ALPHA, MAX_IFS_BANDS, N_DEPTH_TIERS, TOMO_MODE,
+  IFS_DEPTH, IFS_GEN_CAP, IFS_MIN_DELAY, IFS_BASE_DELAY, FRESNEL_DONE_DELAY,
+  NEXT_STEP_DELAY, RECON_STEP_DELAY, RECON_HOLD_MS, DELAY_SCALE, WAVELENGTH,
+  CAM_Z, PROJ_SCALE, INIT_ANGLE_Y, INIT_ANGLE_X, PTS_PER_EDGE,
+  CUBE_PTS, PYRAMID_PTS, COMBINED_PTS,
+  CUBE_VERTS, CUBE_EDGES, PYRAMID_VERTS, PYRAMID_EDGES,
+  HOUSE_PYRAMID_VERTS, HOUSE_PYRAMID_EDGES,
+} from '../hologram_world.js';
+const hologram4WorldProgram = hologramWorldProgram;
+import { colormaps } from '../krestianstvo-wavefront-physics.js';
 // ── Renderer-local physics (mirror of world program, no network) ─────────────
 // Build callable versions of the IFS physics functions for use in the renderer.
 // These are the same algorithms the model uses, evaluated with the same constants.
 const _rendererPhysics = (() => {
   const TWO_PI   = 2 * Math.PI;
   const NCELLS   = N_CELLS;
-  const SHAPE_PTS = { cube: CUBE_PTS, pyramid: PYRAMID_PTS, combined: COMBINED_PTS };
+  const SHAPE_PTS = { cube: CUBE_PTS, pyramid: PYRAMID_PTS, combined: COMBINED_PTS, none: [] };
 
   // ── _buildRingOffsets and _linearStepIFS ────────────────────────────────
   const _buildRingOffsets = (fRadii) => fRadii.map(r => {
@@ -837,6 +59,39 @@ const _rendererPhysics = (() => {
     }
     return flat;
   });
+
+  // Jacobi leapfrog: compute full Laplacian from unmodified source array before
+  // any cell is updated. This makes the step exactly time-reversible: -DT undoes +DT
+  // to machine precision. The previous in-place (Gauss-Seidel) version was NOT
+  // reversible because lower-index cells were read after being written.
+  const _lapComp = (src, comp, G, offs, ringN, ringNorm, nF) => {
+    const lap = new Float64Array(G * G);
+    for (let y = 0; y < G; y++) {
+      const ym = ((y - 1 + G) % G) * G;
+      const yp = ((y + 1)     % G) * G;
+      for (let x = 0; x < G; x++) {
+        const id = y*G + x;
+        const xm = (x - 1 + G) % G;
+        const xp = (x + 1)     % G;
+        let l = src[(y*G+xp)*2+comp] + src[(y*G+xm)*2+comp]
+              + src[(yp+x)*2+comp]   + src[(ym+x)*2+comp]
+              - 4*src[id*2+comp];
+        for (let d = 0; d < nF; d++) {
+          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
+          const cbase = src[id*2+comp];
+          let acc = 0;
+          for (let i = 0; i < n; i++) {
+            const nx = ((x + flat[i*2])   % G + G) % G;
+            const ny = ((y + flat[i*2+1]) % G + G) % G;
+            acc += src[(ny*G + nx)*2 + comp];
+          }
+          l += sc * (acc - n * cbase);
+        }
+        lap[id] = l;
+      }
+    }
+    return lap;
+  };
 
   const _linearStepIFS = (psi, dt, fRadii, fWeights, fOffs) => {
     const out  = new Float64Array(psi);
@@ -850,81 +105,15 @@ const _rendererPhysics = (() => {
       ringN[d]    = offs[d].length >> 1;
       ringNorm[d] = fWeights[d] * 4 / ringN[d];
     }
-    // Step 1: Re -= (dt/4)·∇²Im
-    for (let y = 0; y < G; y++) {
-      const ym = ((y - 1 + G) % G) * G;
-      const yp = ((y + 1)     % G) * G;
-      for (let x = 0; x < G; x++) {
-        const id = y*G + x;
-        const xm = (x - 1 + G) % G;
-        const xp = (x + 1)     % G;
-        let lap = out[(y*G+xp)*2+1] + out[(y*G+xm)*2+1]
-                + out[(yp+x)*2+1]   + out[(ym+x)*2+1]
-                - 4*out[id*2+1];
-        for (let d = 0; d < nF; d++) {
-          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
-          const cbase = out[id*2+1];
-          let acc = 0;
-          for (let i = 0; i < n; i++) {
-            const nx = ((x + flat[i*2]   % G) + G) % G;
-            const ny = ((y + flat[i*2+1] % G) + G) % G;
-            acc += out[(ny*G + nx)*2 + 1];
-          }
-          lap += sc * (acc - n * cbase);
-        }
-        out[id*2] -= h * lap;
-      }
-    }
-    // Step 2: Im += (dt/2)·∇²Re
-    for (let y = 0; y < G; y++) {
-      const ym = ((y - 1 + G) % G) * G;
-      const yp = ((y + 1)     % G) * G;
-      for (let x = 0; x < G; x++) {
-        const id = y*G + x;
-        const xm = (x - 1 + G) % G;
-        const xp = (x + 1)     % G;
-        let lap = out[(y*G+xp)*2] + out[(y*G+xm)*2]
-                + out[(yp+x)*2]   + out[(ym+x)*2]
-                - 4*out[id*2];
-        for (let d = 0; d < nF; d++) {
-          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
-          const cbase = out[id*2];
-          let acc = 0;
-          for (let i = 0; i < n; i++) {
-            const nx = ((x + flat[i*2]   % G) + G) % G;
-            const ny = ((y + flat[i*2+1] % G) + G) % G;
-            acc += out[(ny*G + nx)*2];
-          }
-          lap += sc * (acc - n * cbase);
-        }
-        out[id*2+1] += (dt * 0.5) * lap;
-      }
-    }
-    // Step 3: Re -= (dt/4)·∇²Im  (mirror of step 1)
-    for (let y = 0; y < G; y++) {
-      const ym = ((y - 1 + G) % G) * G;
-      const yp = ((y + 1)     % G) * G;
-      for (let x = 0; x < G; x++) {
-        const id = y*G + x;
-        const xm = (x - 1 + G) % G;
-        const xp = (x + 1)     % G;
-        let lap = out[(y*G+xp)*2+1] + out[(y*G+xm)*2+1]
-                + out[(yp+x)*2+1]   + out[(ym+x)*2+1]
-                - 4*out[id*2+1];
-        for (let d = 0; d < nF; d++) {
-          const flat = offs[d]; const n = ringN[d]; const sc = ringNorm[d];
-          const cbase = out[id*2+1];
-          let acc = 0;
-          for (let i = 0; i < n; i++) {
-            const nx = ((x + flat[i*2]   % G) + G) % G;
-            const ny = ((y + flat[i*2+1] % G) + G) % G;
-            acc += out[(ny*G + nx)*2 + 1];
-          }
-          lap += sc * (acc - n * cbase);
-        }
-        out[id*2] -= h * lap;
-      }
-    }
+    // Step 1: Re -= (dt/4)·L[Im]  — Jacobi: lap computed from unmodified out
+    const lap1 = _lapComp(out, 1, G, offs, ringN, ringNorm, nF);
+    for (let j = 0; j < G*G; j++) out[j*2] -= h * lap1[j];
+    // Step 2: Im += (dt/2)·L[Re]  — lap from updated Re, unmodified Im
+    const lap2 = _lapComp(out, 0, G, offs, ringN, ringNorm, nF);
+    for (let j = 0; j < G*G; j++) out[j*2+1] += dt * 0.5 * lap2[j];
+    // Step 3: Re -= (dt/4)·L[Im]  — lap from updated Im, same form as step 1
+    const lap3 = _lapComp(out, 1, G, offs, ringN, ringNorm, nF);
+    for (let j = 0; j < G*G; j++) out[j*2] -= h * lap3[j];
     return out;
   };
 
@@ -976,6 +165,33 @@ const _rendererPhysics = (() => {
       field[j*2+1] += pt.amp * Math.sin(pt.ph);
     }
     return field;
+  };
+
+  // ── IFS-depth source schedule ────────────────────────────────────────────────
+  // Returns Array[tRecord] where each entry is a Float64Array injection field or null.
+  // Point p at depth sz gets Tp propagation steps → injected at step (tRecord-1-Tp).
+  // All vertices fire into the same running field → they interfere = the hologram.
+  // Backward sweep from swPsi recovers each vertex at its Tp backward step.
+  const _buildDepthSourceSchedule = (angleY, angleX, extraPoints, shape, tRecord) => {
+    const sources = _projectSources(angleY, angleX, shape);
+    let szMin = Infinity, szMax = -Infinity;
+    for (const { sz } of sources) { if (sz < szMin) szMin = sz; if (sz > szMax) szMax = sz; }
+    const szRange = Math.max(1e-4, szMax - szMin);
+    const schedule = new Array(tRecord).fill(null);
+    const addInj = (step, j, amp) => {
+      if (step < 0 || step >= tRecord) return;
+      if (!schedule[step]) schedule[step] = new Float64Array(2 * NCELLS);
+      schedule[step][j*2] += amp;
+    };
+    for (const { sx, sy, sz, amp } of sources) {
+      const ix = Math.round(sx) | 0, iy = Math.round(sy) | 0;
+      if (ix < 0 || ix >= GRID || iy < 0 || iy >= GRID) continue;
+      const t  = Math.max(0, Math.min(1, (sz - szMin) / szRange));
+      const Tp = Math.round(t * (tRecord - 1));
+      addInj(tRecord - 1 - Tp, iy * GRID + ix, amp);
+    }
+    for (const pt of (extraPoints ?? [])) addInj(tRecord - 1, pt.gy * GRID + pt.gx, pt.amp);
+    return schedule;
   };
 
   // ── Volumetric source field — used for plate recording only ──────────────────
@@ -1065,13 +281,13 @@ const _rendererPhysics = (() => {
     return psi;
   };
 
-  return { _linearStepIFS, _buildRingOffsets, _buildSrcFieldIFS, _buildVolSrcField, _buildReconField, _initRefPsi };
+  return { _linearStepIFS, _buildRingOffsets, _buildSrcFieldIFS, _buildVolSrcField, _buildReconField, _initRefPsi, _buildDepthSourceSchedule };
 })();
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 function makeHologram4Renderer(core) {
   const { _clientBadge, _renderAvatars } = core;
-  const { _linearStepIFS, _buildSrcFieldIFS, _buildVolSrcField, _buildReconField, _initRefPsi } = _rendererPhysics;
+  const { _linearStepIFS, _buildSrcFieldIFS, _buildVolSrcField, _buildReconField, _initRefPsi, _buildDepthSourceSchedule } = _rendererPhysics;
 
   const RW = GRID * RENDER_SCALE;
   const RH = GRID * RENDER_SCALE;
@@ -1101,6 +317,7 @@ function makeHologram4Renderer(core) {
       gr.addColorStop(1, 'rgba(0,0,0,0)');
       ctx2d.fillStyle = gr; ctx2d.fillRect(0, 0, CW, CH);
     }
+    if (shape === 'none') return;
     const { verts, edges } = _WIRE_SHAPES[shape] ?? _WIRE_SHAPES.cube;
     const pts = verts.map(([ox,oy,oz]) => _project(ox,oy,oz,angleY,angleX,CW,CH));
     for (let pass = 0; pass < 2; pass++) {
@@ -1159,7 +376,7 @@ function makeHologram4Renderer(core) {
     Object.assign(root.style, {
       fontFamily: 'ui-monospace,monospace', background: '#000', color: '#eee',
       flex: '1', minWidth: '0', minHeight: '0', boxSizing: 'border-box',
-      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      display: 'flex', flexDirection: 'column', overflow: 'visible',
     });
     document.getElementById('hologram4-wrap').appendChild(root);
 
@@ -1175,17 +392,36 @@ function makeHologram4Renderer(core) {
       alignItems: 'center', gap: '4px', padding: '6px 8px',
       background: '#0a0a0a', borderTop: '1px solid #222',
       flexShrink: '0', boxSizing: 'border-box',
+      overflowY: 'visible',
     });
     root.appendChild(controlBar);
 
-    // ── Canvas column (four side-by-side) ─────────────────────────────────────
+    // ── Canvas area: two rows (object row always visible, eye row in LIVE mode) ──
+    const canvasArea = document.createElement('div');
+    Object.assign(canvasArea.style, {
+      flex: '1', minWidth: '0', minHeight: '0',
+      display: 'flex', flexDirection: 'column', gap: '4px',
+      padding: '8px', boxSizing: 'border-box',
+    });
+    main.appendChild(canvasArea);
+
+    // Row 1: object canvases (always visible)
     const canvasCol = document.createElement('div');
     Object.assign(canvasCol.style, {
       flex: '1', minWidth: '0', minHeight: '0',
       display: 'flex', flexDirection: 'row',
-      alignItems: 'stretch', gap: '4px', padding: '8px', boxSizing: 'border-box',
+      alignItems: 'stretch', gap: '4px',
     });
-    main.appendChild(canvasCol);
+    canvasArea.appendChild(canvasCol);
+
+    // Row 2: eye reconstruction canvases (LIVE mode only)
+    const eyeRow = document.createElement('div');
+    Object.assign(eyeRow.style, {
+      flex: '1', minWidth: '0', minHeight: '0',
+      display: 'none', flexDirection: 'row',
+      alignItems: 'stretch', gap: '4px',
+    });
+    canvasArea.appendChild(eyeRow);
 
     const makeDataCell = (label, color) => {
       const wrap = document.createElement('div');
@@ -1216,6 +452,14 @@ function makeHologram4Renderer(core) {
     canvasCol.appendChild(phaseCell.wrap);
     canvasCol.appendChild(plateCell.wrap);
     canvasCol.appendChild(cloudCell.wrap);
+
+    // Eye row cells — shown only in LIVE mode
+    const eyeFieldCell = makeDataCell('EYE  |ψ_arrived|²  received wavefront', '#f84');
+    const eyePhaseCell = makeDataCell('EYE  |ψ_percept|²  soliton (relaxed)', '#4af');
+    const eyeDiffCell  = makeDataCell('EYE  |ψ_perceived|²  inferred object', '#fa4');
+    eyeRow.appendChild(eyeFieldCell.wrap);
+    eyeRow.appendChild(eyePhaseCell.wrap);
+    eyeRow.appendChild(eyeDiffCell.wrap);
 
     const fieldBuf = fieldCell.ctx.createImageData(RW, RH);
     const phaseBuf = phaseCell.ctx.createImageData(RW, RH);
@@ -1283,14 +527,15 @@ function makeHologram4Renderer(core) {
     let _reconSnapBaseAngleX = 0;
     const PARALLAX_SCALE    = 0.06;  // radians→dK conversion; tune for visible but not destructive parallax
     let _breathVis          = true;   // show breathing (live stepRecord); false = freeze display psi
+    let _recordSeeded       = false;  // RECORD soliton has been seeded; step persistently after
     let _localDirection     = 1;
+    let _kernelChangeFrames = 0; // countdown after kernel switch — boosted SRC_ALPHA to re-anchor
     let _localStepCount     = 0;
     let _psiReadPending     = false;
     let _localRefReady      = false;  // true once GPU ref has been read back to JS for cplx plate
     let _cplxPlateObjReady  = false;  // true once cplx plate objField has been set as RECON attractor
     let _cplxPlateUploaded  = false;  // true after uploadCplxPlate with non-zero content
     let _cplxPlateField     = null;   // JS copy of ψ_sweep·conj(ψ_ref)
-    let _sweepSnapPsi       = null;   // ψ_sweep_final at snap time — pure IFS eigenstate of object
 
     // ── Plate sweep state ──────────────────────────────────────────────────────
     // Manual snap: seed sweep ping-pong from objField when plateSnapSeq changes,
@@ -1301,11 +546,38 @@ function makeHologram4Renderer(core) {
     const SNAP_ANGLE_STEP = 0.08;   // radians between exposures
     let _localPlateSnapSeq  = 0;
     let _hebbianWeights     = null; // Hebbian ring weights computed from RECORD soliton at snap
-    let _snapPsi            = null; // RECORD soliton psi captured at snap time — RECON seed
-    let _plateDrivenMode    = true;  // true = plate attractor + noise seed (default); false = geometry + snapPsi seed
+    let _plateDrivenMode    = true;  // true = plate attractor + noise seed (default); false = geometry seed
     let _nullPlateTest      = false; // proof test: zero plate → object must disappear if plate-driven
     let _noHebbTest         = false; // optional: add Hebbian weights on top of baseline kernel
-    let _backPlateMode      = false; // option 4: backward sweep + plate phase kick → read back as objField
+    let _hamiltonianMode    = false; // plate as Hamiltonian potential: exp(i·γ·plate) baked into each IFS step
+    let _liveMode           = false; // pure IFS round-trip eye: ψ_obj → F^T → F^-T → ψ_obj' each frame
+    let _liveRefMix         = 0;    // mix weight of objField into eye diff panel (0=off)
+    let _eyeReconNorm        = 1e-9;  // display normalization = peak |ψ_holo|²
+    let _eyeDirty            = true;  // object changed — recompute the wavefront soliton
+    let _eyeObjKeySeen       = '';    // object key (angle/shape/points) the eye last snapped
+    let _eyeReady            = false; // true once ψ_holo sits in the eye texture
+    let _eyeT                = 0;     // (animated version) current propagation depth 0..T_RECORD
+    let _eyeDir              = +1;    // (animated version) direction: +1 obj→holo, -1 back
+    const EYE_SPEED          = 2;     // (animated version) steps per displayed frame
+    const EYE_RELAX_STEPS    = 60;    // feedback steps to settle the percept onto a soliton
+    let _eyeHmode            = 0;     // hologram-domain [H] transform: 0=identity 1=lowpass 2=highpass 3=conj
+    let _eyeHparam           = 0.5;   // [H] aperture fraction (0..1)
+    let _eyeEvidence         = null;  // ψ_perceived = exact inverse (the perceptual evidence, held)
+    let _eyeArrivedNorm      = 1e-9;  // display norm for ψ_arrived
+    let _eyePerceptState     = null;  // settled percept, carried across object changes (memory)
+    let _recordMode         = 'vol'; // sweep seed: 'vol'=volumetric Gabor, 'ifs'=point-source IFS, 'retina'=live retina, 'ifs_depth'=per-point step-timed injection
+    let _depthSchedule      = null;  // Array[T_RECORD] of injection fields for 'ifs_depth' mode
+    let _backPlateMode      = false; // Gerchberg-Saxton: forward + amp constraint + backward
+    let _gsSteps            = 10;   // steps per half-trip per frame (keep small — 5-20 is fast enough)
+    let _gsPropagator       = 'ifs'; // 'ifs' = IFS leapfrog, 'huygens' = Huygens wavelet
+    let _gsNoiseSeed        = false; // true = seed GS from noise (tests plate drives convergence), false = demod seed
+    let _snapSwPsi          = null;  // raw ψ_sweep at snap time — used for exact backward reconstruction
+    let _directBackMode     = false; // upload snapSwPsi → backward T_RECORD steps → exact reconstruction
+    let _directBackPsi      = null;  // frozen reconstruction from entry — protected from async overwrites
+    let _directBackMax      = 1e-9;  // peak amplitude for stable normalization
+    let _focusDepth         = 0;    // 0 = no focus; >0 = lens focal length applied after backward sweep (vol mode depth scan)
+    let _gsPhase            = 'fwd'; // current half of GS round-trip: 'fwd' | 'constraint' | 'bwd'
+    let _gsStepsDone        = 0;    // steps completed in current half
     let _plateDemodMode     = false; // test mode: demodulated plate as objField injector
     let _plateDemodField    = null;  // IFS-projected demodulated field — ready as eigenstate attractor
     let _plateDemodPending  = false; // true while IFS projection readback is in flight
@@ -1414,6 +686,86 @@ function makeHologram4Renderer(core) {
     });
     const btnSnap   = mkBtn('◉ SNAP PLATE',   '#fa4', '#000', () => injectEvent?.({ type: 'snapPlate' }));
     const btnReset  = mkBtn('↺ RESET PLATE',  '#333', '#aaa', () => injectEvent?.({ type: 'resetPlate' }));
+
+    // ── Record mode selector ──────────────────────────────────────────────────
+    const _recModes = [
+      { mode: 'vol',    label: '◎ VOL',    bg: '#245', color: '#8cf', title: 'Volumetric Gabor wavefront (spherical waves)' },
+      { mode: 'ifs',       label: '◎ IFS',   bg: '#245', color: '#fc8', title: 'Point-source IFS (matches display soliton eigenstate)' },
+      { mode: 'ifs_depth', label: '◎ DEPTH', bg: '#245', color: '#f8a', title: 'IFS depth: per-point step-timed injection — depth = backward time axis' },
+      { mode: 'retina',    label: '◎ RETINA',bg: '#245', color: '#af8', title: 'Live retina snapshot (record current psi as-is)' },
+    ];
+    const _recBtns = _recModes.map(({ mode, label, bg, color, title }) => {
+      const b = mkBtn(label, bg, color, () => injectEvent?.({ type: 'setRecordMode', mode }));
+      b.title = title;
+      return b;
+    });
+    const _recRow = document.createElement('div');
+    Object.assign(_recRow.style, { display: 'flex', gap: '2px', flexShrink: '0' });
+    _recBtns.forEach(b => _recRow.appendChild(b));
+
+    const btnLive = mkBtn('⟳ LIVE', '#363', '#af8', () => injectEvent?.({ type: 'setLiveMode' }));
+
+    // Mix slider: blend reference objField into RECON display for diff test
+    const mixWrap = document.createElement('div');
+    Object.assign(mixWrap.style, { display:'flex', alignItems:'center', gap:'3px', flexShrink:'0' });
+    const mixLbl = document.createElement('span');
+    mixLbl.style.cssText = 'color:#af8;font-size:8px;white-space:nowrap';
+    mixLbl.textContent = 'MIX 0';
+    const mixSlider = document.createElement('input');
+    mixSlider.type = 'range'; mixSlider.min = '0'; mixSlider.max = '1';
+    mixSlider.step = '0.05'; mixSlider.value = '0';
+    Object.assign(mixSlider.style, { width:'50px', cursor:'pointer' });
+    mixSlider.addEventListener('input', () => {
+      _liveRefMix = parseFloat(mixSlider.value);
+      mixLbl.textContent = `MIX ${_liveRefMix.toFixed(2)}`;
+      _eyeDirty = true; // eye holds between changes — force a re-render so MIX shows
+    });
+    mixWrap.appendChild(mixLbl);
+    mixWrap.appendChild(mixSlider);
+
+    // ── H-transform controls (hologram-domain operator between forward/backward legs) ──
+    const _hModes = [
+      { mode: 0, label: 'H=id',   title: 'Identity — exact round-trip, ψ_obj\'=ψ_obj' },
+      { mode: 1, label: 'H=LP',   title: 'Low-pass aperture in hologram domain' },
+      { mode: 2, label: 'H=HP',   title: 'High-pass (remove DC/low spatial freq)' },
+      { mode: 3, label: 'H=conj', title: 'Complex conjugate — time-reverse the hologram' },
+    ];
+    const _hBtns = _hModes.map(({ mode, label, title }) => {
+      const b = mkBtn(label, mode === 0 ? '#363' : '#333', mode === 0 ? '#af8' : '#888', () => {
+        _eyeHmode = mode;
+        _eyeDirty = true;
+        _hBtns.forEach((bb, i) => {
+          bb.style.background = i === mode ? '#363' : '#333';
+          bb.style.color      = i === mode ? '#af8' : '#888';
+        });
+      });
+      b.title = title;
+      Object.assign(b.style, { fontSize: '8px', padding: '3px 5px' });
+      return b;
+    });
+    const hModeRow = document.createElement('div');
+    Object.assign(hModeRow.style, { display: 'flex', gap: '1px', flexShrink: '0' });
+    _hBtns.forEach(b => hModeRow.appendChild(b));
+
+    const hParamWrap = document.createElement('div');
+    Object.assign(hParamWrap.style, { display:'flex', alignItems:'center', gap:'3px', flexShrink:'0' });
+    const hParamLbl = document.createElement('span');
+    hParamLbl.style.cssText = 'color:#af8;font-size:8px;white-space:nowrap';
+    hParamLbl.textContent = `r=${_eyeHparam.toFixed(2)}`;
+    const hParamSlider = document.createElement('input');
+    hParamSlider.type = 'range'; hParamSlider.min = '0'; hParamSlider.max = '1';
+    hParamSlider.step = '0.02'; hParamSlider.value = String(_eyeHparam);
+    Object.assign(hParamSlider.style, { width:'50px', cursor:'pointer' });
+    hParamSlider.addEventListener('input', () => {
+      _eyeHparam = parseFloat(hParamSlider.value);
+      hParamLbl.textContent = `r=${_eyeHparam.toFixed(2)}`;
+      if (_eyeHmode !== 0) _eyeDirty = true;
+    });
+    hParamWrap.appendChild(hParamLbl);
+    hParamWrap.appendChild(hParamSlider);
+
+    const btnPointTest = mkBtn('⊙ PT TEST', '#520', '#fa8', () => injectEvent?.({ type: 'pointTest' }));
+    btnPointTest.title = 'Single-point reversibility test: record one delta source at center (IFS mode), then GS-reconstruct — should collapse to a point';
     const _shapeRow = document.createElement('div');
     Object.assign(_shapeRow.style, { display: 'flex', gap: '2px', flexShrink: '0' });
     const _mkShapeBtn = (label, shape, bg) => {
@@ -1463,8 +815,9 @@ function makeHologram4Renderer(core) {
       return b;
     };
     // traversal buttons removed — don't affect soliton fixed point
-    const btnPlateKernel = mkBtn('⬡ PLATE KERN', '#555', '#aaa', () => injectEvent?.({ type: 'setPlateKernel' }));
-    const btnDemodKick   = mkBtn('⬡ DEMOD KICK', '#555', '#aaa', () => injectEvent?.({ type: 'setDemodKick' }));
+    const btnPlateKernel  = mkBtn('⬡ PLATE KERN',  '#555', '#aaa', () => injectEvent?.({ type: 'setPlateKernel' }));
+    const btnDemodKick    = mkBtn('⬡ DEMOD KICK',  '#555', '#aaa', () => injectEvent?.({ type: 'setDemodKick' }));
+    const btnHamiltonian  = mkBtn('⬡ HAMILTONIAN', '#255', '#5cf', () => injectEvent?.({ type: 'setHamiltonian' }));
 
     // Gamma slider for plate kernel phase kick strength
     const gammaWrap = document.createElement('div');
@@ -1503,6 +856,11 @@ function makeHologram4Renderer(core) {
     const stepsWrap = mkSlider(`N ${_plateKernelSteps}`, 1, 64, 1, _plateKernelSteps, (sl, lbl) => {
       injectEvent?.({ type: 'setKickParams', steps: parseInt(sl.value) });
     });
+    const gsStepsWrap = mkSlider(`GS ${_gsSteps}/fr`, 1, 40, 1, _gsSteps, (sl, lbl) => {
+      const v = parseInt(sl.value);
+      lbl.textContent = `GS ${v}/fr`;
+      injectEvent?.({ type: 'setKickParams', gsSteps: v });
+    });
 
     const btnPlateSeed  = mkBtn('⬡ FREE IFS',     '#555', '#aaa', () => injectEvent?.({ type: 'setPlateSeedFree' }));
     const btnReconReset  = mkBtn('↺ RECON RESET',  '#333', '#fa8', () => injectEvent?.({ type: 'setReconReset' }));
@@ -1514,6 +872,99 @@ function makeHologram4Renderer(core) {
       if (_plateDemodMode) injectEvent?.({ type: 'setPlateDriven', value: false });
       _localReconSoliton = false;
     });
+    // ── GS propagator selector ────────────────────────────────────────────────
+    const _gsPropModes = [
+      { mode: 'ifs',     label: 'GS:IFS',  bg: '#345', color: '#fc8', title: 'GS round-trip via IFS leapfrog — use with IFS or RETINA plates' },
+      { mode: 'huygens', label: 'GS:HUY',  bg: '#345', color: '#8cf', title: 'GS round-trip via Huygens wavelet — use with VOL plates' },
+    ];
+    const _gsPropBtns = _gsPropModes.map(({ mode, label, bg, color, title }) => {
+      const b = mkBtn(label, bg, color, () => injectEvent?.({ type: 'setGsPropagator', mode }));
+      b.title = title;
+      Object.assign(b.style, { fontSize: '8px', padding: '4px 5px' });
+      return b;
+    });
+    const _gsPropRow = document.createElement('div');
+    Object.assign(_gsPropRow.style, { display: 'flex', gap: '2px', flexShrink: '0' });
+    _gsPropBtns.forEach(b => _gsPropRow.appendChild(b));
+    const btnGsNoise    = mkBtn('GS:NOISE',  '#333', '#fa8', () => injectEvent?.({ type: 'setGsNoiseSeed' }));
+    const btnDirectBack = mkBtn('⟵ EXACT',   '#246', '#8ef', () => injectEvent?.({ type: 'setDirectBack' }));
+    btnDirectBack.title = 'Exact backward reconstruction: upload ψ_sweep at snap, run T_RECORD backward leapfrog steps — no iteration, machine-precision inverse';
+
+    // ── Depth focus slider (vol mode only) ───────────────────────────────────
+    const focusWrap = document.createElement('div');
+    Object.assign(focusWrap.style, { display:'flex', alignItems:'center', gap:'3px', flexShrink:'0' });
+    const focusLbl = document.createElement('span');
+    focusLbl.style.cssText = 'color:#8ef;font-size:8px;white-space:nowrap';
+    focusLbl.textContent = 'Z off';
+    const focusSlider = document.createElement('input');
+    focusSlider.type = 'range'; focusSlider.min = '0'; focusSlider.max = '100';
+    focusSlider.step = '1'; focusSlider.value = '0';
+    Object.assign(focusSlider.style, { width:'60px', cursor:'pointer' });
+    focusSlider.addEventListener('input', () => {
+      _focusDepth = parseInt(focusSlider.value);
+      focusLbl.textContent = _focusDepth > 0 ? `Z ${_focusDepth}` : 'Z off';
+    });
+    focusWrap.appendChild(focusLbl);
+    focusWrap.appendChild(focusSlider);
+    btnGsNoise.title = 'Seed GS from noise instead of demod plate — proves plate constraint drives convergence, not initial guess';
+
+    // ── Hologram file save / load ─────────────────────────────────────────────
+    const btnSaveHolo = mkBtn('💾 SAVE', '#234', '#8ef', () => {
+      if (!_snapSwPsi) { console.warn('[SAVE] no swPsi — snap first'); return; }
+      const meta = {
+        grid: GRID, dt: DT, tRecord: T_RECORD,
+        radii:   Array.from(_sweepSnapRadii   ?? []),
+        weights: Array.from(_sweepSnapWeights ?? []),
+        angleY:  _sweepAngleY, angleX: _sweepAngleX,
+      };
+      // Pack as Float32 to halve file size (matches GPU precision)
+      const f32 = new Float32Array(_snapSwPsi.length);
+      for (let i = 0; i < f32.length; i++) f32[i] = _snapSwPsi[i];
+      const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+      const metaLen = new Uint32Array([metaBytes.length]);
+      const blob = new Blob([metaLen.buffer, metaBytes.buffer, f32.buffer],
+        { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'hologram.ifsh'; a.click();
+      URL.revokeObjectURL(url);
+      console.log('[SAVE] hologram.ifsh written, grid='+GRID+' T='+T_RECORD);
+    });
+    btnSaveHolo.title = 'Save swPsi + kernel metadata to hologram.ifsh';
+
+    const btnLoadHolo = mkBtn('📂 LOAD', '#234', '#fa8', () => {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = '.ifsh,.bin';
+      input.onchange = async () => {
+        const file = input.files[0]; if (!file) return;
+        const buf = await file.arrayBuffer();
+        const metaLen = new Uint32Array(buf, 0, 1)[0];
+        const metaStr = new TextDecoder().decode(new Uint8Array(buf, 4, metaLen));
+        const meta = JSON.parse(metaStr);
+        const f32 = new Float32Array(buf.slice(4 + metaLen));
+        const swPsi = new Float64Array(f32.length);
+        for (let i = 0; i < f32.length; i++) swPsi[i] = f32[i];
+        _snapSwPsi = swPsi;
+        // Restore kernel from file metadata
+        if (meta.radii?.length && _gpuReady) {
+          const loadedOffs = meta.radii.map(r => {
+            const n = Math.max(8, Math.ceil(2*Math.PI*r));
+            const f = new Int16Array(n*2);
+            for (let k=0;k<n;k++){f[k*2]=Math.round(r*Math.cos(k*2*Math.PI/n));f[k*2+1]=Math.round(r*Math.sin(k*2*Math.PI/n));}
+            return f;
+          });
+          _gpu.setRings(meta.radii, meta.weights, loadedOffs);
+          _sweepSnapRadii   = new Float64Array(meta.radii);
+          _sweepSnapWeights = new Float64Array(meta.weights);
+        }
+        // Trigger reconstruction if already in direct-back mode
+        _localReconSoliton = false;
+        console.log('[LOAD] hologram.ifsh loaded, grid='+meta.grid+' T='+meta.tRecord);
+      };
+      input.click();
+    });
+    btnLoadHolo.title = 'Load hologram.ifsh and reconstruct with ⟵ EXACT';
+
     // ── Separator helper for control bar ──────────────────────────────────────
     const mkSep = () => {
       const s = document.createElement('div');
@@ -1523,8 +974,18 @@ function makeHologram4Renderer(core) {
 
     controlBar.appendChild(btnRecord);
     controlBar.appendChild(btnRecon);
+    controlBar.appendChild(btnDirectBack);
+    controlBar.appendChild(btnSaveHolo);
+    controlBar.appendChild(btnLoadHolo);
+    controlBar.appendChild(focusWrap);
+    controlBar.appendChild(btnLive);
+    controlBar.appendChild(mixWrap);
+    controlBar.appendChild(hModeRow);
+    controlBar.appendChild(hParamWrap);
     controlBar.appendChild(btnSnap);
     controlBar.appendChild(btnReset);
+    controlBar.appendChild(btnPointTest);
+    controlBar.appendChild(_recRow);
     controlBar.appendChild(mkSep());
     controlBar.appendChild(_shapeRow);
     controlBar.appendChild(mkSep());
@@ -1537,12 +998,16 @@ function makeHologram4Renderer(core) {
     controlBar.appendChild(mkSep());
     controlBar.appendChild(btnPlateKernel);
     controlBar.appendChild(btnDemodKick);
+    controlBar.appendChild(btnHamiltonian);
     controlBar.appendChild(gammaWrap);
     controlBar.appendChild(dtWrap);
     controlBar.appendChild(stepsWrap);
+    controlBar.appendChild(gsStepsWrap);
     controlBar.appendChild(btnPlateSeed);
     controlBar.appendChild(btnReconReset);
     controlBar.appendChild(btnBackPlate);
+    controlBar.appendChild(_gsPropRow);
+    controlBar.appendChild(btnGsNoise);
     controlBar.appendChild(btnPlateDemod);
 
     const modeLbl = document.createElement('div');
@@ -1760,6 +1225,9 @@ function makeHologram4Renderer(core) {
         const prev_demodKickMode   = _demodKickMode;
         const prev_plateSeedFree   = _plateSeedFree;
         const prev_backPlateMode   = _backPlateMode;
+        const prev_hamiltonianMode = _hamiltonianMode;
+        const prev_liveMode        = _liveMode;
+        const prev_directBackMode  = _directBackMode;
         _breathVis        = n.breathVis        ?? true;
         _plateDrivenMode  = n.plateDrivenMode  ?? true;
         _noHebbTest       = n.noHebbTest       ?? false;
@@ -1768,9 +1236,16 @@ function makeHologram4Renderer(core) {
         _demodKickMode    = n.demodKickMode    ?? false;
         _plateSeedFree    = n.plateSeedFree    ?? false;
         _backPlateMode    = n.backPlateMode    ?? false;
+        _hamiltonianMode  = n.hamiltonianMode  ?? false;
+        _liveMode         = n.liveMode         ?? false;
+        _recordMode       = n.recordMode       ?? 'vol';
         _plateKernelGamma = n.plateKernelGamma ?? SRC_ALPHA;
         _plateKernelDT    = n.plateKernelDT    ?? DT;
         _plateKernelSteps = n.plateKernelSteps ?? 16;
+        _gsSteps          = Math.max(1, n.gsSteps ?? 10);
+        _gsPropagator     = n.gsPropagator  ?? 'ifs';
+        _gsNoiseSeed      = n.gsNoiseSeed    ?? false;
+        _directBackMode   = n.directBackMode ?? false;
         const reconResetSeq     = n.reconResetSeq ?? 0;
         const reconResetChanged = reconResetSeq !== _localReconResetSeen;
         const modeChanged = _plateDrivenMode !== prev_plateDrivenMode ||
@@ -1779,11 +1254,24 @@ function makeHologram4Renderer(core) {
                             _plateKernelMode !== prev_plateKernelMode ||
                             _demodKickMode   !== prev_demodKickMode   ||
                             _plateSeedFree   !== prev_plateSeedFree   ||
-                            _backPlateMode   !== prev_backPlateMode;
+                            _backPlateMode   !== prev_backPlateMode   ||
+                            _hamiltonianMode !== prev_hamiltonianMode ||
+                            _liveMode        !== prev_liveMode        ||
+                            _directBackMode  !== prev_directBackMode;
         if (reconResetChanged || modeChanged) {
           _localReconResetSeen = reconResetSeq;
           if (reconResetChanged) _smoothMaxField = 0;
           _localReconSoliton = false;
+          // When LIVE mode is turned on, start accumulating fresh from current soliton
+          if (_directBackMode !== prev_directBackMode) {
+            _directBackPsi = null; _directBackMax = 1e-9;
+          }
+          if (_liveMode && !prev_liveMode) {
+            _eyeReconNorm = 1e-9;
+            _eyeDirty = true; _eyeReady = false; // recompute evidence on entry
+            _eyePerceptState = null; // fresh percept on entry
+            _eyeT = 0; _eyeDir = +1;
+          }
         }
         // ── Sync button UI ───────────────────────────────────────────────────
         const _activeShape = n.shape ?? 'cube';
@@ -1809,9 +1297,36 @@ function makeHologram4Renderer(core) {
         btnPlateSeed.textContent      = _plateSeedFree ? '⬡ FREE IFS on'    : '⬡ FREE IFS';
         btnPlateSeed.style.background = _plateSeedFree ? '#363'              : '#555';
         btnPlateSeed.style.color      = _plateSeedFree ? '#afa'              : '#aaa';
-        btnBackPlate.textContent      = _backPlateMode  ? '↩ BACK+PLATE on'  : '↩ BACK+PLATE';
-        btnBackPlate.style.background = _backPlateMode  ? '#246'             : '#345';
-        btnBackPlate.style.color      = _backPlateMode  ? '#aef'             : '#8cf';
+        _gsPropModes.forEach(({ mode, bg, color }, i) => {
+          const active = _gsPropagator === mode;
+          _gsPropBtns[i].style.background = active ? '#468' : bg;
+          _gsPropBtns[i].style.color      = active ? '#fff' : color;
+          _gsPropBtns[i].style.outline    = active ? '1px solid #aaa' : 'none';
+        });
+        btnBackPlate.textContent      = _backPlateMode ? '↩ GS on' : '↩ GS';
+        btnDirectBack.textContent      = _directBackMode ? '⟵ EXACT on' : '⟵ EXACT';
+        btnDirectBack.style.background = _directBackMode ? '#048'       : '#246';
+        btnDirectBack.style.outline    = _directBackMode ? '1px solid #8ef' : 'none';
+        btnGsNoise.textContent        = _gsNoiseSeed   ? 'GS:NOISE on' : 'GS:NOISE';
+        btnGsNoise.style.background   = _gsNoiseSeed   ? '#641' : '#333';
+        btnGsNoise.style.color        = _gsNoiseSeed   ? '#fff' : '#fa8';
+        btnGsNoise.style.outline      = _gsNoiseSeed   ? '1px solid #fa8' : 'none';
+        btnBackPlate.style.background = _backPlateMode    ? '#246'              : '#345';
+        btnBackPlate.style.color      = _backPlateMode    ? '#aef'              : '#8cf';
+        btnHamiltonian.textContent      = _hamiltonianMode ? '⬡ HAMILTONIAN on' : '⬡ HAMILTONIAN';
+        btnHamiltonian.style.background = _hamiltonianMode ? '#255'             : '#255';
+        btnHamiltonian.style.color      = _hamiltonianMode ? '#fff'             : '#5cf';
+        btnLive.textContent      = _liveMode ? '⟳ LIVE on' : '⟳ LIVE';
+        btnLive.style.background = _liveMode ? '#4a2'      : '#363';
+        btnLive.style.color      = _liveMode ? '#fff'      : '#af8';
+        btnLive.style.outline    = _liveMode ? '1px solid #af8' : 'none';
+        eyeRow.style.display     = _liveMode ? 'flex'      : 'none';
+        _recModes.forEach(({ mode, bg, color }, i) => {
+          const active = _recordMode === mode;
+          _recBtns[i].style.background = active ? '#468' : bg;
+          _recBtns[i].style.color      = active ? '#fff' : color;
+          _recBtns[i].style.outline    = active ? '1px solid #8cf' : 'none';
+        });
         gammaLbl.textContent = `γ ${_plateKernelGamma.toFixed(2)}`;
         if (!gammaSlider.matches(':active')) gammaSlider.value = String(_plateKernelGamma);
         const dtLbl = dtWrap.querySelector('span'), dtSl = dtWrap.querySelector('input');
@@ -1849,6 +1364,12 @@ function makeHologram4Renderer(core) {
       const needObj  = _localKernelVersion !== kernelVer ||
                        _localAngleYSeen !== n.angleY || _localAngleXSeen !== n.angleX ||
                        _localExtraSeen !== extraKey || _localShapeSeen !== (n.shape ?? 'cube') || !_localObjField;
+      // Eye re-snap is gated on the OBJECT (angle/shape/points) ONLY — never on the IFS
+      // clock (kernelVer), which breathes continuously. Like a plate snap: record once,
+      // freeze. Tying it to kernelVer would re-run the ~840-pass eye pipeline every tick.
+      const eyeObjKey = `${n.angleY}|${n.angleX}|${n.shape ?? 'cube'}|${extraKey}`;
+      if (eyeObjKey !== _eyeObjKeySeen) { _eyeDirty = true; _eyeObjKeySeen = eyeObjKey; }
+
       if (needObj) {
         _localObjField = _buildSrcFieldIFS(n.angleY ?? INIT_ANGLE_Y, n.angleX ?? INIT_ANGLE_X, n.extraPoints ?? [], n.shape ?? 'cube');
         _localAngleYSeen = n.angleY; _localAngleXSeen = n.angleX; _localExtraSeen = extraKey; _localShapeSeen = n.shape ?? 'cube';
@@ -1909,7 +1430,7 @@ function makeHologram4Renderer(core) {
         _localRefReady = false;
         _cplxPlateUploaded = false;
         _cplxPlateField    = null;
-        _sweepSnapPsi      = null;
+        _snapSwPsi         = null;
         if (_gpuReady) { _gpu.resetPlate(); _gpu.resetCplxPlate(); }
       }
 
@@ -1932,8 +1453,9 @@ function makeHologram4Renderer(core) {
           _reconDKX = 0; _reconDKY = 0;
           _reconDKXSeen = 0; _reconDKXCurrent = 0; _reconDKYSeen = 0; _reconLensFSeen = -1;
           _plateDemodField = null; _plateDemodPending = false;
-          _reconSnapBaseAngleY = n.angleY ?? INIT_ANGLE_Y;
-          _reconSnapBaseAngleX = n.angleX ?? INIT_ANGLE_X;
+          _gsPhase = 'fwd'; _gsStepsDone = 0;
+          _reconSnapBaseAngleY = _localAngleY;
+          _reconSnapBaseAngleX = _localAngleX;
           _lastReconStepMs    = nowMs;
           // Use kernel from last sweep start — that's what the plate was built with.
           // Live cachedRadii may have drifted since then.
@@ -1990,7 +1512,7 @@ function makeHologram4Renderer(core) {
               seed[j*2+1] = (Math.random() - 0.5) * REF_AMP * 0.1;
             }
           } else {
-            seed = _snapPsi ?? new Float64Array(2 * N_CELLS);
+            seed = new Float64Array(2 * N_CELLS);
           }
           _localPsi = seed;
           if (_gpuReady) _gpu.setSweepPsi(seed);
@@ -2010,6 +1532,7 @@ function makeHologram4Renderer(core) {
           _localReconSoliton = false;
           _reconSolitonField = null;
           _cplxPlateObjReady = false;
+          _recordSeeded = false; // re-seed the persistent RECORD soliton from objField
           // Don't reset _smoothMaxRecord — carry forward so RECORD display stays stable on re-entry
           _lastKeepaliveMs = 0;
         }
@@ -2021,7 +1544,25 @@ function makeHologram4Renderer(core) {
       if (_localObjField && n.cachedRadii.length) {
         if (dir > 0) {
           if (_gpuReady) {
-            if (_breathVis) for (let _si = 0; _si < 16; _si++) _gpu.stepRecord(DT, SRC_ALPHA);
+            // During plate snap, retina runs free IFS from vol seed — no display injection
+            const snapping = _sweepStep < T_RECORD && _sweepPsi !== null;
+            // PERSISTENT evolving soliton: the field carries its state across frames and
+            // evolves under the IFS dynamics — true to the physics (a wavefield has memory,
+            // it breathes/drifts). objField is injected as a WEAK attractor each step (not a
+            // hard reset), so the soliton stays bounded but keeps evolving. This differs from
+            // the eye panel, which is a STATELESS eigenstate portrait (re-relaxed each snap).
+            if (!snapping) {
+              // Seed once: from the object field on first entry / after a mode reset. After
+              // that, never overwrite — step the live sweep state forward.
+              if (!_recordSeeded) {
+                _gpu.setSweepPsi(_localObjField);
+                _recordSeeded = true;
+              }
+              // A few steps/frame → continuous, persistent evolution (not a from-scratch
+              // settle). The soliton remembers the previous frame.
+              const _recSteps = _breathVis ? 16 : 0; // BREATH off → freeze the current state
+              for (let _si = 0; _si < _recSteps; _si++) _gpu.stepRecordSweep(DT, SRC_ALPHA);
+            }
             // Inject extra beams (Shift+right-click sources) into main GPU psi texture
             const beams = n.extraBeams;
             if (beams && beams.length > 0) {
@@ -2086,6 +1627,12 @@ function makeHologram4Renderer(core) {
             {
               const lensF = n.lensF ?? 50;
               const plate = _recordedPlates.length > 0 ? _recordedPlates[0].plate : _localPlate;
+              // Live angle drag in RECON → update carrier tilt for parallax readout.
+              // Use _localAngleY (updated immediately on drag) not n.reconAngleY (reflector round-trip).
+              if (_plateDrivenMode && !_autoRotate) {
+                const snapAY = _reconSnapBaseAngleY ?? INIT_ANGLE_Y;
+                _travDKX = (_localAngleY - snapAY) * PARALLAX_SCALE;
+              }
               if (_autoRotate && _plateDrivenMode) {
                 _travPhase += TRAV_SPEED;
                 const s = Math.sin(_travPhase);
@@ -2113,9 +1660,19 @@ function makeHologram4Renderer(core) {
                     _plateDemodPending = false;
                     _localReconSoliton = false; // re-trigger soliton entry with projected field
                   });
+                } else if (_plateDrivenMode) {
+                  // Live parallax: update objField attractor without resetting the soliton.
+                  // Soliton keeps running; new demod shifts the fixed point it converges toward.
+                  _plateDemodField = raw;
+                  let dmMx = 0;
+                  for (let j = 0; j < N_CELLS; j++) { const v = raw[j*2]*raw[j*2]+raw[j*2+1]*raw[j*2+1]; if (v > dmMx) dmMx = v; }
+                  const dmScale = dmMx > 1e-12 ? REF_AMP / Math.sqrt(dmMx) : 1;
+                  const plateObj = new Float64Array(raw.length);
+                  for (let j = 0; j < raw.length; j++) plateObj[j] = raw[j] * dmScale;
+                  _gpu.setObjField(plateObj);
                 } else {
                   _plateDemodField = raw;
-                  if (!_plateDrivenMode) _gpu.setSweepPsi(raw);
+                  _gpu.setSweepPsi(raw);
                   _localReconSoliton = false;
                   _cplxPlateObjReady = false;
                 }
@@ -2125,8 +1682,32 @@ function makeHologram4Renderer(core) {
             if (!_localReconSoliton && !_cplxPlateObjReady && _gpuReady) {
               _smoothMaxField = 1e-9;
               _localReconSoliton = true;
-              if (_cplxPlateUploaded && !_plateDrivenMode) {
-                if (_snapPsi) _gpu.setObjField(_snapPsi);
+              if (_directBackMode && _snapSwPsi) {
+                // Exact backward reconstruction: upload swPsi, run T backward steps, freeze result.
+                _gpu.setSweepPsi(_snapSwPsi);
+                _gpu.stepSweepN(T_RECORD, -DT);
+                // Read result back immediately so continuous block can freeze it
+                const reconResult = _gpu.readPsi();
+                _gpu.setSweepPsi(reconResult);
+                _localPsi = reconResult;
+                _directBackPsi = reconResult; // protected copy
+                let mx = 0, peakJ = 0, totalE = 0;
+                for (let j=0;j<N_CELLS;j++){
+                  const v=reconResult[j*2]*reconResult[j*2]+reconResult[j*2+1]*reconResult[j*2+1];
+                  totalE += v;
+                  if(v>mx){mx=v;peakJ=j;}
+                }
+                _smoothMaxField = mx;
+                _directBackMax = mx;
+                const fracAtPeak = totalE > 0 ? mx/totalE : 0;
+                console.log('[DIRECT-BACK] done, peak amp=', Math.sqrt(mx).toFixed(4),
+                  'at (', peakJ%GRID, ',', Math.floor(peakJ/GRID), ')',
+                  'energy frac=', (fracAtPeak*100).toFixed(1)+'%');
+              } else if (_directBackMode && !_snapSwPsi) {
+                console.log('[DIRECT-BACK] no snapSwPsi — snap a plate first');
+                _gpu.setSweepPsi(new Float64Array(2 * N_CELLS));
+              } else if (_cplxPlateUploaded && !_plateDrivenMode) {
+                // GEO+SEED with cplx plate: no snapPsi in retina arch — fall through to default
               } else if (_plateSeedFree) {
                 const seed = _localPlate
                   ? _buildReconField(_localPlate, _travDKX, _travRot, _localRefReady ? _localRefField : null, _travDKY, _travShiftX, _travShiftY, _travScale)
@@ -2147,28 +1728,24 @@ function makeHologram4Renderer(core) {
                 _gpu.setSweepPsi(demod);
                 _gpu.setObjField(demod);
               } else if (_backPlateMode) {
-                // Option 4: backward sweep + plate phase kick → read back as objField attractor
-                // Seed with noise, run T_RECORD steps backward each with plate phase constraint
-                const noiseSeed = new Float64Array(2 * N_CELLS);
-                for (let j = 0; j < N_CELLS; j++) {
-                  noiseSeed[j*2]   = (Math.random() - 0.5) * REF_AMP * 0.1;
-                  noiseSeed[j*2+1] = (Math.random() - 0.5) * REF_AMP * 0.1;
+                // GS entry: noise seed tests whether plate constraint drives convergence;
+                // demod seed tests refinement quality. Switch with GS:NOISE button.
+                let initGuess;
+                if (_gsNoiseSeed) {
+                  initGuess = new Float64Array(2 * N_CELLS);
+                  for (let j = 0; j < N_CELLS; j++) {
+                    initGuess[j*2]   = (Math.random() - 0.5) * REF_AMP * 0.1;
+                    initGuess[j*2+1] = (Math.random() - 0.5) * REF_AMP * 0.1;
+                  }
+                  console.log('[GS] seeded from NOISE — plate must drive convergence');
+                } else {
+                  initGuess = _localPlate
+                    ? _buildReconField(_localPlate, _travDKX, _travRot, _localRefReady ? _localRefField : null, _travDKY, _travShiftX, _travShiftY, _travScale)
+                    : new Float64Array(2 * N_CELLS);
+                  console.log('[GS] seeded from demod plate, propagator=' + _gsPropagator);
                 }
-                _gpu.setSweepPsi(noiseSeed);
-                for (let _si = 0; _si < T_RECORD; _si++) {
-                  _gpu.stepSweep(-DT);
-                  _gpu.platePhaseKickSweep(_plateKernelGamma, _smoothMaxPlate);
-                }
-                _gpu.readSweepPsiAsync().then(focused => {
-                  let mx = 0;
-                  for (let j = 0; j < N_CELLS; j++) { const v = focused[j*2]*focused[j*2]+focused[j*2+1]*focused[j*2+1]; if(v>mx) mx=v; }
-                  if (mx < 1e-12) { console.log('[BACK+PLATE] focused field empty'); return; }
-                  const scale = REF_AMP / Math.sqrt(mx);
-                  const normed = new Float64Array(focused.length);
-                  for (let j = 0; j < focused.length; j++) normed[j] = focused[j] * scale;
-                  _gpu.setObjField(normed);
-                  console.log('[BACK+PLATE] objField set from backward sweep, scale=', scale.toFixed(3));
-                });
+                _gpu.setSweepPsi(initGuess);
+                _gsPhase = 'fwd'; _gsStepsDone = 0;
               } else if (_plateDrivenMode) {
                 if (_nullPlateTest) {
                   _gpu.setSweepPsi(new Float64Array(2 * N_CELLS));
@@ -2196,18 +1773,63 @@ function makeHologram4Renderer(core) {
                 // Plate demod: inject demodulated plate as attractor — no snapPsi used
                 _gpu.setObjField(_plateDemodField);
               } else {
-                // Full mode: snapPsi as objField attractor (or zero if null — clears stale GPU texture)
-                _gpu.setObjField(_snapPsi ?? new Float64Array(2 * N_CELLS));
+                _gpu.setObjField(new Float64Array(2 * N_CELLS));
               }
             } else if (_localReconSoliton && _gpuReady) {
-              if (_plateSeedFree) {
+              if (_directBackMode) {
+                if (_snapSwPsi) {
+                  _gpu.setSweepPsi(_snapSwPsi);
+                  if (_recordMode === 'ifs_depth' && _focusDepth > 0) {
+                    _gpu.stepSweepN(T_RECORD - _focusDepth, -DT);
+                  } else {
+                    _gpu.stepSweepN(T_RECORD, -DT);
+                    if (_focusDepth > 0) {
+                      for (let _s = 0; _s < _focusDepth; _s++)
+                        _gpu.stepHuygensSweep(-K_WAVE);
+                    }
+                  }
+                  // Pin normalization to entry snapshot — immune to async readback drift
+                  if (_directBackMax > 1e-12) _smoothMaxField = _directBackMax;
+                }
+              } else if (_plateSeedFree) {
                 for (let _si = 0; _si < 16; _si++) _gpu.stepSweep(DT);
               } else if (_backPlateMode) {
-                // Continuous backward sweep + plate phase kick — Gerchberg-Saxton in IFS basis
-                for (let _si = 0; _si < _plateKernelSteps; _si++) {
-                  _gpu.stepSweep(-DT);
-                  _gpu.platePhaseKickSweep(_plateKernelGamma, _smoothMaxPlate);
+                if (_smoothMaxPlate < 1e-6) {
+                  // No plate recorded yet — run plain IFS so field stays visible
+                  for (let _si = 0; _si < 16; _si++) _gpu.stepSweep(DT);
+                } else {
+                // Gerchberg-Saxton — async state machine: _gsSteps draw calls per frame,
+                // advancing fwd→constraint→bwd across frames.
+                const budget = _gsSteps;
+                let remaining = budget;
+                while (remaining > 0) {
+                  if (_gsPhase === 'fwd') {
+                    const toRun = Math.min(remaining, T_RECORD - _gsStepsDone);
+                    if (_gsPropagator === 'huygens') {
+                      for (let _s = 0; _s < toRun; _s++) _gpu.stepHuygensSweep(K_WAVE);
+                    } else {
+                      _gpu.stepSweepN(toRun, DT);
+                    }
+                    _gsStepsDone += toRun;
+                    remaining    -= toRun;
+                    if (_gsStepsDone >= T_RECORD) { _gsPhase = 'constraint'; _gsStepsDone = 0; }
+                  } else if (_gsPhase === 'constraint') {
+                    _gpu.plateAmpConstraintSweep(_smoothMaxPlate);
+                    _gsPhase = 'bwd'; _gsStepsDone = 0;
+                    remaining--;
+                  } else { // 'bwd'
+                    const toRun = Math.min(remaining, T_RECORD - _gsStepsDone);
+                    if (_gsPropagator === 'huygens') {
+                      for (let _s = 0; _s < toRun; _s++) _gpu.stepHuygensSweep(-K_WAVE);
+                    } else {
+                      _gpu.stepSweepN(toRun, -DT);
+                    }
+                    _gsStepsDone += toRun;
+                    remaining    -= toRun;
+                    if (_gsStepsDone >= T_RECORD) { _gsPhase = 'fwd'; _gsStepsDone = 0; }
+                  }
                 }
+                } // end else (plate ready)
               } else if (_plateKernelMode) {
                 for (let _si = 0; _si < _plateKernelSteps; _si++) {
                   _gpu.stepSweep(_plateKernelDT);
@@ -2220,8 +1842,13 @@ function makeHologram4Renderer(core) {
                   _gpu.demodPhaseKickSweep(_plateKernelGamma);
                 }
               } else {
-                if (_nullPlateTest || (!_plateDrivenMode && !_snapPsi)) _gpu.setObjField(new Float64Array(2 * N_CELLS));
-                for (let _si = 0; _si < 16; _si++) _gpu.stepRecordSweep(DT, SRC_ALPHA);
+                if (_nullPlateTest || !_plateDrivenMode) _gpu.setObjField(new Float64Array(2 * N_CELLS));
+                if (_hamiltonianMode && !_nullPlateTest && _smoothMaxPlate > 1e-9) {
+                  for (let _si = 0; _si < 16; _si++)
+                    _gpu.stepRecordSweepHamiltonian(DT, SRC_ALPHA, _plateKernelGamma, _smoothMaxPlate);
+                } else {
+                  for (let _si = 0; _si < 16; _si++) _gpu.stepRecordSweep(DT, SRC_ALPHA);
+                }
               }
               // Periodic readback — keep _localPsi current for _smoothMaxField EMA
               if (!_psiReadPending) {
@@ -2286,7 +1913,6 @@ function makeHologram4Renderer(core) {
               // Normalize so max weight = FRAC_ALPHA
               const maxW = Math.max(...W.map(Math.abs), 1e-9);
               _hebbianWeights = W.map(w => (w / maxW) * FRAC_ALPHA);
-              _snapPsi = psi64;
               console.log('[HEBBIAN] weights=', _hebbianWeights.map(v => v.toFixed(4)));
             });
           }
@@ -2300,24 +1926,60 @@ function makeHologram4Renderer(core) {
         // Start next exposure when sweep is idle
         if (_sweepStep >= T_RECORD && _sweepPsi === null && _snapAngleQueue.length > 0) {
           const { angleY: qY, angleX: qX } = _snapAngleQueue.shift();
-          _sweepPsi = new Float64Array(_buildSrcFieldIFS(qY, qX, n.extraPoints ?? [], n.shape ?? 'cube'));
-          _sweepStep = 0;
+          if (_recordMode === 'retina') {
+            // Retina mode: accumulate |ψ_retina + ψ_ref|² directly — no sweep needed.
+            // Use the live retina psi already on GPU; just trigger plate accumulation.
+            _sweepStep = T_RECORD - 1; // will complete next frame
+            _sweepPsi  = new Float64Array(2); // sentinel — non-null to signal active
+            _sweepAngleY = qY; _sweepAngleX = qX; _sweepExtraKey = extraKey;
+            _sweepSnapRadii   = n.cachedRadii.slice();
+            _sweepSnapWeights = n.cachedWeights.slice();
+            _sweepSnapOffsets = n.cachedOffsets.slice();
+            if (_gpuReady) {
+              _gpu.resetPlate();
+              _gpu.accumulatePlateSweep(PLATE_DECAY); // record current retina state
+            }
+          } else {
+          if (_recordMode === 'ifs_depth') {
+            // Mid-sweep injection: all vertices propagate together in one field.
+            // Each vertex fires at its depth-appropriate step — they interfere = hologram.
+            _depthSchedule = _buildDepthSourceSchedule(
+              qY, qX, n.extraPoints ?? [], n.shape ?? 'cube', T_RECORD);
+            _sweepPsi = new Float64Array(2 * N_CELLS); // zero — sources added mid-sweep
+          } else {
+            const seed = _recordMode === 'ifs'
+              ? _buildSrcFieldIFS(qY, qX, n.extraPoints ?? [], n.shape ?? 'cube')
+              : _buildVolSrcField(qY, qX, n.extraPoints ?? [], n.shape ?? 'cube');
+            _sweepPsi = new Float64Array(seed);
+            _depthSchedule = null;
+          }
           _sweepAngleY = qY; _sweepAngleX = qX; _sweepExtraKey = extraKey;
           _sweepSnapRadii   = n.cachedRadii.slice();
           _sweepSnapWeights = n.cachedWeights.slice();
           _sweepSnapOffsets = n.cachedOffsets.slice();
-          if (_gpuReady) {
-            _gpu.resetPlate();   // fresh plate for this exposure
-            _gpu.setSweepPsi(_sweepPsi);
-          }
+          _sweepStep = 0;
+          if (_gpuReady) { _gpu.resetPlate(); _gpu.setSweepPsi(_sweepPsi); }
+          } // end else (non-retina sweep modes)
         }
         if (_sweepStep < T_RECORD && _sweepPsi) {
           if (_gpuReady) {
             const toRun = Math.min(GPU_STEPS_PER_FRAME, T_RECORD - _sweepStep);
-            _gpu.stepSweepN(toRun, DT);
+            if (_depthSchedule) {
+              for (let _s = 0; _s < toRun; _s++) {
+                _gpu.stepSweep(DT);
+                const inj = _depthSchedule[_sweepStep + _s];
+                if (inj) _gpu.addSourcesPsi(new Float32Array(inj.map(v => Math.fround(v))));
+              }
+            } else {
+              _gpu.stepSweepN(toRun, DT);
+            }
             _sweepStep += toRun;
             if (_sweepStep >= T_RECORD) {
               _gpu.accumulatePlateSweep(PLATE_DECAY);
+              // Synchronous readback of sweep psi before stepRecord resumes
+              _snapSwPsi = _gpu.readPsi();
+              console.log('[SNAP] swPsi captured synchronously, max=',
+                Math.sqrt(_snapSwPsi.reduce((m,v,i)=>i%2===0?Math.max(m,v*v+_snapSwPsi[i+1]*_snapSwPsi[i+1]):m,0)).toFixed(4));
               // JS-side complex plate: read sweep psi (Float32→Float64), multiply by conj(ref) in Float64
               const _capturedRef = _localRefReady ? _localRefField : null;
               const _seqCplx = _plateSeq;
@@ -2325,6 +1987,7 @@ function makeHologram4Renderer(core) {
                 if (_plateSeq !== _seqCplx) { console.log('[CPLX] aborted: plateSeq changed'); return; }
                 if (!_capturedRef) { console.log('[CPLX] aborted: no ref field at snap time'); return; }
                 if (swPsi.length !== _capturedRef.length) { console.log('[CPLX] aborted: length mismatch', swPsi.length, _capturedRef.length); return; }
+                // _snapSwPsi already captured synchronously above
                 const cplx = new Float32Array(N_CELLS * 2);
                 let mx = 0;
                 for (let j = 0; j < N_CELLS; j++) {
@@ -2336,12 +1999,8 @@ function makeHologram4Renderer(core) {
                 }
                 _gpu.uploadCplxPlate(cplx);
                 _cplxPlateUploaded = true;
-                // Save raw sweep psi — pure IFS eigenstate of the object, use as soliton attractor
-                const swMx = Math.sqrt(mx);
-                const swScale = swMx > 1e-12 ? REF_AMP / swMx : 1;
-                _sweepSnapPsi = new Float64Array(N_CELLS * 2);
-                for (let j = 0; j < N_CELLS * 2; j++) _sweepSnapPsi[j] = swPsi[j] * swScale;
                 // Keep JS copy of ψ_sweep·conj(ψ_ref) for debug canvas
+                const swMx = Math.sqrt(mx);
                 let cplxMx = 0;
                 for (let j = 0; j < N_CELLS; j++) { const v = cplx[j*2]*cplx[j*2]+cplx[j*2+1]*cplx[j*2+1]; if(v>cplxMx) cplxMx=v; }
                 const cplxScale = cplxMx > 1e-12 ? REF_AMP / Math.sqrt(cplxMx) : 1;
@@ -2381,10 +2040,16 @@ function makeHologram4Renderer(core) {
         }
       }
 
-      // Update local angle from world state (if not dragging) — always RECORD angle
+      // Update local angle from world state (if not dragging).
+      // In RECON use reconAngleY so the committed drag angle persists; in RECORD use angleY.
       if (!_dragging) {
-        _localAngleY = n.angleY ?? INIT_ANGLE_Y;
-        _localAngleX = n.angleX ?? INIT_ANGLE_X;
+        if (dir < 0) {
+          _localAngleY = n.reconAngleY ?? INIT_ANGLE_Y;
+          _localAngleX = n.reconAngleX ?? INIT_ANGLE_X;
+        } else {
+          _localAngleY = n.angleY ?? INIT_ANGLE_Y;
+          _localAngleX = n.angleX ?? INIT_ANGLE_X;
+        }
       }
 
       // ── Normalization ─────────────────────────────────────────────────────
@@ -2394,43 +2059,147 @@ function makeHologram4Renderer(core) {
           const v = _localPsi[j*2]*_localPsi[j*2] + _localPsi[j*2+1]*_localPsi[j*2+1];
           if (v > maxField) maxField = v;
         }
-        if (dir > 0) {
-          const nr = _smoothMaxRecord < 1e-9 ? maxField : _smoothMaxRecord * 0.98 + maxField * 0.02;
-          _smoothMaxRecord = isFinite(nr) && nr > 1e-12 ? nr : 1e-9;
-          if (_breathVis) _smoothMaxField = _smoothMaxRecord;
-        } else {
-          // RECON — update shared scale from sweep, record scale holds its last RECORD value
-          const newSmooth = _smoothMaxField < 1e-9 ? maxField : _smoothMaxField * 0.98 + maxField * 0.02;
-          _smoothMaxField = isFinite(newSmooth) && newSmooth > 1e-12 ? newSmooth : 1e-9;
-        }
+        // Asymmetric EMA: jump instantly to spikes, decay slowly — eliminates flood flicker.
+        const newSmooth = maxField > _smoothMaxField
+          ? maxField
+          : _smoothMaxField * 0.97 + maxField * 0.03;
+        _smoothMaxField = isFinite(newSmooth) && newSmooth > 1e-12 ? newSmooth : 1e-9;
       }
       let maxPlate = 1e-9;
       if (_localPlate) {
         for (let j = 0; j < N_CELLS; j++) if (_localPlate[j] > maxPlate) maxPlate = _localPlate[j];
         _smoothMaxPlate = _smoothMaxPlate < 1e-9 ? maxPlate : _smoothMaxPlate * 0.96 + maxPlate * 0.04;
       }
+      // LIVE mode: periodically read back GPU plate so _smoothMaxPlate stays current
+      if (_liveMode && _gpuReady && !_psiReadPending && (_localStepCount % 60 === 0)) {
+        _gpu.readPlateAsync().then(pl => {
+          _localPlate = pl;
+        });
+      }
 
-      // ── Rendering ─────────────────────────────────────────────────────────
+      // ── Rendering — single retina texture, always render from sweep ───────────
       if (_gpuReady) {
-        // GPU-direct: render straight from GPU textures — no readback, no flicker
-        if (dir > 0) {
-          const normR = Math.max(_smoothMaxRecord > 1e-9 ? _smoothMaxRecord : _smoothMaxField, 1e-9);
-          _gpu.renderField(normR);
-          fieldCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
-          _gpu.renderPhase(normR);
-          phaseCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
-          _gpu.renderPlate(_smoothMaxPlate, normR, 1);
-          plateCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
-        } else {
-          // RECON: render from sweep texture
-          const normS = Math.max(_smoothMaxField, 1e-9);
-          _gpu.renderSweepField(normS);
-          fieldCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
-          _gpu.renderSweepPhase(normS);
-          phaseCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
-          _gpu.renderSweepPlate(_smoothMaxPlate, normS);
-          plateCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+        // Sync peak readback every frame — catches flood spikes before they hit the display.
+        // ~0.1ms on 128² GPU; eliminates the 1-frame lag that causes white flicker.
+        const peakSq = _gpu.readSwPeakSq();
+        if (peakSq > _smoothMaxField) _smoothMaxField = peakSq;
+        const norm = Math.max(_smoothMaxField, 1e-9);
+        _gpu.renderSweepField(norm);
+        fieldCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+
+        // Main row always shows normal rendering
+        _gpu.renderSweepPhase(norm);
+        phaseCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+        _gpu.renderSweepPlate(_smoothMaxPlate, norm);
+        plateCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+
+        // Eye row — EYE-AS-OBSERVER model. The object lives in the "world"; the eye
+        // receives ONLY the wavefront that has propagated across the aperture, and must
+        // infer the object from that field alone — it never reads ψ_obj.
+        //
+        //   WORLD:  ψ_obj ──F^D──► ψ_arrived        (object emits; field crosses to eye)
+        //   EYE:    ψ_arrived ──F^-D──► ψ_perceived (eye back-propagates the ARRIVED field)
+        //
+        //   panel 1: |ψ_arrived|²   — what the eye RECEIVES (CACHED; changes on object change)
+        //   panel 3: |ψ_perceive|²  — PERSISTENT evidence soliton: seeded from the exact inverse,
+        //                             evolves freely (a living field, carries state across frames)
+        //   panel 2: |ψ_percept|²   — PERSISTENT percept: evolves under IFS dynamics while WEAKLY
+        //                             tracking the evidence (panel 3). Memory + hysteresis: the
+        //                             percept flows toward incoming evidence, never resets.
+        //
+        //   [H] hologram-domain transform sits between the legs (CACHED stage), via applyEyeHologram.
+        //
+        // Discipline: the eye reconstructs from ψ_arrived, NEVER from ψ_obj. ψ_obj is the world's
+        // hidden object — used only to emit the wavefront and (with MIX>0) score externally.
+        if (_liveMode && _localObjField) {
+          const D = T_RECORD;
+
+          // ── CACHED stage (object change only): emit wavefront + exact inverse = evidence ──
+          // CONVERGE-THEN-HOLD: all eye work happens ONLY on object change (_eyeDirty).
+          // The evidence is held static (it's a measurement); the percept is relaxed onto
+          // it until it SETTLES, then frozen. Between changes nothing steps → no drift, the
+          // panels hold a stable percept. Each rotate re-locks onto the new view.
+          if (_eyeDirty) {
+            // WORLD: object emits; wavefront propagates D steps to the eye aperture.
+            _gpu.setEyePsi(_localObjField);
+            _gpu.stepEyeN(D, DT);
+            _eyeArrivedNorm = _gpu.readEyePeakSq();
+            if (_eyeArrivedNorm < 1e-12) _eyeArrivedNorm = Math.max(_smoothMaxField, 1e-9);
+            // Panel 1 — received wavefront |ψ_arrived|² (held until next object change).
+            _gpu.renderEyeField(_eyeArrivedNorm);
+            eyeFieldCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+            eyeFieldCell.wrap.firstChild.textContent = 'EYE  |ψ_arrived|²  received wavefront';
+
+            // [H] transform, then back-propagate → EVIDENCE (the exact inverse, static).
+            _gpu.applyEyeHologram(_eyeHmode, _eyeHparam);
+            _gpu.stepEyeN(D, -DT);
+            _eyeEvidence = _gpu.readEyePsi();          // ψ_perceived — held static
+            let pvNorm = _gpu.readEyePeakSq();
+            if (pvNorm < 1e-12) pvNorm = Math.max(_smoothMaxField, 1e-9);
+            // Panel 3 — the evidence (exact inverse), held static (a measurement, no drift).
+            if (_liveRefMix > 0) {
+              _gpu.renderEyeDiff(_localObjField, _liveRefMix, pvNorm);
+              eyeDiffCell.wrap.firstChild.textContent = `EYE  ψ_perceive + ${_liveRefMix.toFixed(2)}·ψ_obj  (score)`;
+            } else {
+              _gpu.renderEyeField(pvNorm);
+              eyeDiffCell.wrap.firstChild.textContent = 'EYE  |ψ_perceive|²  evidence (held)';
+            }
+            eyeDiffCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+
+            // Panel 2 — PERCEPT: relax onto the evidence until it CONVERGES, then HOLD.
+            // Seed from the previous percept (memory: it transitions from the old view),
+            // attractor = new evidence, strong-enough α + enough steps to actually settle.
+            if (_eyePerceptState) _gpu.setEyePsi(_eyePerceptState);
+            else                  _gpu.setEyePsi(_eyeEvidence);
+            _gpu.setEyeObjField(_eyeEvidence);
+            for (let _ri = 0; _ri < EYE_RELAX_STEPS; _ri++) _gpu.stepRecordEye(DT, SRC_ALPHA);
+            _eyePerceptState = _gpu.readEyePsi();       // store converged percept (held)
+            let pcNorm = _gpu.readEyePeakSq();
+            if (pcNorm < 1e-12) pcNorm = Math.max(_smoothMaxField, 1e-9);
+            _gpu.renderEyeField(pcNorm);
+            eyePhaseCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+            eyePhaseCell.wrap.firstChild.textContent = 'EYE  |ψ_percept|²  perceived (settled)';
+
+            _eyeReconNorm = _eyeArrivedNorm;
+            _eyeReady = true;
+            _eyeDirty = false;
+          }
+          // Between changes: do nothing. Panels hold their settled images on their 2D
+          // canvases — stable, no per-frame stepping, no drift.
         }
+
+        /* ── Animated propagating-wavefront version (disabled) ──────────────────
+        if (_liveMode && _localObjField) {
+          _eyeT += _eyeDir * EYE_SPEED;
+          if (_eyeT >= T_RECORD) { _eyeT = T_RECORD; _eyeDir = -1; }
+          else if (_eyeT <= 0)   { _eyeT = 0;        _eyeDir = +1; }
+          _gpu.setEyePsi(_localObjField);
+          if (_eyeT > 0) _gpu.stepEyeN(_eyeT, DT);
+          if (_eyeReconNorm < 1e-10 || (_localStepCount % 6) === 0) {
+            const peakSq = _gpu.readEyePeakSq();
+            _eyeReconNorm = _eyeReconNorm < 1e-10 ? Math.max(peakSq, 1e-9)
+                                                  : _eyeReconNorm * 0.8 + Math.max(peakSq, 1e-12) * 0.2;
+          }
+          const depthPct = (100 * _eyeT / T_RECORD) | 0;
+          _gpu.renderEyeField(_eyeReconNorm);
+          eyeFieldCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+          eyeFieldCell.wrap.firstChild.textContent =
+            _eyeT === 0 ? 'EYE  |ψ|²  object plane (t=0)'
+                        : `EYE  |ψ(t)|²  wavefront  t=${_eyeT}/${T_RECORD} (${depthPct}%)`;
+          _gpu.renderEyePhase(_eyeReconNorm);
+          eyePhaseCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+          eyePhaseCell.wrap.firstChild.textContent = 'EYE  arg(ψ(t))  phase';
+          if (_liveRefMix > 0) {
+            _gpu.renderEyeDiff(_localObjField, _liveRefMix, _eyeReconNorm);
+            eyeDiffCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+            eyeDiffCell.wrap.firstChild.textContent = `EYE DIFF  |ψ(t) + ${_liveRefMix.toFixed(2)}·ψ_obj|`;
+          } else {
+            _gpu.renderEyeField(_eyeReconNorm);
+            eyeDiffCell.ctx.drawImage(_gpuCanvas, 0, 0, RW, RH);
+            eyeDiffCell.wrap.firstChild.textContent = 'EYE  |ψ(t)|  amplitude';
+          }
+        }
+        ────────────────────────────────────────────────────────────────────── */
       } else if (_localPsi) {
         // CPU fallback (no GPU): bilinear upsample from _localPsi
         const psi   = _localPsi;
