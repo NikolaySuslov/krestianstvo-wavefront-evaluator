@@ -26,7 +26,7 @@ Source code: https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator
 - [Fractal Heartbeat](#fractal-heartbeat-and-local-reflector)
 - [Fractal IFS-based clock](#fractal-ifs-based-clock)
 - [From Virtual Machine to Wavefront Evaluator](#from-krestianstvo-vm-to-krestianstvo-wavefront-evaluator)
-- [Holographic Computing & Multimedia](#holographic-computing-and-uni-holographic-multimedia)
+- [Holographic Computing & Multimedia](#holographic-computing-and-uni-multimedia)
 - [Core Vocabulary](#core-vocabulary)
 - [Architecture Layers](#architecture-layers)
 - [Meta Program](#meta-program)
