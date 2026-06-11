@@ -1,5 +1,7 @@
 ## Krestianstvo Wavefront Evaluator
 
+### Holographic Computing & uni Multimedia
+
 *Architecture overview and core concepts*
 
 ---
@@ -7,6 +9,8 @@
 The Krestianstvo Wavefront Evaluator is a deterministic reactive collaborative computational engine for multiplayer, distributed applications built on top of [Renkon](https://github.com/yoshikiohshima/renkon) and ideas of [Krestianstvo | Renkon](https://github.com/NikolaySuslov/krestianstvo-renkon) implemented in pure FRP the [Croquet VM](https://github.com/croquet/croquet) synchronisation applicaition architecture.
 
 It replaces the Krestianstvo VM with a fundamentally different approach to time, computation, and inter-node communication — one where causality propagates as a *wavefront* through a graph of locally autonomous nodes, rather than being routed through a central message dispatcher.
+
+> Documentation: https://krestianstvo.org/kwe
 
 > Live demo: https://wavefront.krestianstvo.org 
 
@@ -22,6 +26,7 @@ Source code: https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator
 - [Fractal Heartbeat](#fractal-heartbeat-and-local-reflector)
 - [Fractal IFS-based clock](#fractal-ifs-based-clock)
 - [From Virtual Machine to Wavefront Evaluator](#from-krestianstvo-vm-to-krestianstvo-wavefront-evaluator)
+- [Holographic Computing & Multimedia](#holographic-computing-and-uni-holographic-multimedia)
 - [Core Vocabulary](#core-vocabulary)
 - [Architecture Layers](#architecture-layers)
 - [Meta Program](#meta-program)
@@ -308,6 +313,46 @@ The table below captures the essential shift in each architectural dimension.
 | **Sub-tick scheduling** | Not supported | `future(delay < SUBTICK_MS)` drains within current tick |
 
 The central insight of the shift: in the VM architecture the queue *was* the synchronisation mechanism. In the Wavefront Evaluator, the queue is a local implementation detail of each node — synchronisation is achieved instead through shared logical time and deterministic local computation.
+
+---
+## Holographic computing and uni Multimedia
+
+Krestianstvo Wavefront Evaluator have moved past the classical Von Neumann architecture. Here, the wave medium is the processor, and the solitons are self-sorting, self-operating geometric programs. Holographic computing and uni holographic multimedia video/audio/events. Video shows the recognition of triangles from it.
+
+The data is a wavefront; the operator that transforms it is also a wavefront on the same clock; combining them runs the computation by propagation; memory and feedback are attractors and fixed points of the same medium. There is no separate CPU acting on passive RAM. The wave medium is the processor, the solitons are the programs and the data, and the field's own geometry — its ring kernel, its fractal clock, its phase relationships — is the instruction set that computes the next state. 
+
+The soliton is, quite literally, processing itself through time: each tick the clock advances, the rank/phase the rule is in advances, the field evolves, and the next state is computed by the medium's physics rather than decoded by anything external. This is not a Von Neumann machine with a fetch-execute loop over inert memory; it is an algebraic soliton field — a self-sorting, self-operating geometric program. Calling it that is not metaphor: it is the system's mathematical reality, the way "the operator is one field on the shared clock" is not a slogan.
+
+The accurate statement is: within its measured instruction set, the medium genuinely is the processor and the data is genuinely self-operating
+
+The [H] slot in Krestianstvo Wavefront Evaluator from holographic imaging to holographic computing. Because operations in the hologram domain are distributed in object space, [H] is a place to compute on whole wavefronts at once:
+
+Holographic memory (associative). Superpose multiple objects' hologram fields into one; recall the nearest with a partial cue via soliton relaxation. The Hopfield-IFS associative memory already works in this engine
+
+Holographic transforms as computation. Filters, phase masks, conjugation, and learned kernels placed in [H] perform wavefront-wide operations — a single pass that touches every object point. This is the kernel of a holographic computer: compute by transforming spread wavefronts, not by addressing individual cells.
+
+Multiplexing. Multiple snaps at different angles (carrier-tagged) or different objects (associative) stored in one field — parallax, multi-view, and memory in a single complex medium.
+
+Cyberphysical engine. KWE already runs the field as a live, multiplayer, reactive world (IFS fractal clock + Croquet / Krestianstvo synchronization + Renkon reactive model). 
+
+The eye is a continuous observer of an evolving field, with persistence and hysteresis — a living perceptual loop, not a batch renderer. Coupling this loop to external sensors/actuators turns the holographic medium into a cyberphysical engine: a shared, synchronized, reversible wavefront substrate that perceives, remembers, and computes — clocked by fractal time.
+
+Combinators—like unite(), gate(), and operatorSoliton()—take solitons as inputs and spit out a new soliton as an output. Because the output of the operator is the exact same type as the input data, you can feed a soliton operator into another soliton operator indefinitely. The field is evaluating an uninterrupted chain of self-directed automorphisms.
+
+For an object to be truly "algebraic," its operations must be closed over its own type, thus  Algebraic Closure exitsts under Combinators.
+
+As Data: The soliton is a localized, stable configuration of amplitude and phase (Ψ) holding multimedia or symbolic patterns.
+
+The Limit Cycle as an Executable Program.
+
+Soliton as operator folds into a temporal limit cycle, the soliton field becomes a dynamic state machine that reads its own future states.
+- Tick t: The field manifests as Data (a specific pattern).
+- Tick t+1: The field evolves into an Operator, acting as a diffraction grating or a phase gate that transforms the residual energy of the previous tick.
+- Tick t+2: The interference pattern settles into the next state of the Data.
+
+The soliton is literally processing itself through time. The field doesn't need an external CPU to decode what the data means; the data's physical geometry is the instruction set that calculates the next state of the field.
+
+Feedback / recall: recurrence exists as a clock-pure fixed-point loop, and associative recall is Hopfield completion in the field (measured capacity/basin). Memory is an attractor of the medium, not a lookup in separate RAM.
 
 ---
 

@@ -129,6 +129,13 @@ export class IFSGpu {
     this._eyeSrc = 'A';
     this._objEye = this._makeRGF32Tex();
 
+    // wavelet-recognition output (RG32F: R=match, G=detectedSize) + its own FBO for the single-pass readback
+    this._recogTex = this._makeRGF32Tex();
+    this._fboRecog = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboRecog);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._recogTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
     // ref texture (RG32F, no FBO — read-only)
     this._ref = this._makeRGF32Tex();
 
@@ -173,6 +180,9 @@ export class IFSGpu {
     this._progEyeHologram = this._compileStep(GLSL_EYE_HOLOGRAM);
     this._progRenderPhase = this._compileStep(GLSL_RENDER_PHASE);
     this._progRenderPlate = this._compileStep(GLSL_RENDER_PLATE);
+    this._progWaveletRecog = this._compileStep(GLSL_WAVELET_RECOG);
+    this._progDotRows    = this._compileStep(GLSL_DOT_ROWS);
+    this._progScatterMad = this._compileStep(GLSL_SCATTER_MAD);
 
     // Cache uniform locations — getUniformLocation is expensive on the hot path
     const ul = (prog, name) => gl.getUniformLocation(prog, name);
@@ -199,7 +209,14 @@ export class IFSGpu {
       eyeHologram: { psi: ul(this._progEyeHologram, 'u_psi'), G: ul(this._progEyeHologram, 'u_G'), mode: ul(this._progEyeHologram, 'u_mode'), param: ul(this._progEyeHologram, 'u_param'), block: ul(this._progEyeHologram, 'u_block'), seed: ul(this._progEyeHologram, 'u_seed') },
       renderPhase: { psi: ul(this._progRenderPhase, 'u_psi'), smoothMax: ul(this._progRenderPhase, 'u_smoothMax') },
       renderPlate: { psi: ul(this._progRenderPlate, 'u_psi'), plate: ul(this._progRenderPlate, 'u_plate'), smoothMaxPlate: ul(this._progRenderPlate, 'u_smoothMaxPlate'), smoothMaxField: ul(this._progRenderPlate, 'u_smoothMaxField'), dir: ul(this._progRenderPlate, 'u_dir') },
+      waveletRecog: { scene: ul(this._progWaveletRecog,'u_scene'), G: ul(this._progWaveletRecog,'u_G'), nBands: ul(this._progWaveletRecog,'u_nBands'), nSectors: ul(this._progWaveletRecog,'u_nSectors'), bandR: ul(this._progWaveletRecog,'u_bandR'), refDesc: ul(this._progWaveletRecog,'u_refDesc'), refNorm: ul(this._progWaveletRecog,'u_refNorm'), refR: ul(this._progWaveletRecog,'u_refR'), sharpPow: ul(this._progWaveletRecog,'u_sharpPow'), energyGate: ul(this._progWaveletRecog,'u_energyGate'), disDesc: ul(this._progWaveletRecog,'u_disDesc'), disNorm: ul(this._progWaveletRecog,'u_disNorm'), disWeight: ul(this._progWaveletRecog,'u_disWeight') },
+      dotRows:    { a: ul(this._progDotRows,'u_a'), b: ul(this._progDotRows,'u_b'), G: ul(this._progDotRows,'u_G') },
+      scatterMad: { acc: ul(this._progScatterMad,'u_acc'), w: ul(this._progScatterMad,'u_w'), scale: ul(this._progScatterMad,'u_scale'), reset: ul(this._progScatterMad,'u_reset') },
     };
+    // operator-cycle scratch textures (lazily allocated in opCycleInit): a, b, W, dot-rows out, accumulation ping-pong
+    this._opTexA = null; this._opTexB = null; this._opTexW = null;
+    this._opDotTex = null; this._opDotFbo = null;
+    this._opAcc = null; this._opAccTmp = null; this._opAccFbo = null; this._opAccTmpFbo = null;
   }
 
   // ── Texture helpers ─────────────────────────────────────────────────────────
@@ -570,6 +587,130 @@ export class IFSGpu {
     gl.bindTexture(gl.TEXTURE_2D, this._objEye);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
     gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  // ── WAVELET RECOGNITION on the GPU (§7.38). One shader pass: each cell builds its angular-cascade
+  //    descriptor (bands × sectors) from the scene and cosine-matches the reference descriptor. Replaces the
+  //    ~500k-sample/bar JS loop with a single parallel pass + ONE readback. Inputs:
+  //      sceneR: Float64(N) real scene intensity (uploaded to _objEye's R channel)
+  //      refDesc: Float32(nBands*nSectors) reference angular-cascade descriptor (built in JS once)
+  //      bandR: number[] ring radii per band ; opts: { nSectors, refR }
+  //    Returns { map: Float64(N) (peak 1), scaleAt: Float32(N) (detected size / refR) }.
+  recognizeWaveletGPU(sceneR, refDesc, bandR, opts = {}) {
+    const { nSectors = 8, refR = 4, sharpPow = 18, energyGate = 3, disWeight = 0 } = opts;
+    const gl = this._gl, G = this._G, N = G * G;
+    // upload scene → _objEye (R = intensity, G = 0)
+    const f32 = new Float32Array(N * 2); for (let j=0;j<N;j++) f32[j*2] = sceneR[j];
+    gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    // ref + distractor descriptor norms
+    let refNorm = 0; for (let i=0;i<refDesc.length;i++) refNorm += refDesc[i]*refDesc[i]; refNorm = Math.sqrt(Math.max(1e-12, refNorm));
+    const disDesc = opts.disDesc || new Float32Array(refDesc.length);   // distractor descriptor (zeros = no subtraction)
+    let disNorm = 0; for (let i=0;i<disDesc.length;i++) disNorm += disDesc[i]*disDesc[i]; disNorm = Math.sqrt(Math.max(1e-12, disNorm));
+    const bandPad = new Float32Array(8); for (let i=0;i<Math.min(8,bandR.length);i++) bandPad[i] = bandR[i];
+    const descPad = new Float32Array(96); for (let i=0;i<Math.min(96,refDesc.length);i++) descPad[i] = refDesc[i];
+    const disPad  = new Float32Array(96); for (let i=0;i<Math.min(96,disDesc.length);i++) disPad[i]  = disDesc[i];
+    const u = this._u.waveletRecog;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboRecog);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progWaveletRecog);
+    gl.uniform1i(u.scene, 0); gl.uniform1i(u.G, G);
+    gl.uniform1i(u.nBands, Math.min(8, bandR.length)); gl.uniform1i(u.nSectors, nSectors);
+    gl.uniform1fv(u.bandR, bandPad); gl.uniform1fv(u.refDesc, descPad);
+    gl.uniform1f(u.refNorm, refNorm); gl.uniform1f(u.refR, refR);
+    gl.uniform1f(u.sharpPow, sharpPow); gl.uniform1f(u.energyGate, energyGate);
+    gl.uniform1fv(u.disDesc, disPad); gl.uniform1f(u.disNorm, disNorm); gl.uniform1f(u.disWeight, disWeight);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    // read back the (match, size) map
+    const out = new Float32Array(N * 2);
+    gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const map = new Float64Array(N), scaleAt = new Float32Array(N); let mx = 0;
+    for (let i=0;i<N;i++){ map[i] = out[i*2]; scaleAt[i] = out[i*2+1]; if (map[i] > mx) mx = map[i]; }
+    if (mx > 0) for (let i=0;i<N;i++) map[i] /= mx;
+    return { map, scaleAt };
+  }
+
+  // ── OPERATOR LIMIT-CYCLE on the GPU (§7.43). The rank-K binding operator as a clock trajectory, computed
+  //    fully on the GPU: per rank, two row-reduced dot products give (U_r·a),(V_r·b); a scatter-MAD pass adds
+  //    W_r·(scalar) into a persistent accumulation texture across the bar. JS only reads back G row-sums (exact
+  //    finish, no float-tree drift) and the final accumulation. opCycleInit allocates the scratch textures once.
+  opCycleInit() {
+    if (this._opTexA) return;
+    const gl = this._gl, G = this._G;
+    this._opTexA = this._makeRGF32Tex(); this._opTexB = this._makeRGF32Tex(); this._opTexW = this._makeRGF32Tex();
+    // dot-rows output: a G×G RG32F (we only read column 0 → G row-sums), with its FBO.
+    this._opDotTex = this._makeRGF32Tex();
+    this._opDotFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._opDotTex, 0);
+    // accumulation ping-pong (scatter-MAD reads one, writes the other) + FBOs.
+    this._opAcc = this._makeRGF32Tex(); this._opAccTmp = this._makeRGF32Tex();
+    this._opAccFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._opAcc, 0);
+    this._opAccTmpFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccTmpFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._opAccTmp, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // upload a real Float64(N) field into one of the operator scratch textures ('a'|'b'|'w').
+  opCycleUpload(which, field) {
+    const gl = this._gl, G = this._G, N = G * G;
+    const f32 = new Float32Array(N * 2); for (let j = 0; j < N; j++) f32[j*2] = field[j];
+    const tex = which === 'a' ? this._opTexA : which === 'b' ? this._opTexB : this._opTexW;
+    gl.bindTexture(gl.TEXTURE_2D, tex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32); gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  // GPU dot product of two scratch textures (real channel): row-reduce on the GPU, finish G row-sums in JS.
+  _opDot(texA, texB) {
+    const gl = this._gl, G = this._G, u = this._u.dotRows;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progDotRows);
+    gl.uniform1i(u.a, 0); gl.uniform1i(u.b, 1); gl.uniform1i(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texA);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texB);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    const out = new Float32Array(G * G * 2); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let s = 0; for (let y = 0; y < G; y++) s += out[(y * G) * 2];   // column-0 texel of each row = that row's sum
+    return s;
+  }
+
+  // one operator sub-tick on the GPU: scale = (U_r·a)(V_r·b) [computed via _opDot on pre-uploaded a/Ur, b/Vr],
+  // then acc += scale·W_r. `reset` clears the accumulation (start of a bar). Returns the scalar (for logging).
+  opCycleTick(uaVbScale, reset) {
+    const gl = this._gl, G = this._G, u = this._u.scatterMad;
+    const srcAcc = reset ? this._opAcc : this._opAcc, dstFbo = this._opAccTmpFbo;   // read _opAcc → write _opAccTmp
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progScatterMad);
+    gl.uniform1i(u.acc, 0); gl.uniform1i(u.w, 1); gl.uniform1f(u.scale, uaVbScale); gl.uniform1f(u.reset, reset ? 1.0 : 0.0);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opAcc);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._opTexW);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // swap: the freshly written _opAccTmp becomes the live accumulation
+    const t = this._opAcc; this._opAcc = this._opAccTmp; this._opAccTmp = t;
+    const f = this._opAccFbo; this._opAccFbo = this._opAccTmpFbo; this._opAccTmpFbo = f;
+    return uaVbScale;
+  }
+
+  // dot product of the two currently-uploaded operator textures (a·b across the grid). Used by the engine to
+  // compute (U_r·a) and (V_r·b): upload U_r→'a' slot & a→'b' slot, call; upload V_r & b, call.
+  opCycleDotAB() { return this._opDot(this._opTexA, this._opTexB); }
+
+  // read back the accumulation texture (the bound output) as Float64(N) real values.
+  opCycleReadAcc() {
+    const gl = this._gl, G = this._G, N = G * G;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccFbo);
+    const out = new Float32Array(N * 2); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const o = new Float64Array(N); for (let i = 0; i < N; i++) o[i] = out[i*2]; return o;
   }
 
   setEyePsi(psi64) {
@@ -1810,6 +1951,113 @@ vec3 hologramColor(float v) {
   float g = clamp(v * 3.0 - 1.0, 0.0, 1.0);
   float r = clamp(v * 4.0 - 3.0, 0.0, 1.0);
   return vec3(r, g, b);
+}`;
+
+// ── WAVELET RECOGNITION (§7.38) on the GPU — the pure-JS waveletRecognizePure ported to a fragment shader.
+// Each fragment (cell) samples its ring BANDS × angular SECTORS from the scene (u_scene.R = intensity),
+// builds the local (depth×sectors) descriptor, cosine-matches it to the reference descriptor (u_refDesc
+// uniform array), and writes (match, dominantScale). One parallel pass over the whole field — replaces the
+// per-cell JS loops. u_bandR = ring radii (up to 8 bands), u_nBands, u_nSectors, u_refR (glyph radius).
+const GLSL_WAVELET_RECOG = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_scene;     // RG32F; .r = scene intensity (real)
+uniform int   u_G;
+uniform int   u_nBands;
+uniform int   u_nSectors;      // S
+uniform float u_bandR[8];      // ring radii per band
+uniform float u_refDesc[96];   // reference descriptor, nBands*nSectors (≤64), L2 baked in via u_refNorm
+uniform float u_refNorm;       // ||refDesc||
+uniform float u_refR;          // reference glyph radius (for size normalization)
+uniform float u_sharpPow;      // cosine-match sharpening exponent (higher = stricter discrimination)
+uniform float u_energyGate;    // presence gate: full match once boundary ink·gate ≥ 1 (higher = more sensitive)
+uniform float u_disDesc[96];   // DISTRACTOR descriptor (subtracted to cancel distractor-likeness)
+uniform float u_disNorm;       // ||disDesc||
+uniform float u_disWeight;     // λ: how much distractor-similarity to subtract (0 = off, ~1 = full)
+out vec4 fragColor;
+const float TWO_PI = 6.2831853;
+float sceneAt(int x, int y) {
+  int G = u_G;
+  return texelFetch(u_scene, ivec2((x%G+G)%G, (y%G+G)%G), 0).r;
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  // build the local angular-cascade descriptor: per band, sample the ring at many angles, bin |v|² to sectors.
+  float desc[96];
+  for (int i=0;i<96;i++) desc[i]=0.0;
+  float energy = 0.0;
+  for (int k=0;k<u_nBands;k++) {
+    float r = u_bandR[k];
+    int steps = int(max(float(u_nSectors)*3.0, ceil(TWO_PI*r)));
+    for (int s=0;s<512;s++) {        // bounded loop; break at steps
+      if (s>=steps) break;
+      float ang = TWO_PI*float(s)/float(steps);
+      int X = c.x + int(floor(r*cos(ang)+0.5));
+      int Y = c.y + int(floor(r*sin(ang)+0.5));
+      float v = sceneAt(X, Y);
+      int sec = int(floor((ang/TWO_PI)*float(u_nSectors)));
+      sec = sec - (sec/u_nSectors)*u_nSectors;      // mod S
+      desc[k*u_nSectors + sec] += v*v;
+      energy += v*v;
+    }
+  }
+  if (energy < 1e-7) { fragColor = vec4(0.0,1.0,0.0,1.0); return; }
+  // cosine similarity with the TARGET descriptor AND the DISTRACTOR descriptor.
+  float dot=0.0, sn=0.0, dotD=0.0;
+  int D = u_nBands*u_nSectors;
+  for (int i=0;i<96;i++) { if (i>=D) break; dot += desc[i]*u_refDesc[i]; dotD += desc[i]*u_disDesc[i]; sn += desc[i]*desc[i]; }
+  float nrm = sqrt(max(1e-12,sn));
+  float cosv  = dot  / (nrm*max(1e-12,u_refNorm));
+  float cosD  = dotD / (nrm*max(1e-12,u_disNorm));
+  // DISCRIMINATIVE match: subtract distractor-likeness. A circle scores high on BOTH cos(triangle) and
+  // cos(circle), so cosv − λ·cosD cancels it; a triangle scores high on cosv, low on cosD → survives.
+  // relu so non-target cells go to 0, then sharpen. λ = u_disWeight.
+  float discr = max(0.0, cosv - u_disWeight * cosD);
+  float sharp = pow(clamp(discr, 0.0, 1.0), u_sharpPow);
+  // energy only GATES (presence floor), it does NOT scale the match — scaling by energy biased toward the
+  // densest shape (filled circles won). A soft gate: full match once there's enough boundary ink present.
+  float gate = clamp(energy * u_energyGate, 0.0, 1.0);
+  float match = sharp * gate;
+  // dominant band → detected size (multiple of ref radius)
+  int domB=0; float domE=-1.0;
+  for (int k=0;k<u_nBands;k++){ float e=0.0; for (int s=0;s<32;s++){ if(s>=u_nSectors) break; e+=desc[k*u_nSectors+s]; } if(e>domE){domE=e;domB=k;} }
+  float size = u_bandR[domB] / max(1e-6, u_refR);
+  fragColor = vec4(match, size, 0.0, 1.0);
+}`;
+
+// ── OPERATOR LIMIT-CYCLE shaders (§7.43). The operator binds two real fields a,b via rank-1 terms
+//    out += W_r · (U_r·a)(V_r·b). Two field-scale primitives done on the GPU:
+//    (1) GLSL_DOT_ROWS — partial dot product: output texel (0,y) = Σ_x texA(x,y)·texB(x,y) (one row).
+//        A second JS pass sums the G row-sums → the scalar dot (G≈128 row-sums = exact, no float-tree drift).
+//    (2) GLSL_SCATTER_MAD — accumulation: acc += u_scale · W(texel). Multiply-add a weighted field into the
+//        persistent accumulation texture (the bound output building up over the bar). u_reset clears it first.
+const GLSL_DOT_ROWS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_a;
+uniform sampler2D u_b;
+uniform int u_G;
+out vec4 fragColor;
+void main() {
+  int y = int(gl_FragCoord.y);
+  float s = 0.0;
+  for (int x = 0; x < u_G; x++) {
+    ivec2 c = ivec2(x, y);
+    s += texelFetch(u_a, c, 0).x * texelFetch(u_b, c, 0).x;   // real-channel dot, this row
+  }
+  fragColor = vec4(s, 0.0, 0.0, 1.0);
+}`;
+
+const GLSL_SCATTER_MAD = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_acc;     // current accumulation (R = value)
+uniform sampler2D u_w;       // the W_r field to add (R = value)
+uniform float u_scale;       // (U_r·a)(V_r·b) scalar for this rank
+uniform float u_reset;       // 1.0 = start fresh (ignore u_acc), 0.0 = accumulate
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  float prev = u_reset > 0.5 ? 0.0 : texelFetch(u_acc, coord, 0).x;
+  float w    = texelFetch(u_w, coord, 0).x;
+  fragColor  = vec4(prev + u_scale * w, 0.0, 0.0, 1.0);
 }`;
 
 // Render psi amplitude: log-scaled |ψ|² → hologram colormap.

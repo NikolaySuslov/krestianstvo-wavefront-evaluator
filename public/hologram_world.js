@@ -561,6 +561,10 @@ const hologramWorldProgram = `
       ifsNBands: 0, ifsSEff: 0, ifsRadiiStr: '',
       eyeHMode: 0, eyeHParam: 0.5, eyeHBlock: 8, eyeTSteps: 10,
       eyeMix: 0, eyeOnly: false,
+      // Eye DISPLAY mode + sound — shared world state so all peers render the same mode and the
+      // sequencer is deterministic from the clock (Krestianstvo compliance, doc §7.13). One enum
+      // (mutually-exclusive) replaces scattered client booleans. '' = none (plain live grid).
+      eyeDisplayMode: '', eyeSoundOn: false, eyeTau: 0,   // eyeTau: shared depth-scrub position
     },
     reflector,
     (state, pulse) => {
@@ -569,7 +573,7 @@ const hologramWorldProgram = `
         const t = pulse._eventPayload?.type;
         if (['rotate','toggleMode','resetPlate','snapPlate','nextCycle','addPoint','addBeam','setDepthProbe','dragStart','dragEnd','toggleTomo','setShape',
              'setBreath','setPlateDriven','setNoHebb','setNullPlate','setPlateKernel','setDemodKick','setPlateSeedFree','setReconReset','setKickParams','setBackPlate','setHamiltonian','setRecordMode','setLiveMode','setGsPropagator','setGsNoiseSeed','setDirectBack','pointTest',
-             'setEyeH','setEyeT','setEyeMix','setEyeOnly'].includes(t))
+             'setEyeH','setEyeT','setEyeMix','setEyeOnly','setEyeDisplay','setEyeSound','setEyeTau'].includes(t))
           s = { ...s, _queue: [{ fireAt: pulse.wallTime, msg: t, payload: pulse._eventPayload ?? {} }, ...(s._queue ?? [])] };
       }
       return W.reduce(s, pulse, 'hologram4', {
@@ -823,6 +827,10 @@ const hologramWorldProgram = `
         setEyeT:         (s, p) => ({ ...s, eyeTSteps: p.tSteps ?? s.eyeTSteps }),
         setEyeMix:       (s, p) => ({ ...s, eyeMix: p.mix ?? s.eyeMix }),
         setEyeOnly:      (s, p) => ({ ...s, eyeOnly: p.value ?? !(s.eyeOnly ?? false) }),
+        // Eye display mode: toggle off if same mode re-sent, else switch. Mutually exclusive.
+        setEyeDisplay:   (s, p) => ({ ...s, eyeDisplayMode: (s.eyeDisplayMode === p.mode) ? '' : (p.mode ?? '') }),
+        setEyeSound:     (s, p) => ({ ...s, eyeSoundOn: p.value ?? !(s.eyeSoundOn ?? false) }),
+        setEyeTau:       (s, p) => ({ ...s, eyeTau: p.tau ?? s.eyeTau ?? 0 }),
         setGsPropagator: (s, p) => ({ ...s, gsPropagator: p.mode ?? 'ifs' }),
         setGsNoiseSeed:  (s, p) => ({ ...s, gsNoiseSeed:   p.value ?? !(s.gsNoiseSeed   ?? false) }),
         setDirectBack:   (s, p) => ({ ...s, directBackMode: p.value ?? !(s.directBackMode ?? false) }),
