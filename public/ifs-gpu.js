@@ -128,6 +128,12 @@ export class IFSGpu {
     [this._eyeB, this._fboEyeB] = this._makePsiTex();
     this._eyeSrc = 'A';
     this._objEye = this._makeRGF32Tex();
+    this._bindB  = this._makeRGF32Tex();   // §7.90 operand-B field for the pure-medium binding (ψA·ψB)
+    // §7.91-fix DEDICATED bind ping-pong — the binding's field-mul + soliton round-trip run HERE, never on the eye
+    // ping-pong, so the operator binding can't corrupt the live travelling field the grow/self-evolve share.
+    [this._bindPA, this._fboBindPA] = this._makePsiTex();
+    [this._bindPB, this._fboBindPB] = this._makePsiTex();
+    this._bindSrc = 'A';
 
     // wavelet-recognition output (RG32F: R=match, G=detectedSize) + its own FBO for the single-pass readback
     this._recogTex = this._makeRGF32Tex();
@@ -162,6 +168,10 @@ export class IFSGpu {
     this._progStep3       = this._compileStep(GLSL_STEP3);
     this._progAccum       = this._compileStep(GLSL_ACCUM);
     this._progAccumSweep  = this._compileStep(GLSL_ACCUM_SWEEP);
+    this._progFieldMul    = this._compileStep(GLSL_FIELD_MUL);   // §7.90 pure-medium binding (complex ψA·ψB)
+    this._progRotCenters  = this._compileStep(GLSL_ROTATE_CENTERS); // §7.92 θ-operator: rotate ψ about each main
+    this._progAffineCenters = this._compileStep(GLSL_AFFINE_CENTERS); // §7.98 general metric op: affine ψ about each main
+    this._progLensGenome  = this._compileStep(GLSL_LENS_GENOME);   // §7.98 genome lens phase-plate (optical chip, 1 GPU pass)
     this._progCopy        = this._compileStep(GLSL_COPY);
     this._progStepRecord  = this._compileStep(GLSL_STEP_RECORD);
     this._progReconCplx   = this._compileStep(GLSL_RECON_CPLX);
@@ -183,11 +193,34 @@ export class IFSGpu {
     this._progWaveletRecog = this._compileStep(GLSL_WAVELET_RECOG);
     this._progDotRows    = this._compileStep(GLSL_DOT_ROWS);
     this._progScatterMad = this._compileStep(GLSL_SCATTER_MAD);
+    this._progColFinish     = this._compileStep(GLSL_COL_FINISH);       // §7.58 GPU-resident scalar pipe
+    this._progScatterMadTex = this._compileStep(GLSL_SCATTER_MAD_TEX);
+    this._progOpDotUA         = this._compileStep(GLSL_OP_DOT_UA_ROWS);     // §7.58b rank atlas
+    this._progScatterMadAtlas = this._compileStep(GLSL_SCATTER_MAD_ATLAS);
+    this._progNlKick          = this._compileStep(GLSL_NL_KICK);            // §7.60 nonlinear decision kick
+    this._progNlSpm           = this._compileStep(GLSL_NL_SPM);             // §7.82 saturable SPM (the real _nlHalf)
+    this._progDissip          = this._compileStep(GLSL_DISSIP);             // §7.82 driven-dissipative pass
+    this._progAddForce        = this._compileStep(GLSL_ADD_FORCE);          // §7.82 GPU-resident clock forcing
+    this._progPhaseAccum      = this._compileStep(GLSL_PHASE_ACCUM);        // §7.82 on-GPU phase accumulator
+    this._progNlQuantize      = this._compileStep(GLSL_NL_QUANTIZE);        // §7.77 bistable physical quantizer
+    this._progPhaseWell       = this._compileStep(GLSL_PHASE_WELL);         // §7.83 N-ary phase-well quantizer
+    this._progSoftPhaseWell   = this._compileStep(GLSL_SOFT_PHASE_WELL);    // §7.84 generative soft phase-heal
+    this._progCgleStep        = this._compileStep(GLSL_CGLE_STEP);          // §7.86 cubic-quintic CGLE substrate
+    this._progNlhoStep        = this._compileStep(GLSL_NLHO_STEP);          // §7.87 non-linear Hutchinson operator
+    this._progArgmaxInit      = this._compileStep(GLSL_ARGMAX_INIT);        // §7.87 argmax: lift field → (v,x,y)
+    this._progArgmaxReduce    = this._compileStep(GLSL_ARGMAX_REDUCE);      // §7.87 argmax: 2×2 max-pool pyramid
+    this._progSclMul          = this._compileStep(GLSL_SCL_MUL);            // §7.61 resident quantizer
+    this._progOpDecide        = this._compileStep(GLSL_OP_DECIDE);
+    this._progScatterMadDecided = this._compileStep(GLSL_SCATTER_MAD_DECIDED);  // §7.62 field-selected emission
 
     // Cache uniform locations — getUniformLocation is expensive on the hot path
     const ul = (prog, name) => gl.getUniformLocation(prog, name);
     this._u = {
       step1:  { psi: ul(this._progStep1, 'u_psi'), rings: ul(this._progStep1, 'u_rings'), dt: ul(this._progStep1, 'u_dt'), G: ul(this._progStep1, 'u_G'), nRings: ul(this._progStep1, 'u_nRings'), ringCount: ul(this._progStep1, 'u_ringCount'), ringMeta: ul(this._progStep1, 'u_ringMeta') },
+      cgle:   { psi: ul(this._progCgleStep,'u_psi'), rings: ul(this._progCgleStep,'u_rings'), G: ul(this._progCgleStep,'u_G'), nRings: ul(this._progCgleStep,'u_nRings'), ringCount: ul(this._progCgleStep,'u_ringCount'), ringMeta: ul(this._progCgleStep,'u_ringMeta'), delta: ul(this._progCgleStep,'u_delta'), beta: ul(this._progCgleStep,'u_beta'), dispd: ul(this._progCgleStep,'u_dispd'), eps: ul(this._progCgleStep,'u_eps'), c3: ul(this._progCgleStep,'u_c3'), mu: ul(this._progCgleStep,'u_mu'), c5: ul(this._progCgleStep,'u_c5'), cdt: ul(this._progCgleStep,'u_cdt') },
+      nlho:   { psi: ul(this._progNlhoStep,'u_psi'), mapA: ul(this._progNlhoStep,'u_mapA'), mapB: ul(this._progNlhoStep,'u_mapB'), nMaps: ul(this._progNlhoStep,'u_nMaps'), G: ul(this._progNlhoStep,'u_G'), anchorTex: ul(this._progNlhoStep,'u_anchorTex'), anchorOn: ul(this._progNlhoStep,'u_anchorOn'), anchorScale: ul(this._progNlhoStep,'u_anchorScale'), anchorDom: ul(this._progNlhoStep,'u_anchorDom') },
+      argInit:  { psi: ul(this._progArgmaxInit,'u_psi') },
+      argReduce:{ src: ul(this._progArgmaxReduce,'u_src'), inW: ul(this._progArgmaxReduce,'u_inW'), inH: ul(this._progArgmaxReduce,'u_inH') },
       step2:  { psi: ul(this._progStep2, 'u_psi'), rings: ul(this._progStep2, 'u_rings'), dt: ul(this._progStep2, 'u_dt'), G: ul(this._progStep2, 'u_G'), nRings: ul(this._progStep2, 'u_nRings'), ringCount: ul(this._progStep2, 'u_ringCount'), ringMeta: ul(this._progStep2, 'u_ringMeta') },
       step3:  { psi: ul(this._progStep3, 'u_psi'), rings: ul(this._progStep3, 'u_rings'), dt: ul(this._progStep3, 'u_dt'), G: ul(this._progStep3, 'u_G'), nRings: ul(this._progStep3, 'u_nRings'), ringCount: ul(this._progStep3, 'u_ringCount'), ringMeta: ul(this._progStep3, 'u_ringMeta') },
       accum:      { psi: ul(this._progAccum, 'u_psi'), ref: ul(this._progAccum, 'u_ref'), plate: ul(this._progAccum, 'u_plate'), decay: ul(this._progAccum, 'u_decay') },
@@ -212,11 +245,35 @@ export class IFSGpu {
       waveletRecog: { scene: ul(this._progWaveletRecog,'u_scene'), G: ul(this._progWaveletRecog,'u_G'), nBands: ul(this._progWaveletRecog,'u_nBands'), nSectors: ul(this._progWaveletRecog,'u_nSectors'), bandR: ul(this._progWaveletRecog,'u_bandR'), refDesc: ul(this._progWaveletRecog,'u_refDesc'), refNorm: ul(this._progWaveletRecog,'u_refNorm'), refR: ul(this._progWaveletRecog,'u_refR'), sharpPow: ul(this._progWaveletRecog,'u_sharpPow'), energyGate: ul(this._progWaveletRecog,'u_energyGate'), disDesc: ul(this._progWaveletRecog,'u_disDesc'), disNorm: ul(this._progWaveletRecog,'u_disNorm'), disWeight: ul(this._progWaveletRecog,'u_disWeight') },
       dotRows:    { a: ul(this._progDotRows,'u_a'), b: ul(this._progDotRows,'u_b'), G: ul(this._progDotRows,'u_G') },
       scatterMad: { acc: ul(this._progScatterMad,'u_acc'), w: ul(this._progScatterMad,'u_w'), scale: ul(this._progScatterMad,'u_scale'), reset: ul(this._progScatterMad,'u_reset') },
+      colFinish:     { rows: ul(this._progColFinish,'u_rows'), G: ul(this._progColFinish,'u_G') },
+      scatterMadTex: { acc: ul(this._progScatterMadTex,'u_acc'), w: ul(this._progScatterMadTex,'u_w'), sA: ul(this._progScatterMadTex,'u_sA'), sB: ul(this._progScatterMadTex,'u_sB'), reset: ul(this._progScatterMadTex,'u_reset') },
+      opDotUA:         { atlasU: ul(this._progOpDotUA,'u_atlasU'), atlasA: ul(this._progOpDotUA,'u_atlasA'), cyc: ul(this._progOpDotUA,'u_cyc'), K: ul(this._progOpDotUA,'u_K'), nBins: ul(this._progOpDotUA,'u_nBins'), G: ul(this._progOpDotUA,'u_G') },
+      nlKick:          { psi: ul(this._progNlKick,'u_psi'), gamma: ul(this._progNlKick,'u_gamma'), th: ul(this._progNlKick,'u_th'), w: ul(this._progNlKick,'u_w') },
+      fieldMul:        { a: ul(this._progFieldMul,'u_a'), b: ul(this._progFieldMul,'u_b') },   // §7.90 pure-medium binding
+      rotCenters:      { psi: ul(this._progRotCenters,'u_psi'), delta: ul(this._progRotCenters,'u_delta'), n: ul(this._progRotCenters,'u_n'), centers: ul(this._progRotCenters,'u_centers'), rad: ul(this._progRotCenters,'u_rad'), G: ul(this._progRotCenters,'u_G') },   // §7.92 θ-operator
+      affineCenters:   { psi: ul(this._progAffineCenters,'u_psi'), minv: ul(this._progAffineCenters,'u_minv'), tinv: ul(this._progAffineCenters,'u_tinv'), n: ul(this._progAffineCenters,'u_n'), centers: ul(this._progAffineCenters,'u_centers'), rad: ul(this._progAffineCenters,'u_rad'), G: ul(this._progAffineCenters,'u_G') },   // §7.98 general metric op
+      lensGenome:      { psi: ul(this._progLensGenome,'u_psi'), n: ul(this._progLensGenome,'u_n'), centers: ul(this._progLensGenome,'u_centers'), a: ul(this._progLensGenome,'u_a'), beta: ul(this._progLensGenome,'u_beta'), vtx: ul(this._progLensGenome,'u_vtx'), k: ul(this._progLensGenome,'u_k'), phaseT: ul(this._progLensGenome,'u_phaseT') },   // §7.98/§7.102 genome lens = GPU linOp (mul, SPACETIME)
+      nlSpm:           { psi: ul(this._progNlSpm,'u_psi'), gamma: ul(this._progNlSpm,'u_gamma'), isat: ul(this._progNlSpm,'u_isat'), dt: ul(this._progNlSpm,'u_dt') },
+      dissip:          { psi: ul(this._progDissip,'u_psi'), alpha: ul(this._progDissip,'u_alpha'), pump: ul(this._progDissip,'u_pump'), ptarget: ul(this._progDissip,'u_ptarget'), dt: ul(this._progDissip,'u_dt') },
+      addForce:        { psi: ul(this._progAddForce,'u_psi'), amp: ul(this._progAddForce,'u_amp'), sig2: ul(this._progAddForce,'u_sig2'), G: ul(this._progAddForce,'u_G') },
+      phaseAccum:      { psi: ul(this._progPhaseAccum,'u_psi'), acc: ul(this._progPhaseAccum,'u_acc'), ox: ul(this._progPhaseAccum,'u_ox'), oy: ul(this._progPhaseAccum,'u_oy') },
+      nlQuantize:      { psi: ul(this._progNlQuantize,'u_psi'), prev: ul(this._progNlQuantize,'u_prev'), pk: ul(this._progNlQuantize,'u_pk'), thLo: ul(this._progNlQuantize,'u_thLo'), thHi: ul(this._progNlQuantize,'u_thHi') },
+      phaseWell:       { psi: ul(this._progPhaseWell,'u_psi'), prev: ul(this._progPhaseWell,'u_prev'), q: ul(this._progPhaseWell,'u_q'), hold: ul(this._progPhaseWell,'u_hold') },
+      softPhaseWell:   { psi: ul(this._progSoftPhaseWell,'u_psi'), prev: ul(this._progSoftPhaseWell,'u_prev'), q: ul(this._progSoftPhaseWell,'u_q'), snap: ul(this._progSoftPhaseWell,'u_snap'), hold: ul(this._progSoftPhaseWell,'u_hold'), hasPrev: ul(this._progSoftPhaseWell,'u_hasPrev') },
+      sclMul:          { sA: ul(this._progSclMul,'u_sA'), sB: ul(this._progSclMul,'u_sB') },
+      opDecide:        { match: ul(this._progOpDecide,'u_match'), K: ul(this._progOpDecide,'u_K'), theta: ul(this._progOpDecide,'u_theta') },
+      scatterMadDecided: { acc: ul(this._progScatterMadDecided,'u_acc'), atlasW: ul(this._progScatterMadDecided,'u_atlasW'), sA: ul(this._progScatterMadDecided,'u_sA'), sB: ul(this._progScatterMadDecided,'u_sB'), decision: ul(this._progScatterMadDecided,'u_decision'), cyc: ul(this._progScatterMadDecided,'u_cyc'), K: ul(this._progScatterMadDecided,'u_K') },
+      scatterMadAtlas: { acc: ul(this._progScatterMadAtlas,'u_acc'), atlasW: ul(this._progScatterMadAtlas,'u_atlasW'), sA: ul(this._progScatterMadAtlas,'u_sA'), sB: ul(this._progScatterMadAtlas,'u_sB'), cyc: ul(this._progScatterMadAtlas,'u_cyc'), K: ul(this._progScatterMadAtlas,'u_K') },
     };
     // operator-cycle scratch textures (lazily allocated in opCycleInit): a, b, W, dot-rows out, accumulation ping-pong
     this._opTexA = null; this._opTexB = null; this._opTexW = null;
     this._opDotTex = null; this._opDotFbo = null;
     this._opAcc = null; this._opAccTmp = null; this._opAccFbo = null; this._opAccTmpFbo = null;
+    this._opSclA = null; this._opSclB = null; this._opSclAFbo = null; this._opSclBFbo = null;   // §7.58 1×1 scalars
+    this._opAtlasU = null; this._opAtlasA = null; this._opAtlasW = null; this._opTexV = null;   // §7.58b genotype atlases
+    this._opAtlasK = 0; this._opNBins = 0;
+    this._opMatch = null; this._opMatchFbo = null; this._opDecision = null; this._opDecisionFbo = null;  // §7.61 quantizer
+    this._opDecideK = 0;
   }
 
   // ── Texture helpers ─────────────────────────────────────────────────────────
@@ -635,6 +692,59 @@ export class IFSGpu {
     return { map, scaleAt };
   }
 
+  // ── §7.77 BISTABLE PHYSICAL QUANTIZER — the genome level-restorer, on the GPU (replaces the JS §7.65 Schmitt
+  //    `h>0.6·pk?1:h<0.4·pk?0:prev`). `hPatch` = Float64(M) amplitudes (the harvested |ψ| per cell, any length M
+  //    ≤ N — laid into the first M cells); `prevW` = Float64(M) previous bits (hysteresis memory); `pk` = patch
+  //    peak; thresholds ×pk. Returns Float64(M) restored bits {0,1}. The DECISION is computed by the medium
+  //    (the shader), not a JS `if`. Peer-deterministic because of the hold band (probe-verified).
+  quantizePatchGPU(hPatch, prevW, pk, { thLo = 0.4, thHi = 0.6 } = {}) {
+    const gl = this._gl, G = this._G, N = G * G, M = hPatch.length;
+    if (!this._qPrevTex) { this._qPrevTex = this._makeRGF32Tex(); }   // lazy: prev-bit input texture
+    // upload amplitudes h → _objEye.R (the field's real channel = |ψ|, so the shader's length(psi)=h), prev → _qPrevTex.R
+    const fH = new Float32Array(N * 2), fP = new Float32Array(N * 2);
+    for (let i = 0; i < M; i++) { fH[i*2] = hPatch[i]; fP[i*2] = prevW[i] ? 1 : 0; }
+    gl.bindTexture(gl.TEXTURE_2D, this._objEye); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, fH);
+    gl.bindTexture(gl.TEXTURE_2D, this._qPrevTex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, fP);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const u = this._u.nlQuantize;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboRecog); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progNlQuantize);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.prev, 1);
+    gl.uniform1f(u.pk, pk); gl.uniform1f(u.thLo, thLo); gl.uniform1f(u.thHi, thHi);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._qPrevTex);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    const out = new Float32Array(N * 2); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const bits = new Float64Array(M); for (let i = 0; i < M; i++) bits[i] = out[i*2];
+    return bits;
+  }
+
+  // ── §7.83 PHASE-WELL QUANTIZER (GPU) — the N-ary, pk-invariant, tileable genome quantizer. `psiPatch` =
+  //    Float64(2·M) complex (re,im interleaved; only the PHASE matters — pk-invariant); `prevSym` = Float64(M)
+  //    previous well indices (hysteresis memory; use -1 to take nearest); q = #wells; hold = hold-band arc (rad).
+  //    Returns Float64(M) restored symbol indices {0..q-1}. The medium (shader) computes the verdict, not JS.
+  phaseWellPatchGPU(psiPatch, prevSym, q, hold = 0.4) {
+    const gl = this._gl, G = this._G, N = G * G, M = psiPatch.length >> 1;
+    if (!this._pwPrevTex) { this._pwPrevTex = this._makeRGF32Tex(); }   // lazy: prev-symbol input texture
+    const fPsi = new Float32Array(N * 2), fP = new Float32Array(N * 2);
+    for (let i = 0; i < M; i++) { fPsi[i*2] = psiPatch[i*2]; fPsi[i*2+1] = psiPatch[i*2+1]; fP[i*2] = prevSym[i]; }
+    gl.bindTexture(gl.TEXTURE_2D, this._objEye); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, fPsi);
+    gl.bindTexture(gl.TEXTURE_2D, this._pwPrevTex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, fP);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const u = this._u.phaseWell;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboRecog); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progPhaseWell);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.prev, 1); gl.uniform1f(u.q, q); gl.uniform1f(u.hold, hold);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._objEye);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._pwPrevTex);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    const out = new Float32Array(N * 2); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const sym = new Float64Array(M); for (let i = 0; i < M; i++) sym[i] = out[i*2];
+    return sym;
+  }
+
   // ── OPERATOR LIMIT-CYCLE on the GPU (§7.43). The rank-K binding operator as a clock trajectory, computed
   //    fully on the GPU: per rank, two row-reduced dot products give (U_r·a),(V_r·b); a scatter-MAD pass adds
   //    W_r·(scalar) into a persistent accumulation texture across the bar. JS only reads back G row-sums (exact
@@ -656,15 +766,60 @@ export class IFSGpu {
     this._opAccTmpFbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccTmpFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._opAccTmp, 0);
+    // §7.58 GPU-resident scalar pipe: two 1×1 scalar textures (ua, vb) the scatter shader samples directly.
+    const mk1 = () => {
+      const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, 1, 1);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return [t, f];
+    };
+    [this._opSclA, this._opSclAFbo] = mk1();
+    [this._opSclB, this._opSclBFbo] = mk1();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
-  // upload a real Float64(N) field into one of the operator scratch textures ('a'|'b'|'w').
+  // upload a real Float64(N) field into one of the operator scratch textures ('a'|'b'|'w'|'v').
+  // 'v' = the static V probe (§7.58b — uploaded once, reused every tick by the VB dot).
   opCycleUpload(which, field) {
     const gl = this._gl, G = this._G, N = G * G;
     const f32 = new Float32Array(N * 2); for (let j = 0; j < N; j++) f32[j*2] = field[j];
-    const tex = which === 'a' ? this._opTexA : which === 'b' ? this._opTexB : this._opTexW;
+    const tex = which === 'a' ? this._opTexA : which === 'b' ? this._opTexB : which === 'v' ? this._opTexV : this._opTexW;
     gl.bindTexture(gl.TEXTURE_2D, tex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32); gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  // ── §7.58b RANK ATLAS: preload the operator's GENOTYPE once — K layers each of U keys, bar-input keys
+  //    a(bar mod K), and output carriers W — into 2D-array textures. After this, rank selection, bar-key
+  //    selection, and the bar-start reset all happen IN-SHADER from one u_cyc integer.
+  opCycleAtlasInit(K, nBins) {
+    const gl = this._gl, G = this._G;
+    if (this._opAtlasU && this._opAtlasK === K && this._opNBins === nBins) return;
+    const mkArr = () => {
+      const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
+      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG32F, G, G, K);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, null); return t;
+    };
+    this._opAtlasU = mkArr(); this._opAtlasA = mkArr(); this._opAtlasW = mkArr();
+    if (!this._opTexV) this._opTexV = this._makeRGF32Tex();
+    this._opAtlasK = K; this._opNBins = nBins;
+  }
+
+  // upload one genotype layer ('U'|'A'|'W', layer index, real Float64(N) field). Called K times at build.
+  opCycleAtlasUpload(which, layer, field) {
+    const gl = this._gl, G = this._G, N = G * G;
+    const f32 = new Float32Array(N * 2); for (let j = 0; j < N; j++) f32[j*2] = field[j];
+    const t = which === 'U' ? this._opAtlasU : which === 'A' ? this._opAtlasA : this._opAtlasW;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, G, G, 1, gl.RG, gl.FLOAT, f32);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
   }
 
   // GPU dot product of two scratch textures (real channel): row-reduce on the GPU, finish G row-sums in JS.
@@ -703,6 +858,215 @@ export class IFSGpu {
   // dot product of the two currently-uploaded operator textures (a·b across the grid). Used by the engine to
   // compute (U_r·a) and (V_r·b): upload U_r→'a' slot & a→'b' slot, call; upload V_r & b, call.
   opCycleDotAB() { return this._opDot(this._opTexA, this._opTexB); }
+
+  // ── §7.58 GPU-RESIDENT SCALAR PIPE (bootstrap step 1). The JS-scalar path (opCycleDotAB → JS multiply →
+  //    u_scale uniform) read back G row-sums per dot and re-uploaded the product — the one place genuine
+  //    computation passed through JS in the operator cycle (§7.45 honest-scope gap). These three methods
+  //    close it: the dot FINISHES on the GPU into a 1×1 scalar texture ('A' or 'B' slot), and the scatter
+  //    samples both scalars directly. Per tick, JS only issues draw calls — the MODEL/MEDIUM seam in code:
+  //    JS conducts (content-blind), the GPU computes; readbacks remain only as telemetry (opCycleReadScalar)
+  //    and verification (opCycleReadAcc), never feeding the computation.
+  // pass 1 helper: row-reduce tA·tB → dot-rows texture (column 0 = the G row-sums). Stays on GPU.
+  _opDotRowsPass(tA, tB) {
+    const gl = this._gl, G = this._G, u = this._u.dotRows;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progDotRows);
+    gl.uniform1i(u.a, 0); gl.uniform1i(u.b, 1); gl.uniform1i(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tA);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tB);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+  }
+
+  // pass 2 helper: column-finish the dot-rows texture → the 1×1 scalar texture ('A'|'B').
+  _opColFinish(slot) {
+    const gl = this._gl, G = this._G, uf = this._u.colFinish;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, slot === 'A' ? this._opSclAFbo : this._opSclBFbo); gl.viewport(0, 0, 1, 1);
+    gl.useProgram(this._progColFinish);
+    gl.uniform1i(uf.rows, 0); gl.uniform1i(uf.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opDotTex);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // dot of the two currently-uploaded textures, finished ON the GPU into scalar slot 'A'|'B'. No readback.
+  opCycleDotToTex(slot) {
+    this._opDotRowsPass(this._opTexA, this._opTexB);
+    this._opColFinish(slot);
+  }
+
+  // §7.58b (U_r·a) fully from the GENOTYPE ATLASES: rank layer and bar-key layer selected IN-SHADER from
+  // u_cyc. JS contributes nothing but the clock integer. Result → scalar slot 'A'.
+  opCycleDotUAToTex(cyc) {
+    const gl = this._gl, G = this._G, u = this._u.opDotUA;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progOpDotUA);
+    gl.uniform1i(u.atlasU, 0); gl.uniform1i(u.atlasA, 1);
+    gl.uniform1i(u.cyc, cyc | 0); gl.uniform1i(u.K, this._opAtlasK); gl.uniform1i(u.nBins, this._opNBins); gl.uniform1i(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, this._opAtlasU);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, this._opAtlasA);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+    this._opColFinish('A');
+  }
+
+  // ── §7.91 PURE-MEDIUM ARM BINDING — compute an operator arm's scalar (U_r·a) or (V·b) NOT as a dot reduction
+  //    but as the §7.90 binding: field-multiply A·B → soliton round-trip → read back → demod the response. The
+  //    medium computes the product. Writes the scalar into slot 'A'|'B' (the 1×1 the rest of the pipe consumes).
+  //    refKx/refKy = the demod carrier (0,0 → energy demod Σ|ψ|², the carrier-free lattice form). T = transit depth.
+  //    SAVES/RESTORES the eye field (the operator pipe doesn't use the eye ping-pong, but be safe). ─
+  opCycleBindArm(slot, aField64, bField64, { T = 12, refKx = 0, refKy = 0, dt = 0.12 } = {}) {
+    const gl = this._gl, G = this._G, N = G * G;
+    // §7.91-fix DEDICATED BIND BUFFERS: the binding's field-mul + soliton round-trip must NOT run on the eye
+    // ping-pong (the grow/self-evolve share it — concurrent round-trips corrupted the live field → genome decay).
+    // Point the eye-step machinery at the bind ping-pong for the duration, then restore. The eye field is untouched.
+    const sA = this._eyeA, sB = this._eyeB, sfA = this._fboEyeA, sfB = this._fboEyeB, sSrc = this._eyeSrc;
+    this._eyeA = this._bindPA; this._eyeB = this._bindPB; this._fboEyeA = this._fboBindPA; this._fboEyeB = this._fboBindPB; this._eyeSrc = this._bindSrc;
+    this.setEyePsi(aField64);            // ψ_bind = A
+    this.bindEyeField(bField64);         // §7.90 ψ_bind ·= B  (the medium product)
+    this.stepEyeN(T, dt); this.stepEyeN(T, -dt);   // soliton round-trip transports the bound field
+    const r = this.readEyePsi();
+    this._bindSrc = this._eyeSrc;        // remember the bind buffer's parity for next time
+    this._eyeA = sA; this._eyeB = sB; this._fboEyeA = sfA; this._fboEyeB = sfB; this._eyeSrc = sSrc;   // restore eye buffers untouched
+    let s = 0;
+    if (refKx === 0 && refKy === 0) { for (let i = 0; i < N; i++) s += Math.hypot(r[i*2], r[i*2+1]); }   // energy demod (carrier-free)
+    else { for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const i = y*G+x, ph = refKx*x + refKy*y; s += r[i*2]*Math.cos(ph) + r[i*2+1]*Math.sin(ph); } }
+    // write the scalar into the 1×1 slot — via the FBO clear (same target the dot pipe's _opColFinish renders to),
+    // NOT texSubImage2D on a possibly-still-bound texture (that didn't sync → the scatter shader read 0 → empty
+    // bound output, the §7.91 bug). glClear to a 1×1 RG32F attachment is immediate and correct.
+    const fbo = slot === 'A' ? this._opSclAFbo : this._opSclBFbo;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, 1, 1);
+    gl.clearColor(s, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return s;
+  }
+
+  // §7.58b (V·b): the static V probe (uploaded once to 'v') against the live b field → scalar slot 'B'.
+  opCycleDotVBToTex() {
+    this._opDotRowsPass(this._opTexV, this._opTexB);
+    this._opColFinish('B');
+  }
+
+  // §7.58b one fully-resident sub-tick: acc += (sclA·sclB)·atlasW[cyc % K], bar-start reset in-shader.
+  opCycleTickAtlas(cyc) {
+    const gl = this._gl, G = this._G, u = this._u.scatterMadAtlas;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccTmpFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progScatterMadAtlas);
+    gl.uniform1i(u.acc, 0); gl.uniform1i(u.atlasW, 1); gl.uniform1i(u.sA, 2); gl.uniform1i(u.sB, 3);
+    gl.uniform1i(u.cyc, cyc | 0); gl.uniform1i(u.K, this._opAtlasK);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opAcc);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, this._opAtlasW);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this._opSclA);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this._opSclB);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const t = this._opAcc; this._opAcc = this._opAccTmp; this._opAccTmp = t;
+    const f = this._opAccFbo; this._opAccFbo = this._opAccTmpFbo; this._opAccTmpFbo = f;
+  }
+
+  // one operator sub-tick, fully GPU-resident: acc += (sclA·sclB)·W — the scale formed in-shader from the
+  // two 1×1 scalar textures. `reset` clears the accumulation (start of a bar/cycle).
+  opCycleTickTex(reset) {
+    const gl = this._gl, G = this._G, u = this._u.scatterMadTex;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccTmpFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progScatterMadTex);
+    gl.uniform1i(u.acc, 0); gl.uniform1i(u.w, 1); gl.uniform1i(u.sA, 2); gl.uniform1i(u.sB, 3);
+    gl.uniform1f(u.reset, reset ? 1.0 : 0.0);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opAcc);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._opTexW);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this._opSclA);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this._opSclB);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // swap: the freshly written _opAccTmp becomes the live accumulation
+    const t = this._opAcc; this._opAcc = this._opAccTmp; this._opAccTmp = t;
+    const f = this._opAccFbo; this._opAccFbo = this._opAccTmpFbo; this._opAccTmpFbo = f;
+  }
+
+  // TELEMETRY/VERIFICATION ONLY (1-pixel readback, never in the data path): the live scalar in 'A'|'B'.
+  opCycleReadScalar(slot) {
+    const gl = this._gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, slot === 'A' ? this._opSclAFbo : this._opSclBFbo);
+    const out = new Float32Array(2); gl.readPixels(0, 0, 1, 1, gl.RG, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return out[0];
+  }
+
+  // ── §7.61 RESIDENT QUANTIZER: K×1 match row + 1×1 decision texel (winner, scalar, fired) on the GPU.
+  opCycleDecideInit(K) {
+    const gl = this._gl;
+    if (this._opMatch && this._opDecideK === K) return;
+    const mk = (w, h, fmt) => {
+      const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null); return [t, f];
+    };
+    [this._opMatch, this._opMatchFbo] = mk(K, 1, gl.RG32F);
+    [this._opDecision, this._opDecisionFbo] = mk(1, 1, gl.RGBA32F);
+    this._opDecideK = K;
+  }
+
+  // per tick: drop this rank's (sclA·sclB) into its match-row slot (scissored single-texel write; the
+  // slot index is clock arithmetic — conductor work; the VERDICT itself stays on the GPU).
+  opCycleMatchWrite(rank) {
+    const gl = this._gl, K = this._opDecideK, u = this._u.sclMul;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opMatchFbo); gl.viewport(0, 0, K, 1);
+    gl.enable(gl.SCISSOR_TEST); gl.scissor(rank, 0, 1, 1);
+    gl.useProgram(this._progSclMul);
+    gl.uniform1i(u.sA, 0); gl.uniform1i(u.sB, 1);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opSclA);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._opSclB);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // bar end: the LEVEL-RESTORED DECISION, in-shader — argmax + threshold over the match row → 1×1 texel.
+  opCycleDecide(theta) {
+    const gl = this._gl, u = this._u.opDecide;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDecisionFbo); gl.viewport(0, 0, 1, 1);
+    gl.useProgram(this._progOpDecide);
+    gl.uniform1i(u.match, 0); gl.uniform1i(u.K, this._opDecideK); gl.uniform1f(u.theta, theta);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opMatch);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // §7.62 one FIELD-SELECTED sub-tick: like opCycleTickAtlas, but the emitted W layer is chosen by the
+  // DECISION texture (the field's previous-bar verdict) and the emission is gated by its fired bit.
+  opCycleTickDecided(cyc) {
+    const gl = this._gl, G = this._G, u = this._u.scatterMadDecided;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opAccTmpFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progScatterMadDecided);
+    gl.uniform1i(u.acc, 0); gl.uniform1i(u.atlasW, 1); gl.uniform1i(u.sA, 2); gl.uniform1i(u.sB, 3); gl.uniform1i(u.decision, 4);
+    gl.uniform1i(u.cyc, cyc | 0); gl.uniform1i(u.K, this._opAtlasK);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._opAcc);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, this._opAtlasW);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this._opSclA);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this._opSclB);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this._opDecision);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const t = this._opAcc; this._opAcc = this._opAccTmp; this._opAccTmp = t;
+    const f = this._opAccFbo; this._opAccFbo = this._opAccTmpFbo; this._opAccTmpFbo = f;
+  }
+
+  // TESTIMONY: read the decided BITS (winner, scalar, fired) — JS receives the decision, not the analog.
+  opCycleReadDecision() {
+    const gl = this._gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDecisionFbo);
+    const out = new Float32Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { r: out[0] | 0, s: out[1], fired: out[2] > 0.5 };
+  }
 
   // read back the accumulation texture (the bound output) as Float64(N) real values.
   opCycleReadAcc() {
@@ -864,6 +1228,578 @@ export class IFSGpu {
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // §7.60: the nonlinear decision kick on the eye field — unitary intensity-thresholded phase rotation.
+  // Apply ONLY inside the dedicated nonlinear phase (the persistent engine's bar boundary); applying it
+  // during transport/binding phases would break the linearity those results depend on.
+  applyEyeNlKick(gamma, th, w) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.nlKick;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progNlKick);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.gamma, gamma); gl.uniform1f(u.th, th); gl.uniform1f(u.w, w);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── §7.90 Public: PURE-MEDIUM BINDING — multiply the eye field by an operand field B, in place, ON THE GPU
+  //    (complex ψ_eye·ψ_B per cell, no JS dot product). This is the operator's binding done AS A MEDIUM OPERATION:
+  //    the two fields interact cell-by-cell, the product becomes eye field content, and the soliton/IFS dynamics
+  //    then transport it (§9 proved propagating ψA·ψB recovers the A·B correlation). bField64 = Float64(2N) the
+  //    operand B (re,im interleaved). The medium operating on the medium — the "optical chip" in this substrate. ─
+  bindEyeField(bField64) {
+    const gl = this._gl, G = this._G, N = G * G;
+    // upload B into _bindB (RG float)
+    const fB = new Float32Array(2 * N); for (let j = 0; j < N; j++) { fB[j*2] = bField64[j*2]; fB[j*2+1] = bField64[j*2+1]; }
+    gl.bindTexture(gl.TEXTURE_2D, this._bindB);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, fB);
+    // ψ_eye ·= B  (ping-pong: read src, write dst, swap)
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.fieldMul;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progFieldMul);
+    gl.uniform1i(u.a, 0); gl.uniform1i(u.b, 1);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._bindB);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // §7.92 ROTATE the eye field by delta (rad) about each center pixel, within radius rad. One ping-pong pass — the
+  // θ-operator as a pure-medium field transform (resample, moves |ψ|). centers = Float array [x0,y0,x1,y1,...] in
+  // pixel coords (≤16). The medium operates on the medium: ψ_eye ← R_delta·ψ_eye locally about the mains.
+  rotateEyeCenters(delta, centers, rad) {
+    const gl = this._gl, G = this._G;
+    const n = Math.min(16, centers.length >> 1);
+    const flat = new Float32Array(32); for (let i = 0; i < n * 2; i++) flat[i] = centers[i];
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.rotCenters;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progRotCenters);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.delta, delta); gl.uniform1i(u.n, n);
+    gl.uniform2fv(u.centers, flat); gl.uniform1f(u.rad, rad); gl.uniform1i(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // §7.98 GENERAL METRIC OP: apply a FORWARD affine ψ'(x)=M·(x−c)+c+t about each center, within rad. m=[m00,m01,
+  // m10,m11] (forward 2×2), t=[tx,ty] (forward translation, px). Inverted host-side (the shader samples the pre-
+  // image). Covers rotate/scale/shear/translate with one pass — the §7.97 metric family. centers=[x0,y0,...] (≤16).
+  affineEyeCenters(m, t, centers, rad) {
+    const gl = this._gl, G = this._G;
+    const det = m[0]*m[3] - m[1]*m[2], id = Math.abs(det) > 1e-9 ? 1/det : 0;
+    const mi = [m[3]*id, -m[1]*id, -m[2]*id, m[0]*id];   // inverse 2×2
+    const ti = [mi[0]*t[0] + mi[1]*t[1], mi[2]*t[0] + mi[3]*t[1]];   // Minv·t (subtracted in pre-image coords)
+    const n = Math.min(16, centers.length >> 1);
+    const flat = new Float32Array(32); for (let i = 0; i < n * 2; i++) flat[i] = centers[i];
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.affineCenters;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progAffineCenters);
+    gl.uniform1i(u.psi, 0); gl.uniform4f(u.minv, mi[0], mi[1], mi[2], mi[3]); gl.uniform2f(u.tinv, ti[0], ti[1]);
+    gl.uniform1i(u.n, n); gl.uniform2fv(u.centers, flat); gl.uniform1f(u.rad, rad); gl.uniform1i(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── §7.102 Public: linOp (transform/mul form) on the eye field — ψ ·= e^{iφ}, one GPU pass, no readback. THE medium's
+  //    spatial operator content·e^{iφ} (here content=ψ, mode=mul), φ = linear k·r + genome-lens quadratic (focus/shear/
+  //    vortex). opts: { kx, ky, centers, a, beta, vtx }. centers=[] + lens coeffs=0 ⇒ pure linear carrier/θ-shift.
+  //    Proven byte-identical to the §7.98 lens shader (the lens IS linOp); the strict "the eye literally calls linOp" form.
+  linOp({ kx = 0, ky = 0, centers = null, a = 0, beta = 0, vtx = 0, phaseT = 0 } = {}) {
+    const gl = this._gl, G = this._G;
+    const n = centers ? Math.min(16, centers.length >> 1) : 0;
+    const flat = new Float32Array(32); for (let i = 0; i < n * 2; i++) flat[i] = centers[i];
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.lensGenome;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progLensGenome);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.n, n); gl.uniform2fv(u.centers, flat);
+    gl.uniform1f(u.a, a); gl.uniform1f(u.beta, beta); gl.uniform1f(u.vtx, vtx || 0); gl.uniform2f(u.k, kx, ky); gl.uniform1f(u.phaseT, phaseT);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // §7.98 back-compat alias: the genome lens IS linOp (mul, quadratic phase, no linear carrier).
+  applyEyeLensGenome(centers, a, beta, vtx) { this.linOp({ centers, a, beta, vtx }); }
+
+  // ── §7.82 Public: saturable SPM half-step on the eye field (the real _nlHalf). γ=0 ⇒ no-op (linear). ─
+  applyEyeNlSpm(gamma, isat, dt) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.nlSpm;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progNlSpm);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.gamma, gamma); gl.uniform1f(u.isat, isat); gl.uniform1f(u.dt, dt);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── §7.82 Public: driven-dissipative pass on the eye field (loss α + saturable gain pump→Pt). NON-unitary. ─
+  applyEyeDissip(alpha, pump, ptarget, dt) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.dissip;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progDissip);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.alpha, alpha); gl.uniform1f(u.pump, pump);
+    gl.uniform1f(u.ptarget, ptarget); gl.uniform1f(u.dt, dt);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── §7.86 Public: one cubic-quintic CGLE step on the eye field (the dissipative-soliton substrate). Params:
+  //    {delta,beta,dispd,eps,c3,mu,c5,dt}. Run every step; pair with applyEyeSoftPhaseWell at the BAR BOUNDARY
+  //    → the §7.86 phase-locked soliton (live, multi-symbol phase alphabet, peer-deterministic). ─
+  stepEyeCGLE(p) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.cgle;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progCgleStep);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.rings, 1);
+    gl.uniform1i(u.G, G); gl.uniform1i(u.nRings, this._nRings); gl.uniform1i(u.ringCount, this._ringCount);
+    gl.uniform4fv(u.ringMeta, this._ringMetaPadded);
+    gl.uniform1f(u.delta, p.delta); gl.uniform1f(u.beta, p.beta); gl.uniform1f(u.dispd, p.dispd);
+    gl.uniform1f(u.eps, p.eps); gl.uniform1f(u.c3, p.c3); gl.uniform1f(u.mu, p.mu); gl.uniform1f(u.c5, p.c5);
+    gl.uniform1f(u.cdt, p.dt);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._ringTex);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── §7.87 Public: iterate the Non-Linear Hutchinson Operator on the eye field. `maps` = [{s,theta,tx,ty,w}]
+  //    (affine contraction maps; tx,ty in [0,1) normalized coords). Runs `iters` iterations of
+  //    ψ' = tanh(Σ wᵢ ψ(fᵢ⁻¹(x))) on the eye ping-pong → collapses to the IFS attractor (the spatial symbol).
+  //    Peer-deterministic for ASYMMETRIC rule-sets; symmetric ones (RING) need a notch map (§7.87). ─
+  //    `anchor` (optional): { tex, scale, dom } → the GPU-resident auto-anchor (a dominant map at the argmax point
+  //    read from `tex`, the 1×1 argmax result). When present, base weights auto-scale to (1-dom) IN-SHADER.
+  iterateHutchinson(maps, iters, anchor = null) {
+    const gl = this._gl, G = this._G, n = Math.min(12, maps.length);
+    const A = new Float32Array(12 * 4), B = new Float32Array(12 * 4);
+    for (let i = 0; i < n; i++) { const m = maps[i], th = m.theta || 0;
+      A[i*4] = m.s; A[i*4+1] = Math.cos(th); A[i*4+2] = Math.sin(th); A[i*4+3] = m.tx;
+      B[i*4] = m.ty; B[i*4+1] = (m.w != null ? m.w : 1/n); }
+    const u = this._u.nlho;
+    for (let k = 0; k < iters; k++) {
+      const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+      const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.viewport(0, 0, G, G);
+      gl.useProgram(this._progNlhoStep);
+      gl.uniform1i(u.psi, 0); gl.uniform1i(u.G, G); gl.uniform1i(u.nMaps, n);
+      gl.uniform4fv(u.mapA, A); gl.uniform4fv(u.mapB, B);
+      if (anchor) { gl.uniform1i(u.anchorOn, 1); gl.uniform1i(u.anchorTex, 1);
+        gl.uniform1f(u.anchorScale, anchor.scale); gl.uniform1f(u.anchorDom, anchor.dom);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, anchor.tex); }
+      else gl.uniform1i(u.anchorOn, 0);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+      gl.bindVertexArray(this._vao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+    }
+  }
+
+  // ── §7.87 build the argmax pyramid textures (RGBA32F levels G, G/2, … , 1), lazily. ─
+  _ensureArgmaxPyramid() {
+    if (this._argLevels) return;
+    const gl = this._gl; let s = this._G; const lv = [];
+    const mk = (w) => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, w);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return { t, f, w }; };
+    while (s >= 1) { lv.push(mk(s)); if (s === 1) break; s = Math.ceil(s / 2); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._argLevels = lv;
+  }
+
+  // ── §7.87 PURE-GPU argmax of the current eye field's REAL channel → a 1×1 RGBA32F texture (maxVal, winX, winY).
+  //    INIT lifts field→(v,x,y); REDUCE max-pools the pyramid to 1×1. NO readback — the result texture is sampled
+  //    directly by the anchored NLHO step. Returns the 1×1 texture (this._argLevels[last].t). ─
+  gpuArgmax() {
+    this._ensureArgmaxPyramid();
+    const gl = this._gl, lv = this._argLevels, src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    // INIT: field → level 0 (v,x,y,1)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lv[0].f); gl.viewport(0, 0, lv[0].w, lv[0].w);
+    gl.useProgram(this._progArgmaxInit); gl.uniform1i(this._u.argInit.psi, 0);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    // REDUCE down the pyramid
+    const u = this._u.argReduce;
+    for (let i = 1; i < lv.length; i++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, lv[i].f); gl.viewport(0, 0, lv[i].w, lv[i].w);
+      gl.useProgram(this._progArgmaxReduce);
+      gl.uniform1i(u.src, 0); gl.uniform1i(u.inW, lv[i-1].w); gl.uniform1i(u.inH, lv[i-1].w);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, lv[i-1].t);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return lv[lv.length - 1].t;   // 1×1 (maxVal, winX, winY, valid)
+  }
+
+  // ── §7.88i write an EXPLICIT anchor coord (px) into the 1×1 argmax-result texture — bypasses the field-dependent
+  //    reduction so the anchor is a MACHINE-INDEPENDENT function of the rule-set (not the GPU's float32 argmax of a
+  //    degenerate field, which flipped per-machine for diffuse rule-sets → "same genome, different attractor").
+  setAnchorCoord(xPx, yPx) {
+    this._ensureArgmaxPyramid();
+    const gl = this._gl, t = this._argLevels[this._argLevels.length - 1].t;
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array([1.0, xPx, yPx, 1.0]));
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return t;
+  }
+
+  // ── §7.87 Public: AUTO-ANCHORED Hutchinson iteration — the GENERAL per-symbol fix, PURE GPU (no readback).
+  //    1) probe-iterate raw maps → expose the attractor peak; 2) gpuArgmax → 1×1 (winX,winY) texture; 3) re-seed,
+  //    run the full iteration with the anchor ON (a dominant map at the argmax point, added IN-SHADER from that
+  //    texture). The densest-point derivation is entirely GPU-resident — no glReadPixels in the path. Robust recipe
+  //    (measured §7.87): anchorScale≈0.20, dominance≈0.65. Diffuse rule-sets (RING, ladder) become peer-det. ─
+  iterateHutchinsonAnchored(maps, iters, { anchorScale = 0.20, dominance = 0.65, probeIters = 6, reseed = null, anchorPx = null } = {}) {
+    if (reseed) this.setEyePsi(reseed);
+    // anchorPx (px coord) = an EXPLICIT, machine-independent anchor (computed in JS from the rule-set). When given,
+    // skip the field-dependent GPU argmax (which flipped per-machine for degenerate/diffuse rule-sets). §7.88i.
+    let argTex;
+    if (anchorPx) { argTex = this.setAnchorCoord(anchorPx[0], anchorPx[1]); }
+    else { this.iterateHutchinson(maps, probeIters); argTex = this.gpuArgmax(); if (reseed) this.setEyePsi(reseed); }
+    this.iterateHutchinson(maps, iters, { tex: argTex, scale: anchorScale, dom: dominance });  // anchored run
+  }
+
+  // ── §7.87 Public: GROW an NLHO attractor (auto-anchored) from a rule-set and AREA-DOWNSAMPLE to an L×L genome
+  //    field (the OP-CYC operator's W grid). The attractor is peer-deterministic (auto-anchor) → every peer that
+  //    grows the SAME rule-set gets the SAME W, with NO wire traffic (the live-NLHO genome's peer-purity). The W
+  //    is MEAN-SUBTRACTED so its structure (not the saturated DC) is the content — matching the evolved-polar
+  //    phenotype class. `maps` = [{s,theta,tx,ty,w}]; `L` = output side (16). One readback — setup/mutation-time,
+  //    not per-frame (only when a rule-set is (re)grown). Returns Float64(L*L). ─
+  growNlhoGlyph(maps, L = 16, { iters = 14, seedSigma = 30, wantField = false } = {}) {
+    const G = this._G, N = G * G;
+    // §7.89b a DAMAGE-COLLAPSED rank (occlusion dropped all its maps) → no attractor: return an empty glyph/field.
+    if (!maps || maps.length === 0) { const out = new Float64Array(L * L); return wantField ? { W: out, field: new Float64Array(N), G } : out; }
+    // growing uses the eye ping-pong (setEyePsi/iterate/readEyePsi) — which is the LIVE travelling field. SAVE it,
+    // grow on it, RESTORE it, so a mutation/regrow does NOT corrupt the running soliton (panel 1 / the recon).
+    const saved = this.readEyePsi();
+    // deterministic seed (a centred gaussian) so the grown attractor is a pure function of the rule-set.
+    const seed = new Float64Array(N * 2);
+    const c = (G - 1) / 2;
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) seed[(y*G+x)*2] = 0.6 * Math.exp(-(((x-c)**2+(y-c)**2)) / (seedSigma * (G/64)));
+    // §7.88i ANALYTIC anchor (machine-independent): the IFS attractor's centre ≈ the mean of the maps' FIXED
+    // POINTS. Each map f(p)=s·R·p+t has fixed point ≈ t/(1-s) (rotation negligible for the centre). Computing it
+    // in JS (not the per-GPU argmax of a degenerate field) makes the grown attractor IDENTICAL on every peer.
+    let ax = 0, ay = 0, wsum = 0;
+    for (const m of maps) { const w = (m.w != null ? m.w : 1), d = Math.max(1e-3, 1 - m.s);
+      ax += w * m.tx / d; ay += w * m.ty / d; wsum += w; }
+    if (wsum > 0) { ax /= wsum; ay /= wsum; }
+    const anchorPx = [Math.max(0, Math.min(G-1, ax * G)), Math.max(0, Math.min(G-1, ay * G))];
+    this.iterateHutchinsonAnchored(maps, iters, { reseed: seed, anchorPx });
+    const f = this.readEyePsi();                         // Float64(2N) — real channel = the attractor
+    // area-downsample G×G → L×L (mean of each block), then mean-subtract.
+    const bs = G / L, out = new Float64Array(L * L);
+    for (let ly = 0; ly < L; ly++) for (let lx = 0; lx < L; lx++) { let s = 0, n = 0;
+      for (let dy = 0; dy < bs; dy++) for (let dx = 0; dx < bs; dx++) { const gx = lx*bs+dx, gy = ly*bs+dy;
+        if (gx < G && gy < G) { s += f[(gy*G+gx)*2]; n++; } }
+      out[ly*L+lx] = n ? s/n : 0; }
+    let m = 0; for (let i = 0; i < out.length; i++) m += out[i]; m /= out.length;
+    for (let i = 0; i < out.length; i++) out[i] -= m;     // mean-subtract: structure, not DC
+    // §7.88n: optionally also return the FULL-RESOLUTION attractor density (the real channel of the grown field,
+    // G×G, peer-deterministic by the same anchor). Unlike the 16×16 mean-subtracted W (a coarse genome), this is
+    // the actual PHENOTYPE GEOMETRY — the fractal density of the recalled rule-set — for echoing into panel 1.
+    let field = null;
+    if (wantField) { field = new Float64Array(N); for (let i = 0; i < N; i++) field[i] = f[i * 2]; }
+    this.setEyePsi(saved);                                // RESTORE the live field (grow was non-destructive)
+    return wantField ? { W: out, field, G } : out;
+  }
+
+  // ── §7.88cc Public: GPU CHAOS GAME — render the IFS attractor as a crisp point cloud (NOT the tanh field, which
+  //    saturates). Many PARALLEL chains (one per vertex), each seeded from gl_VertexID, iterated u_iters times in
+  //    the vertex shader, the final point splatted ADDITIVELY into a float accumulator; a 2nd pass log-normalizes.
+  //    Deterministic (seed = f(VertexID)). maps = [{s,theta,tx,ty,w}]. Returns {pixels, P} (RGBA P×P). §7.88dd: P
+  //    DEFAULTS TO THE HOLOGRAM GRID _G — the fractal is rendered at the SAME resolution the medium's NLS operations
+  //    (grow W, soliton transport) actually run at, so it's an HONEST view of what the medium computes, not a
+  //    prettied-up higher-res standalone. (Pass an explicit P only to deliberately over/under-sample.) ─
+  renderChaosGame(maps, { P = this._G, chains = 24000, iters = 14 } = {}) {
+    const gl = this._gl;
+    if (!maps || maps.length === 0) return { pixels: new Uint8Array((P * P) * 4), P };   // §7.89b damage-collapsed rank → blank canvas (the attractor is gone, because the code was in the destroyed field)
+    if (!this._progChaosPt) {
+      gl.getExtension('EXT_float_blend');   // additive blend INTO an R32F target (no-op if already core/unavailable)
+      // point program: vertex iterates the maps, fragment emits 1.0 (additive count)
+      const K = 8;   // max maps the shader handles (pad/ignore extras)
+      const vsrc = `#version 300 es
+        precision highp float;
+        uniform vec4 u_mapA[${K}];   // (s, theta, tx, ty)
+        uniform float u_cum[${K}];   // cumulative weights
+        uniform int   u_nmaps;
+        uniform int   u_iters;
+        uniform float u_seed;
+        uniform vec3  u_fit;   // §7.88dd (offX, offY, scale) — fit the attractor bbox into the frame (mutations slide it out)
+        float hash(float n){ return fract(sin(n*12.9898+u_seed)*43758.5453); }
+        void main(){
+          float id = float(gl_VertexID);
+          vec2 p = vec2(hash(id), hash(id+7.0));   // per-chain start
+          for(int it=0; it<64; it++){
+            if(it>=u_iters) break;
+            float u = hash(id + 13.0 + float(it)*1.7);
+            int k = 0; for(int j=0;j<${K};j++){ if(j<u_nmaps && u>u_cum[j]) k=j+1; }
+            if(k>=u_nmaps) k=u_nmaps-1;
+            vec4 m = u_mapA[k];
+            float ct=cos(m.y), sf=sin(m.y);
+            vec2 d = p-0.5;
+            p = vec2(m.x*(ct*d.x - sf*d.y)+m.z, m.x*(sf*d.x + ct*d.y)+m.w);
+          }
+          vec2 fp = (p - u_fit.xy) * u_fit.z;        // bbox-fit → [0,1]
+          gl_Position = vec4(fp*2.0-1.0, 0.0, 1.0);  // → clip; off-frame points clip away
+          gl_PointSize = 1.0;
+        }`;
+      const fsrc = `#version 300 es
+        precision highp float; out vec4 o; void main(){ o = vec4(1.0,0.0,0.0,1.0); }`;
+      const vs = this._compileShader(gl.VERTEX_SHADER, vsrc), fs = this._compileShader(gl.FRAGMENT_SHADER, fsrc);
+      const pr = gl.createProgram(); gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error('chaos pt link: ' + gl.getProgramInfoLog(pr));
+      this._progChaosPt = pr;
+      this._uChaos = { mapA: gl.getUniformLocation(pr,'u_mapA'), cum: gl.getUniformLocation(pr,'u_cum'),
+        nmaps: gl.getUniformLocation(pr,'u_nmaps'), iters: gl.getUniformLocation(pr,'u_iters'), seed: gl.getUniformLocation(pr,'u_seed'),
+        fit: gl.getUniformLocation(pr,'u_fit') };
+      // resolve program: log-normalize the accumulator → a TRUE DENSITY heatmap. §7.88dd: color AND brightness
+      // both encode the chaos-game DENSITY (the attractor's invariant measure) — nothing borrowed/faked. Ramp:
+      // black → deep blue → cyan → white as density rises (perceptual, monotone in luminance).
+      this._progChaosResolve = this._compileStep(`#version 300 es
+        precision highp float; uniform sampler2D u_acc; uniform float u_norm; in vec2 v_uv; out vec4 fragColor;
+        vec3 densityRamp(float t){           // 0=black, .35=deep blue, .7=cyan, 1=white
+          t = clamp(t, 0.0, 1.0);
+          vec3 c = mix(vec3(0.0,0.02,0.09), vec3(0.0,0.35,0.85), smoothstep(0.0,0.45,t));   // black→blue
+          c = mix(c, vec3(0.25,0.85,1.0), smoothstep(0.4,0.8,t));                            // →cyan
+          c = mix(c, vec3(1.0,1.0,1.0),  smoothstep(0.8,1.0,t));                             // →white (densest)
+          return c;
+        }
+        void main(){ float c = texture(u_acc, v_uv).r;   // density count (acc is P×P, viewport G×G — sample by UV)
+          float lv = c>0.0 ? log(1.0+c)*u_norm : 0.0; fragColor = vec4(densityRamp(min(lv,1.0)), 1.0); }`);
+      this._uChaosRes = { acc: gl.getUniformLocation(this._progChaosResolve,'u_acc'), norm: gl.getUniformLocation(this._progChaosResolve,'u_norm') };
+    }
+    // (re)alloc P×P float accumulator
+    if (!this._chaosAcc || this._chaosP !== P) {
+      if (this._chaosAcc) { gl.deleteTexture(this._chaosAcc); gl.deleteFramebuffer(this._fboChaos); }
+      this._chaosP = P; this._chaosAcc = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this._chaosAcc);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, P, P, 0, gl.RED, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      this._fboChaos = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboChaos);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._chaosAcc, 0);
+    }
+    // map params → uniforms
+    const K = 8, mapA = new Float32Array(K*4), cum = new Float32Array(K);
+    let wsum = 0; for (const m of maps) wsum += (m.w != null ? m.w : 1); let acc = 0;
+    for (let i = 0; i < Math.min(K, maps.length); i++) { const m = maps[i];
+      mapA[i*4]=m.s; mapA[i*4+1]=m.theta||0; mapA[i*4+2]=m.tx; mapA[i*4+3]=m.ty;
+      acc += (m.w != null ? m.w : 1)/wsum; cum[i]=acc; }
+    // §7.88dd AUTO-FIT: a quick CPU chaos-game pass to measure the attractor's real bbox (mutations slide tx,ty →
+    // the attractor drifts out of [0,1] and clips). Fit that bbox into the frame with a small pad. Same RNG as the
+    // shader's hash isn't needed — any sampling estimates the bbox; deterministic seed keeps the fit stable.
+    let mnX = 1/0, mnY = 1/0, mxX = -1/0, mxY = -1/0;
+    { let s = 0x12345 >>> 0; const rnd = () => { s = (s*1664525+1013904223)>>>0; return s/2**32; };
+      let px = rnd(), py = rnd();
+      for (let i = 0; i < 3000; i++) { const u = rnd(); let k = 0; while (k < maps.length-1 && u > cum[k]) k++;
+        const m = maps[k], ct = Math.cos(m.theta||0), sf = Math.sin(m.theta||0), dx = px-0.5, dy = py-0.5;
+        px = m.s*(ct*dx - sf*dy) + m.tx; py = m.s*(sf*dx + ct*dy) + m.ty;
+        if (i > 20) { if (px<mnX)mnX=px; if (px>mxX)mxX=px; if (py<mnY)mnY=py; if (py>mxY)mxY=py; } } }
+    const pad = 0.08, spanX = Math.max(1e-3, mxX-mnX), spanY = Math.max(1e-3, mxY-mnY), span = Math.max(spanX, spanY);
+    const scale = (1 - 2*pad) / span;
+    const cxA = (mnX+mxX)/2, cyA = (mnY+mxY)/2;                // attractor centre
+    const offX = cxA - 0.5/scale, offY = cyA - 0.5/scale;       // fit: (p-off)*scale maps centre→0.5, span→1-2pad
+    // PASS 1: additive splat into the accumulator
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboChaos); gl.viewport(0,0,P,P);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);   // additive accumulation
+    gl.useProgram(this._progChaosPt);
+    gl.uniform4fv(this._uChaos.mapA, mapA); gl.uniform1fv(this._uChaos.cum, cum);
+    gl.uniform1i(this._uChaos.nmaps, Math.min(K, maps.length)); gl.uniform1i(this._uChaos.iters, iters);
+    gl.uniform1f(this._uChaos.seed, 0.3137);
+    gl.uniform3f(this._uChaos.fit, offX, offY, scale);   // §7.88dd auto-fit the attractor bbox into the frame
+    gl.bindVertexArray(this._vao);   // no attributes used; gl_VertexID drives it
+    gl.drawArrays(gl.POINTS, 0, chains);
+    gl.disable(gl.BLEND);
+    // PASS 2: log-normalize → an RGBA8 colour texture at FULL P resolution (the chaos game's quality is its OWN P,
+    // DECOUPLED from the hologram grid _G — they only shared _gpuCanvas by coincidence, which capped it at _G). Then
+    // read it back to the chaos game's own ImageData so the caller blits a crisp P×P image, not a _G-downsampled one.
+    if (!this._chaosOut || this._chaosOutP !== P) {
+      if (this._chaosOut) { gl.deleteTexture(this._chaosOut); gl.deleteFramebuffer(this._fboChaosOut); }
+      this._chaosOutP = P; this._chaosOut = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this._chaosOut);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, P, P, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      this._fboChaosOut = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboChaosOut);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._chaosOut, 0);
+      this._chaosPixels = new Uint8Array(P * P * 4); this._chaosImageData = null;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fboChaosOut); gl.viewport(0, 0, P, P);
+    gl.useProgram(this._progChaosResolve);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._chaosAcc);
+    gl.uniform1i(this._uChaosRes.acc, 0);
+    const avg = Math.max(1, (chains * 1) / (P * P)); gl.uniform1f(this._uChaosRes.norm, 1.0 / Math.log(1 + 8 * avg));
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.readPixels(0, 0, P, P, gl.RGBA, gl.UNSIGNED_BYTE, this._chaosPixels);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { pixels: this._chaosPixels, P };   // caller draws this P×P RGBA into its cell (crisp, _G-independent)
+  }
+
+  // ── §7.84 Public: generative SOFT PHASE-WELL HEAL — rotate each cell's phase toward a q-well (|ψ| preserved),
+  //    with STATEFUL hysteresis against the PREVIOUS bar's healed field (the memory that makes it peer-deterministic
+  //    under propagation). Run ONCE PER BAR (not in the leapfrog). snap=pull 0..1, hold=separatrix deadband.
+  //    resetPhaseHeal() clears the memory (call before a fresh sequence). ─
+  resetPhaseHeal() { this._phHealHasPrev = false; }
+  applyEyeSoftPhaseWell(q, snap, hold) {
+    const gl = this._gl, G = this._G;
+    if (!this._phHealPrev) { this._phHealPrev = this._makeRGF32Tex(); this._phHealHasPrev = false; }
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.softPhaseWell;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progSoftPhaseWell);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.prev, 1);
+    gl.uniform1f(u.q, q); gl.uniform1f(u.snap, snap); gl.uniform1f(u.hold, hold);
+    gl.uniform1f(u.hasPrev, this._phHealHasPrev ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._phHealPrev);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+    // snapshot the healed field → memory for next bar (copy the new src into _phHealPrev)
+    const healed = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._eyeSrc === 'A' ? this._fboEyeA : this._fboEyeB);
+    gl.bindTexture(gl.TEXTURE_2D, this._phHealPrev);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, G, G);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._phHealHasPrev = true;
+  }
+
+  // ── §7.82 Public: GPU-resident additive clock forcing — ψ.re += amp·gaussian(centre). No readback/upload. ─
+  //    amp = A·cos(Ω·t)·dt (scalar, computed by caller); sig2 = mask variance (px²).
+  applyEyeAddForce(amp, sig2) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.addForce;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progAddForce);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.amp, amp); gl.uniform1f(u.sig2, sig2); gl.uniform1i(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── §7.82 Public: read a SINGLE eye pixel (re,im) — cheap probe for phase tracking (no full-field stall). ─
+  readEyePixel(x, y) {
+    const gl = this._gl;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeA : this._fboEyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const px = new Float32Array(2);
+    gl.readPixels(x, y, 1, 1, gl.RG, gl.FLOAT, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return px;
+  }
+
+  // ── §7.82 On-GPU phase accumulator — track an OBS pixel's unwrapped phase WITHOUT a per-step readback. ─
+  //    resetPhaseAccum() → accumPhaseStep(ox,oy) each step → readPhaseAccum() ONCE at the end. This is what
+  //    makes the dissipative-Arnold sweep fast at G=128 (the per-step glReadPixels sync was the wall).
+  _ensurePhaseAccum() {
+    if (this._phAccA) return;
+    const gl = this._gl;
+    const mk1 = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 1, 1);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return [t, f]; };
+    [this._phAccA, this._phAccAFbo] = mk1();
+    [this._phAccB, this._phAccBFbo] = mk1();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._phAccSrc = 'A';
+  }
+  resetPhaseAccum() {
+    this._ensurePhaseAccum();
+    const gl = this._gl;
+    gl.bindTexture(gl.TEXTURE_2D, this._phAccA);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array([0,0,0,0]));
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    this._phAccSrc = 'A';
+  }
+  accumPhaseStep(ox, oy) {
+    const gl = this._gl;
+    const psiTex = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const accSrc = this._phAccSrc === 'A' ? this._phAccA : this._phAccB;
+    const accFbo = this._phAccSrc === 'A' ? this._phAccBFbo : this._phAccAFbo;
+    const u = this._u.phaseAccum;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, accFbo);
+    gl.viewport(0, 0, 1, 1);
+    gl.useProgram(this._progPhaseAccum);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.acc, 1); gl.uniform1i(u.ox, ox); gl.uniform1i(u.oy, oy);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, psiTex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, accSrc);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._phAccSrc = this._phAccSrc === 'A' ? 'B' : 'A';
+  }
+  readPhaseAccum() {
+    const gl = this._gl;
+    const fbo = this._phAccSrc === 'A' ? this._phAccAFbo : this._phAccBFbo;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const px = new Float32Array(4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return px[1];   // total unwrapped phase
   }
 
   // ── Public: render |ψ_eye + α·obj| to the canvas, fully on GPU (no readback) ─
@@ -1663,6 +2599,133 @@ void main() {
   fragColor   = vec4(prev * u_decay + inten * (1.0 - u_decay), 0.0, 0.0, 1.0);
 }`;
 
+// §7.90 FIELD MULTIPLY — pointwise COMPLEX product ψ_eye · ψ_b, written back into the eye field. This is the
+// BINDING done as a MEDIUM operation: two field textures interact cell-by-cell on the GPU (no JS dot product),
+// the result IS field content that the soliton/IFS dynamics then transport (§9 proved propagating ψA·ψB recovers
+// the A·B correlation). The medium operates on the medium — the "optical chip" in THIS substrate's terms (soliton
+// lenses + IFS clocks, not orthogonal Fourier carriers). u_a = eye ψ, u_b = the second operand field.
+const GLSL_FIELD_MUL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_a;   // eye field ψ_A (.xy = re, im)
+uniform sampler2D u_b;   // operand field ψ_B
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 a = texelFetch(u_a, coord, 0).xy;
+  vec2 b = texelFetch(u_b, coord, 0).xy;
+  // complex multiply: (ar+i·ai)(br+i·bi) = (ar·br − ai·bi) + i(ar·bi + ai·br)
+  fragColor = vec4(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x, 0.0, 1.0);
+}`;
+
+// §7.92 ROTATE-ABOUT-CENTERS — the θ-operator as a pure-medium field transform. A coordinate REMAP (resample),
+// not a phase multiply: ψ'(x) = ψ( R⁻¹·(x−c) + c ) inside each main's annulus, with R = rotation by u_delta.
+// This is medium-native (a GPU field op, same class as FIELD_MUL) and MOVES |ψ| — so the integer peak-detect read
+// sees the satellite at its new angle (the §7.92 fix: phase couldn't move pixel-geometry data; a remap does).
+// Peer-pure by construction: u_delta is a shared constant, bilinear resample is fixed-function, centers are the
+// peer-identical main pixels. Outside every annulus the field passes through unchanged (rigid local rotation).
+const GLSL_ROTATE_CENTERS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_delta;          // rotation angle (rad), SHARED constant
+uniform int   u_n;              // number of centers
+uniform vec2  u_centers[16];    // main pixel coords (x,y), up to 16 maps
+uniform float u_rad;            // annulus outer radius (px) — the satellite ring + margin
+uniform int   u_G;
+out vec4 fragColor;
+vec2 fetchBilinear(vec2 p) {    // bilinear sample of ψ at fractional pixel p
+  vec2 f = floor(p), fr = p - f;
+  ivec2 i00 = ivec2(f);
+  vec2 a = texelFetch(u_psi, clamp(i00,            ivec2(0), ivec2(u_G-1)), 0).xy;
+  vec2 b = texelFetch(u_psi, clamp(i00+ivec2(1,0), ivec2(0), ivec2(u_G-1)), 0).xy;
+  vec2 c = texelFetch(u_psi, clamp(i00+ivec2(0,1), ivec2(0), ivec2(u_G-1)), 0).xy;
+  vec2 d = texelFetch(u_psi, clamp(i00+ivec2(1,1), ivec2(0), ivec2(u_G-1)), 0).xy;
+  return mix(mix(a,b,fr.x), mix(c,d,fr.x), fr.y);
+}
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 x = vec2(coord);
+  // which center's annulus is this pixel in? (nearest within u_rad; annuli shouldn't overlap by design)
+  int hit = -1; float bd = u_rad;
+  for (int i = 0; i < 16; i++) { if (i >= u_n) break;
+    float d = distance(x, u_centers[i]); if (d <= u_rad && d < bd) { bd = d; hit = i; } }
+  if (hit < 0) { fragColor = vec4(texelFetch(u_psi, coord, 0).xy, 0.0, 1.0); return; }
+  vec2 c = u_centers[hit], rel = x - c;
+  float cs = cos(-u_delta), sn = sin(-u_delta);   // INVERSE rotation (sample the pre-image)
+  vec2 src = vec2(cs*rel.x - sn*rel.y, sn*rel.x + cs*rel.y) + c;
+  fragColor = vec4(fetchBilinear(src), 0.0, 1.0);
+}`;
+
+// §7.98 AFFINE-ABOUT-CENTERS — the GENERAL metric operator (§7.97 prediction): ψ'(x)=ψ(Minv·(x−c−t)+c) inside each
+// main's annulus, where Minv = the INVERSE 2×2 linear map (sample the pre-image) and t = translation. Covers the
+// WHOLE affine family with one shader: rotation (Minv=R⁻¹), SCALE (Minv=diag(1/s) → s-channel), SHEAR, TRANSLATION
+// (t → tx,ty). Same residue-free metric op as §7.92 rotate (a coordinate remap, no second field) → predicted to
+// self-host + be peer-pure identically. The host passes the INVERSE map so the shader just samples the pre-image.
+const GLSL_AFFINE_CENTERS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform vec4  u_minv;           // inverse linear map [m00,m01,m10,m11], row-major (sample pre-image)
+uniform vec2  u_tinv;           // inverse translation (subtracted before the linear map)
+uniform int   u_n;
+uniform vec2  u_centers[16];
+uniform float u_rad;
+uniform int   u_G;
+out vec4 fragColor;
+vec2 fetchBilinear(vec2 p) {
+  vec2 f = floor(p), fr = p - f; ivec2 i00 = ivec2(f);
+  vec2 a = texelFetch(u_psi, clamp(i00,            ivec2(0), ivec2(u_G-1)), 0).xy;
+  vec2 b = texelFetch(u_psi, clamp(i00+ivec2(1,0), ivec2(0), ivec2(u_G-1)), 0).xy;
+  vec2 c = texelFetch(u_psi, clamp(i00+ivec2(0,1), ivec2(0), ivec2(u_G-1)), 0).xy;
+  vec2 d = texelFetch(u_psi, clamp(i00+ivec2(1,1), ivec2(0), ivec2(u_G-1)), 0).xy;
+  return mix(mix(a,b,fr.x), mix(c,d,fr.x), fr.y);
+}
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 x = vec2(coord);
+  int hit = -1; float bd = u_rad;
+  for (int i = 0; i < 16; i++) { if (i >= u_n) break;
+    float d = distance(x, u_centers[i]); if (d <= u_rad && d < bd) { bd = d; hit = i; } }
+  if (hit < 0) { fragColor = vec4(texelFetch(u_psi, coord, 0).xy, 0.0, 1.0); return; }
+  vec2 c = u_centers[hit], rel = (x - c) - u_tinv;
+  vec2 src = vec2(u_minv.x*rel.x + u_minv.y*rel.y, u_minv.z*rel.x + u_minv.w*rel.y) + c;
+  fragColor = vec4(fetchBilinear(src), 0.0, 1.0);
+}`;
+
+// §7.98 GENOME LENS PHASE-PLATE (GPU port of eye.js lensXform's per-pixel loop): at each cell, find the NEAREST
+// genome main (center), then multiply by the genome's compound phase about it — quadratic FOCUS a·(dx²+dy²),
+// cross-quadratic SHEAR β·dx·dy (the genome's satellite θ), and an optional OPTICAL VORTEX vtx·atan2(dy,dx).
+// One GPU pass, zero CPU readback → the "optical chip" lens runs natively (the recursive clock at frame rate).
+// §7.102 GPU linOp (transform/mul form): ψ ·= e^{iφ}, φ = LINEAR (kx·x+ky·y) + the GENOME-LENS QUADRATIC phase about
+// the nearest center (a·r² FOCUS + β·dx·dy SHEAR + vtx·atan2 VORTEX). The full content·e^{iφ} operator on the GPU,
+// φ spanning linear (carrier/θ-shift) → quadratic (the optical-chip lens). u_n=0 + lens coeffs=0 ⇒ pure linear carrier.
+const GLSL_LENS_GENOME = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform int   u_n;
+uniform vec2  u_centers[16];   // genome mains (px), already offset by (tx,ty) on the JS side
+uniform float u_a;             // quadratic focus coeff = (1-s)*0.06
+uniform float u_beta;          // cross-quadratic shear = theta*0.04
+uniform float u_vtx;           // vortex charge (0 = off)
+uniform vec2  u_k;             // §7.102 LINEAR carrier wavevector (kx,ky) — 0 = no carrier term
+uniform float u_phaseT;        // §7.101d/§7.102 TEMPORAL carrier phase ω·t — makes it SPACETIME content·e^{i(k·r+ωt)}. 0 = spatial-only.
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2  psi   = texelFetch(u_psi, coord, 0).xy;
+  if (psi.x == 0.0 && psi.y == 0.0) { fragColor = vec4(psi, 0.0, 1.0); return; }
+  vec2 x = vec2(coord);
+  float phi = u_k.x*x.x + u_k.y*x.y + u_phaseT;   // SPACETIME carrier k·r + ω·t (the §7.101d stamped-time axis; LOSSY — space exact, time disperses)
+  if (u_n > 0) {                        // + the QUADRATIC genome-lens phase about the nearest center
+    vec2 bc = u_centers[0]; float bd = 1e30;
+    for (int i = 0; i < 16; i++) { if (i >= u_n) break;
+      float d = distance(x, u_centers[i]); if (d < bd) { bd = d; bc = u_centers[i]; } }
+    vec2 dxy = x - bc;
+    phi += u_a*(dxy.x*dxy.x + dxy.y*dxy.y) + u_beta*dxy.x*dxy.y;
+    if (u_vtx != 0.0) phi += u_vtx * atan(dxy.y, dxy.x);
+  }
+  float cr = cos(phi), si = sin(phi);
+  fragColor = vec4(psi.x*cr - psi.y*si, psi.x*si + psi.y*cr, 0.0, 1.0);
+}`;
+
 // Thin lens phase mask: psi *= exp(i * kwave * r² / (2*f)), r² = (x-cx)²+(y-cy)²
 // Applied to sweep psi after backward propagation to focus reconstruction at depth f.
 const GLSL_LENS_PHASE = /* glsl */`#version 300 es
@@ -2058,6 +3121,509 @@ void main() {
   float prev = u_reset > 0.5 ? 0.0 : texelFetch(u_acc, coord, 0).x;
   float w    = texelFetch(u_w, coord, 0).x;
   fragColor  = vec4(prev + u_scale * w, 0.0, 0.0, 1.0);
+}`;
+
+// ── §7.58 GPU-RESIDENT SCALAR PIPE (bootstrap step 1) — the two shaders that close the JS scalar bus.
+//    (3) GLSL_COL_FINISH — completes the dot ON the GPU: sums the G row-sums (column 0 of the dot-rows
+//        texture) into ONE 1×1 texel. The old JS finish summed the same G values in a fixed JS-loop order;
+//        this sums them in a fixed shader-loop order — same serial-sum class, deterministic per device.
+//    (4) GLSL_SCATTER_MAD_TEX — scatter-MAD with the scale SAMPLED from two 1×1 scalar textures:
+//        acc += (U_r·a)(V_r·b)·W, the product formed in-shader. Per tick JS only issues draw calls;
+//        no scalar crosses to the CPU anywhere in the data path.
+const GLSL_COL_FINISH = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_rows;    // dot-rows output: texel (0,y) = row y's partial dot
+uniform int u_G;
+out vec4 fragColor;
+void main() {
+  float s = 0.0;
+  for (int y = 0; y < u_G; y++) s += texelFetch(u_rows, ivec2(0, y), 0).x;
+  fragColor = vec4(s, 0.0, 0.0, 1.0);
+}`;
+
+const GLSL_SCATTER_MAD_TEX = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_acc;     // current accumulation (R = value)
+uniform sampler2D u_w;       // the W_r field to add (R = value)
+uniform sampler2D u_sA;      // 1×1 scalar: (U_r·a)
+uniform sampler2D u_sB;      // 1×1 scalar: (V_r·b)
+uniform float u_reset;       // 1.0 = start fresh, 0.0 = accumulate
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  float prev  = u_reset > 0.5 ? 0.0 : texelFetch(u_acc, coord, 0).x;
+  float scale = texelFetch(u_sA, ivec2(0,0), 0).x * texelFetch(u_sB, ivec2(0,0), 0).x;
+  fragColor   = vec4(prev + scale * texelFetch(u_w, coord, 0).x, 0.0, 0.0, 1.0);
+}`;
+
+// ── §7.58b RANK ATLAS (bootstrap step 1, completed): the operator's GENOTYPE — all K ranks' U keys, the
+//    K bar-input keys a(bar mod K), and the K output carriers W_r — preloaded ONCE into 2D-ARRAY textures.
+//    The live rank AND the live bar-key are selected IN-SHADER from a single u_cyc integer (rank = cyc % K,
+//    key layer = (cyc/nBins) % K), and the accumulation reset (rank 0 = bar start) is computed in-shader
+//    too — selection is no longer a JS act at all. Per tick, JS uploads only the live b-arm field and
+//    issues 4 draws with one integer uniform: a fixed, content-blind render graph driven by the clock.
+//    This is the substrate for bootstrap step 3: once selection is in-shader, a DECISION texture can
+//    replace the clock uniform as the selector — field-gated branching with no JS in the loop.
+// ── §7.60 NONLINEAR DECISION KICK (bootstrap step 2): the medium's "transistor". A UNITARY, intensity-
+//    thresholded phase rotation ψ *= exp(i·γ·smoothstep(I_th, I_th+w, |ψ|²)) — phase-only (energy
+//    conserving, same family as GLSL_PLATE_PHASE_KICK) but SELECTIVE: only content whose local intensity
+//    crosses I_th acquires phase. Below threshold the medium stays exactly LINEAR (the wire — preserving
+//    every §7.32–7.45 exactness result); above it, bright structures mark THEMSELVES (the transistor).
+//    NEVER applied globally: confined to the dedicated NONLINEAR PHASE at the bar boundary (temporal-mux
+//    of the PHYSICS itself — linear phases for transport/binding, one nonlinear instant for decisions).
+//    The smoothstep width w is the analog band the level-restorer must out-margin (§7.59).
+// ── §7.62 FIELD-SELECTED EMISSION (bootstrap step 3 proper): the DECISION texture replaces the clock as
+//    the program selector. Sensing is unchanged (every rank's verdict still lands in the match row each
+//    bar), but the EMITTED output carrier W is chosen by the field's previous-bar decision — sampled
+//    in-shader from u_decision — and the whole emission is GATED by its fired bit: a vetoed bar emits
+//    NOTHING (not dimmed — off). The loop closes: medium verdict → decision texture → program selection →
+//    medium. JS carries time and the audit log; the choice itself never touches it.
+const GLSL_SCATTER_MAD_DECIDED = /* glsl */`#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+uniform sampler2D u_acc;
+uniform sampler2DArray u_atlasW;
+uniform sampler2D u_sA;          // 1×1: this tick's (U_r·a) — sensing scalar
+uniform sampler2D u_sB;          // 1×1: this tick's (V·b)
+uniform sampler2D u_decision;    // 1×1: (winner, scalar, fired) — the FIELD's previous-bar verdict
+uniform int u_cyc;
+uniform int u_K;
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int r = u_cyc % u_K;
+  float prev = (r == 0) ? 0.0 : texelFetch(u_acc, coord, 0).x;
+  vec3 dec   = texelFetch(u_decision, ivec2(0,0), 0).xyz;
+  int  wSel  = int(dec.x + 0.5);                                  // the program the FIELD chose
+  float scale = dec.z * texelFetch(u_sA, ivec2(0,0), 0).x * texelFetch(u_sB, ivec2(0,0), 0).x;   // gated by fired
+  fragColor = vec4(prev + scale * texelFetch(u_atlasW, ivec3(coord, wSel), 0).x, 0.0, 0.0, 1.0);
+}`;
+
+const GLSL_NL_KICK = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_gamma;   // phase depth (radians at full activation)
+uniform float u_th;      // intensity threshold I_th
+uniform float u_w;       // activation band width
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, coord, 0).xy;
+  float I  = psi.x*psi.x + psi.y*psi.y;
+  float ph = u_gamma * smoothstep(u_th, u_th + u_w, I);
+  float c = cos(ph), s = sin(ph);
+  fragColor = vec4(c*psi.x - s*psi.y, s*psi.x + c*psi.y, 0.0, 1.0);
+}`;
+
+// ── §7.82 LEAVE THE LINEAR/UNITARY LIMIT — the two passes that host the attractor-genome (§7.80/§7.81).
+//    The live medium runs LINEAR (GAMMA=0) + CONSERVATIVE (unitary leapfrog). §7.80/§7.81 proved the
+//    attractor-genome (a clock-mode-locked limit cycle whose rational rotation number is the heritable symbol)
+//    needs BOTH: (a) nonlinearity to create Arnold tongues, (b) dissipation to make them peer-deterministic.
+//    These are the two GPU passes; each ping-pongs the eye field exactly like applyEyeNlKick.
+//
+//  (a) GLSL_NL_SPM — the real _nlHalf: saturable self-phase modulation ψ → ψ·exp(−i·g·dt), g = γ·|ψ|²/(1+|ψ|²/Isat).
+//      UNITARY (phase only, conserves |ψ| per cell). γ=0 ⇒ identity = the live linear medium. Makes the tongues.
+const GLSL_NL_SPM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_gamma;   // SPM strength γ
+uniform float u_isat;    // saturation intensity Isat
+uniform float u_dt;      // step (this is a HALF step in the Strang split; caller passes dt/2 or dt as needed)
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float a2 = psi.x*psi.x + psi.y*psi.y;
+  float g  = u_gamma * a2 / (1.0 + a2 / u_isat);
+  float ph = -g * u_dt;
+  float cs = cos(ph), sn = sin(ph);
+  fragColor = vec4(cs*psi.x - sn*psi.y, sn*psi.x + cs*psi.y, 0.0, 1.0);
+}`;
+
+//  (b) GLSL_DISSIP — driven-dissipative amplitude relaxation: ψ → ψ·exp((−α + pump·max(0,1−|ψ|²/Pt))·dt).
+//      NON-UNITARY (a saturable gain/absorber = a CGL-style cavity). α=loss, pump+Pt=saturable gain toward
+//      target intensity Pt. This is what CONTRACTS peer divergence onto the locked tongue (§7.80 escape hatch:
+//      residual peer-Δ scales LINEARLY with the seed perturbation = a contracting map, not chaos).
+const GLSL_DISSIP = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_alpha;   // linear loss α
+uniform float u_pump;    // saturable gain strength
+uniform float u_ptarget; // gain target intensity Pt
+uniform float u_dt;
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float a2 = psi.x*psi.x + psi.y*psi.y;
+  float gain = -u_alpha + u_pump * max(0.0, 1.0 - a2 / u_ptarget);
+  float s = exp(gain * u_dt);
+  fragColor = vec4(s*psi.x, s*psi.y, 0.0, 1.0);
+}`;
+
+//  (c) GLSL_ADD_FORCE — additive clock forcing on Re, GPU-resident: ψ.re += u_amp·exp(−r²/u_sig2) (centred mask).
+//      Keeps the dissipative-Arnold step fully on-GPU (no per-step readback/upload). u_amp = A·cos(Ω·t)·dt,
+//      computed CPU-side once per step (a scalar) and passed as a uniform. This is also the pass a LIVE wiring
+//      needs (the clock injecting into the medium without a JS round-trip).
+const GLSL_ADD_FORCE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_amp;     // A·cos(Ω·t)·dt this step (scalar)
+uniform float u_sig2;    // gaussian mask variance (px²)
+uniform int   u_G;
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float dx = float(c.x) - float(u_G)*0.5, dy = float(c.y) - float(u_G)*0.5;
+  float m  = exp(-(dx*dx + dy*dy) / u_sig2);
+  fragColor = vec4(psi.x + u_amp*m, psi.y, 0.0, 1.0);
+}`;
+
+//  (d) GLSL_PHASE_ACCUM — on-GPU phase-unwrap accumulator (PERF: read back ONCE per run, not per step).
+//      Samples the OBS pixel of u_psi, the previous accumulator state in u_acc (1×1: .x=prevAngle .y=total
+//      .z=hasPrev), computes the wrapped Δ, accumulates. Removes the per-step glReadPixels sync that was the
+//      G=128 bottleneck. Reset by uploading (0,0,0); after T steps, readPhaseAccum().y = total unwrapped phase.
+const GLSL_PHASE_ACCUM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_acc;   // 1×1: (prevAngle, total, hasPrev, _)
+uniform int u_ox;
+uniform int u_oy;
+out vec4 fragColor;
+const float PI = 3.14159265358979;
+void main() {
+  vec2 p = texelFetch(u_psi, ivec2(u_ox, u_oy), 0).xy;
+  float a = atan(p.y, p.x);
+  vec3 s = texelFetch(u_acc, ivec2(0,0), 0).xyz;   // prev, total, hasPrev
+  float total = s.y;
+  if (s.z > 0.5) {
+    float d = a - s.x;
+    d -= 2.0*PI * floor((d + PI) / (2.0*PI));       // wrap to (−π,π]
+    total += d;
+  }
+  fragColor = vec4(a, total, 1.0, 1.0);
+}`;
+
+// ── §7.83 PHASE-WELL QUANTIZER — the N-ary, pk-invariant, tileable successor to GLSL_NL_QUANTIZE.
+//    Each cell's PHASE (arg ψ) snaps to one of q wells at 2πk/q (a local cos(qφ) potential's minima). The symbol
+//    is the well index → a q-symbol alphabet PER CELL (vs §7.77's binary), pk-INVARIANT (phase ignores |ψ| — no
+//    snap-to-snap drift), LOCAL (each cell decides alone → tiles to a q^M register, unlike non-local winding), and
+//    INSTANT (a snap, not Arnold's multi-cycle lock). HYSTERESIS (the §7.77 fix, generalized N-ary): a cell keeps
+//    its PREVIOUS well unless the phase is past the basin boundary by an arc margin u_hold — this tames the
+//    separatrix knife-edge (probe: bare snap flips ~25% of boundary cells at eps=1e-6; with hold → 0 to eps=1e-1).
+//    u_psi = complex field (arg = the symbol carrier); u_prev = previous symbol index (R channel, the hysteresis
+//    memory); u_q = #wells; u_hold = hold-band arc (radians). Output R = the restored symbol index (0..q-1).
+const GLSL_PHASE_WELL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;     // complex field; arg(ψ) is the symbol
+uniform sampler2D u_prev;    // previous symbol index per cell (R ∈ {0..q-1}) — hysteresis memory
+uniform float u_q;           // number of phase wells
+uniform float u_hold;        // hold-band: arc (rad) the phase must pass the boundary by to switch wells
+out vec4 fragColor;
+const float TAU = 6.28318530717959;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float phi = atan(psi.y, psi.x);                 // (−π,π]
+  if (phi < 0.0) phi += TAU;                       // [0,2π)
+  float step = TAU / u_q;
+  float nf   = floor(phi / step + 0.5);            // nearest well index (real)
+  int nearest = int(mod(nf, u_q));
+  int prev = int(texelFetch(u_prev, c, 0).x + 0.5);
+  int sym;
+  if (prev < 0 || prev >= int(u_q + 0.5)) {
+    sym = nearest;                                  // no valid previous → take nearest
+  } else if (nearest == prev) {
+    sym = prev;
+  } else {
+    // angular distance phi→well(k), on the circle
+    float dPrev = abs(phi - float(prev)*step); dPrev = min(dPrev, TAU - dPrev);
+    float dNew  = abs(phi - float(nearest)*step); dNew = min(dNew, TAU - dNew);
+    sym = (dNew < dPrev - u_hold) ? nearest : prev; // switch only if CLEARLY past the boundary (hysteresis)
+  }
+  fragColor = vec4(float(sym), 0.0, 0.0, 1.0);
+}`;
+
+// ── §7.84 SOFT PHASE-WELL HEAL — the GENERATIVE form of GLSL_PHASE_WELL for the LIVE travelling field.
+//    GLSL_PHASE_WELL (§7.83) READS a symbol (degenerate on the real operator patch: R≈0.9, mono-phase). This one
+//    WRITES instead: it gently rotates each cell's PHASE toward the nearest of q wells, preserving |ψ| (pk-invariant
+//    by construction). Run ONCE PER BAR at the boundary (the §7.60 nonlinear-decision slot) — NOT in the leapfrog
+//    (snapping every dt would destroy the linear superposition the wave needs to propagate/diffract/correlate;
+//    the medium stays exactly linear between boundaries, one non-unitary instant per bar). Over bars the field
+//    HEALS to the alphabet → the phase distribution becomes multi-symbol the passive harvest couldn't find.
+//    u_snap = pull strength (1.0 hard quantize, ~0.2 soft continuous pull — keeps the field analog). u_hold =
+//    deadband (fraction of a half-well, 0..0.5): cells within u_hold of a separatrix are NOT pulled (the §7.83
+//    hysteresis, stateless form — refuse to commit on the knife-edge, let the next bar decide). PROBE-GATED:
+//    soft-snap embedded in PROPAGATION is a new dynamical system; peer-determinism under transport is unmeasured
+//    until phaseHealTest passes.
+const GLSL_SOFT_PHASE_WELL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;     // current field
+uniform sampler2D u_prev;    // PREVIOUS bar's healed field — the hysteresis MEMORY (its phase = the held well)
+uniform float u_q;        // #wells
+uniform float u_snap;     // pull strength 0..1
+uniform float u_hold;     // deadband as fraction of half-well (0..0.5)
+uniform float u_hasPrev;  // 1.0 if u_prev is valid (after bar 0)
+out vec4 fragColor;
+const float TAU = 6.28318530717959;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float amp = length(psi);
+  if (amp < 1e-6) { fragColor = vec4(psi, 0.0, 1.0); return; }   // don't snap vacuum
+  float phase = atan(psi.y, psi.x); if (phase < 0.0) phase += TAU;
+  float step = TAU / u_q;
+  float wellSpace = phase / step;
+  float nearest   = floor(wellSpace + 0.5);
+  float distSep   = abs(wellSpace - floor(wellSpace) - 0.5);     // 0=on separatrix, 0.5=on a well centre
+  // STATEFUL HYSTERESIS (the fix the stateless deadband lacked): in the deadband near a separatrix, snap toward
+  // the PREVIOUS bar's well (derived from u_prev's phase), not the ambiguous 'nearest'. Outside the deadband,
+  // commit to nearest. This is the §7.83 phase-Schmitt made stateful across PROPAGATION — the previous healed
+  // field IS the memory, so float drift that rotated a cell across the boundary can't flip its symbol.
+  float target;
+  if (u_hasPrev > 0.5 && distSep < u_hold) {
+    vec2 pv = texelFetch(u_prev, c, 0).xy;
+    float pphase = atan(pv.y, pv.x); if (pphase < 0.0) pphase += TAU;
+    float pWell = floor(pphase / step + 0.5);                    // the held well index
+    target = pWell * step;                                       // hold the previous symbol
+  } else {
+    target = nearest * step;                                     // commit to nearest
+  }
+  float d = target - phase; d -= TAU * floor((d + TAU*0.5) / TAU);   // short arc, wrap (−π,π]
+  float finalPhase = phase + u_snap * d;
+  fragColor = vec4(amp * cos(finalPhase), amp * sin(finalPhase), 0.0, 1.0);
+}`;
+
+// ── §7.86 CUBIC-QUINTIC CGLE STEP — the dissipative-soliton substrate, on the GPU. One explicit-Euler step of
+//    ψ_t = δ·ψ + (β + i·d)·∇²ψ + (ε + i·c3)|ψ|²·ψ + (μ + i·c5)|ψ|⁴·ψ  (∇² = ring-Laplacian, the live medium's).
+//    δ linear loss (<0), β spectral filter, d dispersion, ε cubic GAIN (>0), μ quintic LOSS (<0) → amplitude is
+//    PINNED to a dissipative-soliton attractor that scrubs amplitude+position peer-divergence (§7.85 fieldCorr=1.0).
+//    Combined with GLSL_SOFT_PHASE_WELL at the BAR BOUNDARY (not every step) → the §7.86 phase-locked soliton:
+//    a LIVE, multi-symbol (q-ary phase), peer-deterministic alphabet. Matches the §7.86 CPU probe exactly.
+const GLSL_CGLE_STEP = /* glsl */`#version 300 es
+precision highp float;
+precision highp int;
+precision highp isampler2D;
+${GLSL_UNIFORMS}
+in vec2 v_uv;
+out vec4 fragColor;
+${GLSL_LAP_FUNC}
+uniform float u_delta, u_beta, u_dispd, u_eps, u_c3, u_mu, u_c5, u_cdt;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2  psi = texelFetch(u_psi, coord, 0).xy;
+  float re = psi.x, im = psi.y;
+  float lapRe = ringLap(u_psi, coord, 0, u_rings, u_nRings, u_ringCount);
+  float lapIm = ringLap(u_psi, coord, 1, u_rings, u_nRings, u_ringCount);
+  float a2 = re*re + im*im, a4 = a2*a2;
+  // linear: δψ + (β + i d)∇²ψ
+  float dr = u_delta*re + u_beta*lapRe - u_dispd*lapIm;
+  float di = u_delta*im + u_beta*lapIm + u_dispd*lapRe;
+  // cubic: (ε + i c3)|ψ|²ψ
+  dr += u_eps*a2*re - u_c3*a2*im;   di += u_eps*a2*im + u_c3*a2*re;
+  // quintic: (μ + i c5)|ψ|⁴ψ
+  dr += u_mu*a4*re - u_c5*a4*im;    di += u_mu*a4*im + u_c5*a4*re;
+  fragColor = vec4(re + u_cdt*dr, im + u_cdt*di, 0.0, 1.0);
+}`;
+
+// ── §7.87 NON-LINEAR HUTCHINSON OPERATOR (NLHO) STEP — the native-IFS spatial quantizer. One iteration of
+//    ψ'(x) = tanh( Σ wᵢ · ψ(fᵢ⁻¹(x)) ), where fᵢ are affine contraction maps. Mapping many source pixels → one
+//    dest is non-invertible = real contraction; iterating collapses the field to the IFS fractal ATTRACTOR (the
+//    symbol). The tanh is the saturable amplitude pin. Run ~8 iterations at the bar boundary. Peer-deterministic
+//    for ASYMMETRIC attractors (a unique structural datum); symmetric/featureless rule-sets need a notch (§7.87).
+//    Maps in u_maps: per map [s, cosθ, sinθ, tx], with ty,w packed via parallel arrays (GLSL vec4 + 2 floats).
+//    We pack each map as TWO vec4s: A=(s, cosθ, sinθ, tx), B=(ty, w, 0, 0). u_nMaps = count.
+const GLSL_NLHO_STEP = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform vec4 u_mapA[12];   // per map: (s, cosθ, sinθ, tx)
+uniform vec4 u_mapB[12];   // per map: (ty, w, _, _)
+uniform int  u_nMaps;
+uniform int  u_G;
+// §7.87 GPU-resident auto-anchor: when u_anchorOn=1, an extra dominant map is added IN-SHADER whose fixed point is
+// read from u_anchorTex (a 1×1 RGBA32F = argmax result: .y=winX px, .z=winY px). No JS placement — the anchor
+// coord comes from the GPU argmax reduction. u_anchorScale, u_anchorDom = the §7.87 robust recipe (0.20, 0.65).
+uniform sampler2D u_anchorTex;
+uniform int   u_anchorOn;
+uniform float u_anchorScale;
+uniform float u_anchorDom;
+out vec4 fragColor;
+// manual bilinear sample of the REAL channel at fractional pixel (fx,fy), wrap.
+float samp(vec2 f) {
+  float G = float(u_G);
+  float x0 = floor(f.x), y0 = floor(f.y), ax = f.x - x0, ay = f.y - y0;
+  ivec2 p00 = ivec2(int(mod(x0, G)),     int(mod(y0, G)));
+  ivec2 p10 = ivec2(int(mod(x0+1.0, G)), int(mod(y0, G)));
+  ivec2 p01 = ivec2(int(mod(x0, G)),     int(mod(y0+1.0, G)));
+  ivec2 p11 = ivec2(int(mod(x0+1.0, G)), int(mod(y0+1.0, G)));
+  float v00 = texelFetch(u_psi, p00, 0).x, v10 = texelFetch(u_psi, p10, 0).x;
+  float v01 = texelFetch(u_psi, p01, 0).x, v11 = texelFetch(u_psi, p11, 0).x;
+  return v00*(1.0-ax)*(1.0-ay) + v10*ax*(1.0-ay) + v01*(1.0-ax)*ay + v11*ax*ay;
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  float Gf = float(u_G);
+  float nx = float(c.x) / Gf, ny = float(c.y) / Gf;   // dest in [0,1)
+  // base-map total weight scale: when anchored, base maps share (1-dom), anchor gets dom.
+  float baseScale = (u_anchorOn == 1) ? (1.0 - u_anchorDom) : 1.0;
+  float acc = 0.0;
+  for (int i = 0; i < 12; i++) {
+    if (i >= u_nMaps) break;
+    float s = u_mapA[i].x, co = u_mapA[i].y, si = u_mapA[i].z, tx = u_mapA[i].w;
+    float ty = u_mapB[i].x, w = u_mapB[i].y * baseScale;
+    float qx = (nx - tx)/s, qy = (ny - ty)/s;
+    vec2 src = vec2(co*qx + si*qy, -si*qx + co*qy);
+    acc += w * samp(src * Gf);
+  }
+  // GPU-resident anchor: one dominant localized map at the argmax point (read from u_anchorTex). fixed pt =
+  // (winX,winY)/G; for f(p)=s·p+t with no rotation, t = (1-s)·target ⇒ inverse src = (dest - t)/s.
+  if (u_anchorOn == 1) {
+    vec4 am = texelFetch(u_anchorTex, ivec2(0,0), 0);   // (maxVal, winX, winY, _)
+    float ax2 = am.y / Gf, ay2 = am.z / Gf;             // anchor target in [0,1)
+    float s = u_anchorScale, tx = (1.0 - s)*ax2, ty = (1.0 - s)*ay2;
+    vec2 src = vec2((nx - tx)/s, (ny - ty)/s);
+    acc += u_anchorDom * samp(src * Gf);
+  }
+  float v = tanh(acc);
+  fragColor = vec4(v, 0.0, 0.0, 1.0);   // real-valued attractor field (symbol carrier)
+}`;
+
+// ── §7.87 ARGMAX REDUCTION — find the densest texel's (value, x, y) PURELY on GPU (no readback). Two shaders:
+//    INIT lifts the field into (val, x, y, 1) per texel; REDUCE max-pools 2×2 blocks carrying the WINNING coord
+//    down a pyramid to 1×1. The NLHO step then reads the anchor coord from that 1×1 texture (u_anchorTex) — so the
+//    whole auto-anchor (find peak → place dominant anchor there) is GPU-resident; no glReadPixels in the path.
+const GLSL_ARGMAX_INIT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;   // field; REAL channel = the value to argmax
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  float v = texelFetch(u_psi, c, 0).x;
+  fragColor = vec4(v, float(c.x), float(c.y), 1.0);   // (value, x, y, valid)
+}`;
+const GLSL_ARGMAX_REDUCE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_src;   // (val,x,y,valid) at the finer level
+uniform int u_inW, u_inH;  // dimensions of the finer (input) level
+out vec4 fragColor;
+void main() {
+  ivec2 d = ivec2(gl_FragCoord.xy);   // dest texel in the coarser level
+  ivec2 b = d * 2;                    // top-left of the 2×2 block in the input
+  vec4 best = vec4(-1e30, 0.0, 0.0, 0.0);
+  for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
+    ivec2 p = b + ivec2(dx, dy);
+    if (p.x >= u_inW || p.y >= u_inH) continue;   // ragged edge (odd dims)
+    vec4 s = texelFetch(u_src, p, 0);
+    if (s.w < 0.5) continue;
+    // §7.88i DETERMINISTIC TIE-BREAK: a degenerate field (multiple near-equal peaks — diffuse/symmetric rule-sets
+    // like the spiral/diagonal) makes a strict '>' resolve DIFFERENTLY per GPU's float32 rounding → the anchor
+    // lands elsewhere → a totally different attractor (the "same genome, different image" for SOME ranks). Fix:
+    // within an epsilon band treat values as TIED and pick by LOWER linear coordinate (a rule every GPU agrees on).
+    if (best.w < 0.5) { best = vec4(s.x, s.y, s.z, 1.0); continue; }
+    float EPS = 1e-5;
+    if (s.x > best.x + EPS) best = vec4(s.x, s.y, s.z, 1.0);            // clearly bigger
+    else if (s.x > best.x - EPS) {                                      // ~tie → lowest coord wins (deterministic)
+      float si = s.y + s.z * float(u_inW), bi = best.y + best.z * float(u_inW);
+      if (si < bi) best = vec4(s.x, s.y, s.z, 1.0);
+    }
+  }
+  fragColor = best;
+}`;
+
+// ── §7.77 BISTABLE PHYSICAL QUANTIZER — the per-cell genome level-restorer moved from JS into the medium.
+//    The §7.65 "sticky quantizer" in _opCycHarvest (h>0.6·pk → 1, h<0.4·pk → 0, else KEEP previous) is a
+//    Schmitt trigger: two thresholds + a HOLD region. The hold region (hysteresis) is what makes the verdict
+//    PEER-DETERMINISTIC — a cell on the knife-edge keeps its previous bit on every peer, so float32 drift can't
+//    flip it (probe-verified: hard threshold breaks at ~1e-3 field divergence, the hysteretic form stays
+//    bit-identical to 3e-2). This shader IS that Schmitt, as physics: u_psi = current field, u_prev = the
+//    previous bit-field (W, the hysteresis memory), u_pk = the patch peak |ψ| (normalizer, computed once on the
+//    CPU/GPU readback). The cell relaxes its AMPLITUDE toward the 0-well or 1-well (NON-unitary — a saturable
+//    gain/absorber: it pumps cells to 0 or 1, unlike the unitary §7.60 kick which only rotates phase). Output's
+//    real channel = the restored bit level (0 or 1) so the harvest reads an already-quantized field — the
+//    medium computes the verdict, not a JS `if`. The two wells + hold-band = a bistable element with memory.
+const GLSL_NL_QUANTIZE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;    // current field (complex; |ψ| is the harvest amplitude h)
+uniform sampler2D u_prev;   // previous bit-field W (R channel ∈ {0,1}) — the hysteresis memory
+uniform float u_pk;         // patch peak |ψ| (h normalized to this, matching _opCycHarvest)
+uniform float u_thLo;       // low threshold (×pk): below → 0-well   (§7.65 = 0.4)
+uniform float u_thHi;       // high threshold (×pk): above → 1-well  (§7.65 = 0.6)
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float h  = length(psi) / max(1e-9, u_pk);          // normalized amplitude (= h/pk in the JS harvest)
+  float prev = texelFetch(u_prev, c, 0).x;           // previous bit (0 or 1) — hysteresis memory
+  // SCHMITT decision: above hi → 1-well, below lo → 0-well, in the hold band → keep previous (the bistable hold).
+  float bit = h > u_thHi ? 1.0 : (h < u_thLo ? 0.0 : prev);
+  fragColor = vec4(bit, 0.0, 0.0, 1.0);              // level-restored: the cell sits in its well (0 or 1)
+}`;
+
+// ── §7.61 THE RESIDENT QUANTIZER (bootstrap step 3, core): the level-restored DECISION computed ON the
+//    GPU. Per tick a scissored write drops this rank's (U_r·a)(V·b) into its slot of a K×1 MATCH row; at
+//    bar end GLSL_OP_DECIDE runs argmax + threshold over the row into a 1×1 DECISION texel
+//    (winner, best, fired). JS reads back BITS — the decided texel — never the analog scalars: the
+//    testimony layer now carries decisions only. The decision texture is also the step-3 selector-in-
+//    waiting: a GLSL_OP_DOT_UA_ROWS variant that samples it instead of u_cyc makes the FIELD choose the
+//    next program — field-gated branching with no JS in the loop.
+const GLSL_SCL_MUL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_sA;
+uniform sampler2D u_sB;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(texelFetch(u_sA, ivec2(0,0), 0).x * texelFetch(u_sB, ivec2(0,0), 0).x, 0.0, 0.0, 1.0);
+}`;
+
+const GLSL_OP_DECIDE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_match;   // K×1 row: per-rank (U_r·a)(V·b) for this bar
+uniform int u_K;
+uniform float u_theta;       // the level-restorer's threshold (margins ≫ drift)
+out vec4 fragColor;
+void main() {
+  float best = -1.0e30; int win = 0;
+  for (int k = 0; k < u_K; k++) { float s = texelFetch(u_match, ivec2(k, 0), 0).x; if (s > best) { best = s; win = k; } }
+  fragColor = vec4(float(win), best, best > u_theta ? 1.0 : 0.0, 1.0);   // (winner, scalar, fired)
+}`;
+
+const GLSL_OP_DOT_UA_ROWS = /* glsl */`#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+uniform sampler2DArray u_atlasU;   // K layers: stored rank keys U_r (normalized)
+uniform sampler2DArray u_atlasA;   // K layers: bar input keys a(bar mod K) (raw masks)
+uniform int u_cyc;
+uniform int u_K;
+uniform int u_nBins;
+uniform int u_G;
+out vec4 fragColor;
+void main() {
+  int y  = int(gl_FragCoord.y);
+  int rU = u_cyc % u_K;               // live rank — selected by the clock, in-shader
+  int rA = (u_cyc / u_nBins) % u_K;   // this bar's input key (melody is K-bar periodic)
+  float s = 0.0;
+  for (int x = 0; x < u_G; x++)
+    s += texelFetch(u_atlasU, ivec3(x, y, rU), 0).x * texelFetch(u_atlasA, ivec3(x, y, rA), 0).x;
+  fragColor = vec4(s, 0.0, 0.0, 1.0);
+}`;
+
+const GLSL_SCATTER_MAD_ATLAS = /* glsl */`#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+uniform sampler2D u_acc;
+uniform sampler2DArray u_atlasW;   // K layers: output carriers W_r
+uniform sampler2D u_sA;            // 1×1 scalar: (U_r·a)
+uniform sampler2D u_sB;            // 1×1 scalar: (V·b)
+uniform int u_cyc;
+uniform int u_K;
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int r = u_cyc % u_K;
+  float prev  = (r == 0) ? 0.0 : texelFetch(u_acc, coord, 0).x;   // bar-start reset — in-shader, not a JS flag
+  float scale = texelFetch(u_sA, ivec2(0,0), 0).x * texelFetch(u_sB, ivec2(0,0), 0).x;
+  fragColor   = vec4(prev + scale * texelFetch(u_atlasW, ivec3(coord, r), 0).x, 0.0, 0.0, 1.0);
 }`;
 
 // Render psi amplitude: log-scaled |ψ|² → hologram colormap.

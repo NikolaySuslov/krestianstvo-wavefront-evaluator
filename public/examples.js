@@ -21,6 +21,7 @@ import hologram4App       from "./apps/hologram4.js";
 import hologram4NativeApp    from "./apps/hologram4_native.js";
 import hologram4NativeNoGpuApp from "./apps/hologram4_native_nogpu.js";
 import eyeApp  from "./apps/eye.js";
+import mediumApp from "./apps/medium.js";
 import nls3App        from "./apps/nls3.js";
 import nls4App        from "./apps/nls4.js";
 import instanton3App        from "./apps/instanton3.js";
@@ -37,6 +38,7 @@ import rosslerApp  from "./apps/rossler.js";
 import fractal1App from "./apps/fractal1.js";
 
 export const APPS = {
+  medium:           mediumApp,
   eye:              eyeApp,
   hologram4_native: hologram4NativeApp,
   hologram4_native_nogpu: hologram4NativeNoGpuApp,

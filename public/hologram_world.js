@@ -14,7 +14,7 @@ const REFLECTOR_MS = 50;
 const SUBTICK_MS   = 0.09;
 
 // ── Grid ─────────────────────────────────────────────────────────────────────
-const GRID    = 64;
+const GRID    = 128;
 const N_CELLS = GRID * GRID;
 
 // ── Physical parameters ───────────────────────────────────────────────────────
@@ -565,6 +565,10 @@ const hologramWorldProgram = `
       // sequencer is deterministic from the clock (Krestianstvo compliance, doc §7.13). One enum
       // (mutually-exclusive) replaces scattered client booleans. '' = none (plain live grid).
       eyeDisplayMode: '', eyeSoundOn: false, eyeTau: 0,   // eyeTau: shared depth-scrub position
+      // ── medium.js (the meta-circular world-lens demo) SHARED control state — every UI button/slider rides the
+      //    reflector so two peers stay byte-identical (no optimistic local mutation; the sender also reads it back).
+      medMode: 'pass', medOp: 'gauge', medWorld: false, medObj: 'cube', medRank: 0, medSelfLaw: 'orbit',
+      medFocus: 1.0, medTheta: 0.0, medShiftX: 0, medShiftY: 0, medPropT: 2, medOpSpeed: 6, medHoloT: 0, medCueClean: 0.6,
     },
     reflector,
     (state, pulse) => {
@@ -573,7 +577,8 @@ const hologramWorldProgram = `
         const t = pulse._eventPayload?.type;
         if (['rotate','toggleMode','resetPlate','snapPlate','nextCycle','addPoint','addBeam','setDepthProbe','dragStart','dragEnd','toggleTomo','setShape',
              'setBreath','setPlateDriven','setNoHebb','setNullPlate','setPlateKernel','setDemodKick','setPlateSeedFree','setReconReset','setKickParams','setBackPlate','setHamiltonian','setRecordMode','setLiveMode','setGsPropagator','setGsNoiseSeed','setDirectBack','pointTest',
-             'setEyeH','setEyeT','setEyeMix','setEyeOnly','setEyeDisplay','setEyeSound','setEyeTau'].includes(t))
+             'setEyeH','setEyeT','setEyeMix','setEyeOnly','setEyeDisplay','setEyeSound','setEyeTau',
+             'setOpEvolve','opEvolveWrite','setOpCyc','setOpNlho','setOpNlhoRate','setOpNlhoMode','setOpNlhoDrive','setOpPureMedium','setOpNlhoThetaMedium','setOpNlhoSolitonTheta','opEvolveCheckpoint','setMedium'].includes(t))
           s = { ...s, _queue: [{ fireAt: pulse.wallTime, msg: t, payload: pulse._eventPayload ?? {} }, ...(s._queue ?? [])] };
       }
       return W.reduce(s, pulse, 'hologram4', {
@@ -840,6 +845,106 @@ const hologramWorldProgram = `
           plateKernelSteps: p.steps   ?? s.plateKernelSteps,
           gsSteps:          p.gsSteps ?? s.gsSteps,
         }),
+
+        // ── §7.68 EVOLVE genotype in the WORLD MODEL (shared-by-ADOPTION — the measured resolution).
+        //    The §7.66 margin-determinism experiment FAILED across browsers: peers' travelling fields are
+        //    only pure-modulo-JOIN (different join times / re-inits = percent-level field differences ≫
+        //    the hysteresis band sized for float spread), so locally-harvested genomes diverge. Therefore
+        //    each mutation — born from ONE peer's private physics — is genuinely NEW SHARED INFORMATION
+        //    and must cross the wire once, like a measurement outcome: peers PROPOSE (opEvolveWrite), the
+        //    reflector's total order picks the first per (rule, bar), and ALL peers adopt the model's
+        //    bits. Changed-only proposals keep the wire SILENT at fixed points; the genome lives in model
+        //    state, so SNAPSHOTS serve joiners natively (no checkpoints needed). The shared toggle keeps
+        //    every peer evolving together (no master — proposals are near-identical; arbitration picks
+        //    among near-equals and adoption makes the choice everyone's).
+        // §7.70: ⊕ OP-CYC display mode is SHARED — joiners enter it automatically (no manual switch).
+        setOpCyc: (s, p) => ({ ...s, opCycOn: p.value ?? !(s.opCycOn ?? false) }),
+        setOpNlho: (s, p) => ({ ...s, opNlhoOn: p.value ?? !(s.opNlhoOn ?? false) }),   // §7.88e SHARED LIVE-NLHO toggle
+        setOpNlhoRate: (s, p) => ({ ...s, opNlhoRate: Math.max(0.01, Math.min(0.5, p.value || 0.06)) }),   // §7.88g SHARED evo rate (genome param → all peers identical)
+        setOpNlhoMode: (s, p) => ({ ...s, opNlhoMode: (p.value === 'self' || p.value === 'witness' || p.value === 'off') ? p.value : (s.opNlhoMode ?? 'self') }),   // §7.88aa SHARED evolution mode → joiners match
+        setOpPureMedium: (s, p) => ({ ...s, opPureMedium: p.value ?? !(s.opPureMedium ?? true) }),   // §7.91 SHARED pure-medium binding (default ON → all peers + joiners run the optical-chip operator identically)
+        setOpNlhoThetaMedium: (s, p) => ({ ...s, opNlhoThetaMedium: p.value ?? !(s.opNlhoThetaMedium ?? false) }),   // §7.92 SHARED θ-walk-in-medium (default OFF → the medium rotates its own genome via rotateEyeCenters when ON; all peers match)
+        setOpNlhoSolitonTheta: (s, p) => ({ ...s, opNlhoSolitonTheta: p.value ?? !(s.opNlhoSolitonTheta ?? true) }),   // §7.100c SHARED soliton-collision θ-walk (DEFAULT ON, peer-verified — θ rotated by soliton kick + IFS-native dispersion wash on a low-k phase tilt; all peers + joiners run the deep operator)
+        // ── medium.js controls: ONE reducer for every button/slider (only provided fields update, others kept). The
+        //    sender does NOT mutate locally — it injects, the reflector orders it, and ALL peers (incl. the sender)
+        //    read it back from n.med* → byte-identical control state, the KWE peer-determinism contract.
+        setMedium: (s, p) => ({ ...s,
+          medMode:     (p.mode    != null) ? p.mode    : s.medMode,
+          medOp:       (p.op      != null) ? p.op      : s.medOp,
+          medWorld:    (p.world   != null) ? !!p.world : s.medWorld,
+          medObj:      (p.obj     != null) ? p.obj     : s.medObj,
+          medRank:     (typeof p.rank     === 'number') ? (p.rank|0)                          : s.medRank,
+          medSelfLaw:  (p.selfLaw != null) ? p.selfLaw : s.medSelfLaw,
+          medFocus:    (typeof p.focus    === 'number') ? Math.max(0.3, Math.min(1.8, p.focus)) : s.medFocus,
+          medTheta:    (typeof p.theta    === 'number') ? Math.max(-3.1416, Math.min(3.1416, p.theta)) : s.medTheta,
+          medShiftX:   (typeof p.shiftX   === 'number') ? Math.max(-12, Math.min(12, p.shiftX)) : s.medShiftX,
+          medShiftY:   (typeof p.shiftY   === 'number') ? Math.max(-12, Math.min(12, p.shiftY)) : s.medShiftY,
+          medPropT:    (typeof p.propT    === 'number') ? Math.max(1, Math.min(8, p.propT|0))   : s.medPropT,
+          medOpSpeed:  (typeof p.opSpeed  === 'number') ? Math.max(1, Math.min(16, p.opSpeed|0)): s.medOpSpeed,
+          medHoloT:    (typeof p.holoT    === 'number') ? Math.max(0, Math.min(80, p.holoT|0))  : s.medHoloT,
+          medCueClean: (typeof p.cueClean === 'number') ? Math.max(0, Math.min(1, p.cueClean))  : s.medCueClean,
+        }),
+        // §7.88w SHARED autocatalytic-drive params — ALL determine the per-bar genome wander, so any differing across
+        // peers forks the hash. One reducer; only the provided fields update (others kept). Clamped to safe ranges.
+        setOpNlhoDrive: (s, p) => ({ ...s,
+          opNlhoKick:  (typeof p.kick   === 'number') ? Math.max(0, Math.min(1, p.kick))      : s.opNlhoKick,
+          opNlhoEvery: (typeof p.every  === 'number') ? Math.max(0, Math.min(64, p.every | 0)): s.opNlhoEvery,
+          opNlhoSLvl:  (typeof p.sLevel === 'number') ? Math.max(0.005, Math.min(0.1, p.sLevel)) : s.opNlhoSLvl,
+          opNlhoTBins: (typeof p.tBins  === 'number') ? Math.max(16, Math.min(512, p.tBins | 0)) : s.opNlhoTBins,
+          opNlhoSpin:  (typeof p.spin   === 'number') ? Math.max(0, Math.min(1, p.spin))         : s.opNlhoSpin,   // §7.88y self-evolve θ-orbit rate
+        }),
+        setOpEvolve: (s, p) => {
+          const on = p.value ?? !(s.opEvolveOn ?? false);
+          const out = { ...s, opEvolveOn: on };
+          if (on) {
+            // §7.72 FROZEN CANONICAL LAW: snapshot the physics dials INTO THE MODEL at evolve start.
+            // Views sample n at frame (wall) time, so a slider drag mid-run races the reflector — one
+            // bar harvested under different laws forks the genome permanently. Freezing here is a
+            // MODEL-side read of MODEL state: deterministic for every peer and carried to joiners by
+            // the snapshot. Sliders keep moving the display; the harvest law changes only on restart.
+            out.opEvoT = s.eyeTSteps; out.opEvoHMode = s.eyeHMode; out.opEvoHParam = s.eyeHParam;
+            // §7.74: pin the start bar (+1 = first full bar after the toggle) — all peers and joiners
+            // begin the harvest chain at the same virtual time instead of each view's own frame bar.
+            out.opEvoStartBar = Number.isFinite(p.bar) ? (p.bar | 0) + 1 : -1;
+          }
+          if (!on) {           // toggle-off clears the genome + the join anchor → all views restore seeds
+            for (let r = 0; r < 8; r++) { out['opEvoW_' + r] = ''; out['opEvoBar_' + r] = -1; }
+            out.opEvoSeq = (s.opEvoSeq ?? 0) + 1;
+            out.opEvoCkGen = 0; out.opEvoCkG0 = ''; out.opEvoCkG1 = ''; out.opEvoCkG2 = ''; out.opEvoCkG3 = '';
+            out.opEvoCkNlhoRules = '';   // §7.88d clear the NLHO rule-set anchor too
+            out.opEvoCkSeq = (s.opEvoCkSeq ?? 0) + 1;
+          }
+          return out;
+        },
+        // §7.70 JOIN ANCHOR for polar-local genomes (§7.69 evolution keeps the genome VIEW-side, so
+        // joiners cannot get it from snapshots — existing peers anchor it here when the roster grows;
+        // monotonic-gen guard = first wins; between joins the wire stays silent).
+        opEvolveCheckpoint: (s, p) => {
+          const g = p.gen | 0;
+          if (!(g > (s.opEvoCkGen ?? 0))) return s;
+          // §7.88d LIVE-NLHO join-anchor: a checkpoint may carry the NLHO RULE-SET genome (JSON params) instead of
+          // W-bits — the genome is self-describing STATE, so a joiner adopts the current rule-sets (no history
+          // replay) and grows the identical attractors. Tiny payload; only on roster-grow, wire-silent otherwise.
+          if (typeof p.nlhoRules === 'string') {
+            if (p.nlhoRules.length > 1200) return s;
+            return { ...s, opEvoCkGen: g, opEvoCkNlhoRules: p.nlhoRules,
+                     opEvoCkBar: Number.isFinite(p.bar) ? p.bar | 0 : -1,
+                     opEvoCkSeq: (s.opEvoCkSeq ?? 0) + 1 };
+          }
+          const ok = (h) => typeof h === 'string' && h.length <= 80;
+          if (!ok(p.g0) || !ok(p.g1) || !ok(p.g2) || !ok(p.g3)) return s;
+          return { ...s, opEvoCkGen: g, opEvoCkG0: p.g0, opEvoCkG1: p.g1, opEvoCkG2: p.g2, opEvoCkG3: p.g3,
+                   opEvoCkBar: Number.isFinite(p.bar) ? p.bar | 0 : -1,   // §7.70d: the genome's virtual-time cursor
+                   opEvoCkLog: (typeof p.log === 'string' && p.log.length <= 24) ? p.log : '',   // §7.73 decision log
+                   opEvoCkSeq: (s.opEvoCkSeq ?? 0) + 1 };
+        },
+        opEvolveWrite: (s, p) => {
+          const r = p.rule | 0, bar = p.bar | 0;
+          if (!(s.opEvolveOn ?? false)) return s;                            // ignore strays after toggle-off
+          if (r < 0 || r > 7 || typeof p.bits !== 'string' || p.bits.length > 80) return s;   // sanity
+          if ((s['opEvoBar_' + r] ?? -1) >= bar) return s;   // FIRST write per (rule, bar) wins (reflector order)
+          return { ...s, ['opEvoBar_' + r]: bar, ['opEvoW_' + r]: p.bits, opEvoSeq: (s.opEvoSeq ?? 0) + 1 };
+        },
 
       });
     }

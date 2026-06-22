@@ -2234,6 +2234,51 @@ class IFSEye {
     return [...g, ...l, ...verdict];
   }
 
+  // ── §7.90 PURE-MEDIUM BINDING GATE — same test as bindingGate, but the field product ψA·ψB is done ON THE GPU
+  //    (bindEyeField), not in JS. If this reproduces the §9 correlation result (curve-fit ≳0.9, lag peak@0), then
+  //    the WHOLE binding — multiply AND transport — is a medium operation: the medium operates on the medium. ─
+  bindingGateGPU(carrierA, carrierB, patFn, { T = 50, occludeR = 0 } = {}) {
+    const gpu = this._gpu, G = gpu._G, N = G * G, dt = this.dt;
+    const A = patFn(1, 0, G);
+    const trueCorr = (P, Q) => { let s = 0; for (let i = 0; i < N; i++) s += P[i] * Q[i]; return s; };
+    const embed = (carr, content) => { const p = new Float64Array(2 * N); carr.embed(p, content, G); return p; };
+    const sumCarr = { kx: carrierA.kx + carrierB.kx, ky: carrierA.ky + carrierB.ky };
+    const pA = embed(carrierA, A);
+    // measure: LOAD A into the eye field, BIND by B on the GPU (the medium multiply), propagate, demod.
+    const measure = (B) => {
+      gpu.setEyePsi(pA);                       // ψ_eye = A
+      gpu.bindEyeField(embed(carrierB, B));    // §7.90 ψ_eye ·= B  — the PURE-MEDIUM product (GPU, no JS multiply)
+      gpu.stepEyeN(T, dt);
+      if (occludeR > 0) gpu.applyEyeHologram(this.hMode || 7, occludeR, { block: this.hBlock ?? 8, seed: this.hSeed ?? 0 });
+      gpu.stepEyeN(T, -dt);
+      const r = gpu.readEyePsi(); let s = 0;
+      for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const i = y*G+x, ph = sumCarr.kx*x + sumCarr.ky*y;
+        s += r[i*2]*Math.cos(ph) + r[i*2+1]*Math.sin(ph); }
+      return s;
+    };
+    const curveCorr = (P, Q) => { const n=P.length; let mp=0,mq=0; for(let i=0;i<n;i++){mp+=P[i];mq+=Q[i];} mp/=n;mq/=n;
+      let num=0,dp=0,dq=0; for(let i=0;i<n;i++){const a=P[i]-mp,b=Q[i]-mq;num+=a*b;dp+=a*a;dq+=b*b;} return (dp>0&&dq>0)?num/Math.sqrt(dp*dq):0; };
+    const fracs = [1.0, 0.75, 0.5, 0.25, 0.0], tcr = [], rcr = [];
+    for (const f of fracs) { const B = patFn(f, 0, G); tcr.push(trueCorr(A, B)); rcr.push(measure(B)); }
+    const tc0 = Math.max(1e-9, tcr[0]), rc0 = Math.max(1e-9, Math.abs(rcr[0]));
+    const gradeFit = curveCorr(tcr, rcr.map(Math.abs));
+    const featR = Math.max(3, Math.round(G * 0.14)), step = Math.max(1, Math.round(featR / 2));
+    const lags = [-4,-3,-2,-1,0,1,2,3,4].map(k => k * step);
+    const lagR = lags.map(d => Math.abs(measure(patFn(1, d, G))));
+    const lagPk = Math.max(...lagR), z = lags.indexOf(0), lagAt0 = lagR[z], peakAt0 = lagAt0 >= lagPk - 1e-6;
+    let mono = true; for (let i = z; i+1 < lagR.length; i++) if (lagR[i+1] > lagR[i] + 1e-6) mono = false;
+    for (let i = z; i-1 >= 0; i--) if (lagR[i-1] > lagR[i] + 1e-6) mono = false;
+    const pass = gradeFit >= 0.9 && peakAt0 && mono;
+    const out = ['[§7.90 PURE-MEDIUM BINDING GATE] field product ψA·ψB done ON THE GPU (bindEyeField), not in JS:',
+      `   GRADED OVERLAP @ T=${T}${occludeR>0?` occl ${occludeR}`:''}:`,
+      '   overlap   trueΣA·B(norm)   recovered(norm)',
+      ...fracs.map((f,i) => `   ${(f*100).toFixed(0).padStart(4)}%    ${(tcr[i]/tc0).toFixed(3).padStart(10)}    ${(Math.abs(rcr[i])/rc0).toFixed(3).padStart(12)}`),
+      `   → curve-fit ${gradeFit.toFixed(3)}  | lag peak@δ=0 ${peakAt0?'YES':'NO'}  monotone ${mono?'YES':'NO'}`,
+      `   ══ ${pass ? 'PURE-MEDIUM BINDING COMPUTES — the medium operates on the medium (optical chip in this substrate)' : 'GPU binding does NOT track the correlation — investigate'} ══`];
+    console.log(out.join('\n'));
+    return out;
+  }
+
   // ── GATE OPERATOR (§9) — the FIRST cross-modal binding operator, verified end-to-end. bindingGate
   //    proved the MECHANISM (ψA·ψB → correlation); this proves the USE: an EVENTS soliton GATES an IMAGE
   //    soliton — "image sampled where/when the beat fires." The rhythm is a spatial selection mask r(x,y)
