@@ -548,7 +548,7 @@ const hologramWorldProgram = `
     return psi;
   };
 
-  const hologram4 = Behaviors.collect(
+  const mediumU1 = Behaviors.collect(
     {
       time:       0,
       shape:      'cube',
@@ -616,7 +616,7 @@ const hologramWorldProgram = `
              'setOpEvolve','opEvolveWrite','setOpCyc','setOpNlho','setOpNlhoRate','setOpNlhoMode','setOpNlhoDrive','setOpPureMedium','setOpNlhoThetaMedium','setOpNlhoSolitonTheta','opEvolveCheckpoint','setMedium','setEye','setShared','setGenome','setMediumSnapshot','mediumSignal','mediumVirt'].includes(t))
           s = { ...s, _queue: [{ fireAt: pulse.wallTime, msg: t, payload: pulse._eventPayload ?? {} }, ...(s._queue ?? [])] };
       }
-      return W.reduce(s, pulse, 'hologram4', {
+      return W.reduce(s, pulse, 'mediumU1', {
 
         // THE WORLD'S OWN CLOCK (futureTau — the τ arc's W-node layer): a pure, monotone function of replicated
         // state, read by the kernel's proper-time dispatch. beatCount = fresnel beats LIVED (both slots) — the
@@ -1150,8 +1150,8 @@ const hologramWorldProgram = `
     }
   );
 
-  const _isStable = W.stable([hologram4], reflector);
-  const _export   = W.export(Renkon, { hologram4 }, _isStable);
+  const _isStable = W.stable([mediumU1], reflector);
+  const _export   = W.export(Renkon, { mediumU1 }, _isStable);
 `;
 
 export {

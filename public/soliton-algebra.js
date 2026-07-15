@@ -1164,6 +1164,37 @@ function nlhoReadGenerator(field, K, G) {
   }
   return found;
 }
+// growMapFromField(rules, field, G): the medium reads its own evolved code-field and, if an EMERGENT peak has formed AWAY from
+// the existing fixed-point centres (strong + new), returns a NEW map {s,θ,tx,ty} born at that peak (else null). This is the §7.88
+// writable-operator-atlas GROWTH: the genome adopts structure the medium itself produced — peer-pure (the peak is in `field`, the
+// lensed code the medium just computed), no JS-invented map. The new map's params are READ from the peak (position → tx,ty via the
+// fixed-point relation; amplitude → s; local gradient → θ), the inverse of nlhoGenInject — so it's a genuine read-back, not a guess.
+function growMapFromField(rules, field, G, birth = 0.15) {
+  const N = G * G, centers = genomeFpCenters(rules, G);
+  // find the strongest cell that is NOT within MIN_SEP of any existing centre (an emergent, non-redundant peak). BIRTH is the
+  // sensitivity (peak must clear birth·max): the IFS is CONTRACTIVE (energy clusters near centres), so emergent far structure is
+  // weak — a low birth lets the genome adopt the satellites its dynamics/operators actually throw. MIN_SEP keeps it non-redundant.
+  const MIN_SEP = Math.max(4, G / 12), BIRTH = birth;
+  let mx = 1e-9; for (let i = 0; i < N; i++) { const a = Math.hypot(field[i*2], field[i*2+1]); if (a > mx) mx = a; }
+  let bi = -1, bv = -1;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+    const a = Math.hypot(field[(y*G+x)*2], field[(y*G+x)*2+1]); if (a < bv) continue;
+    let near = false; for (let c = 0; c < centers.length; c += 2) { if (Math.hypot(x - centers[c], y - centers[c+1]) < MIN_SEP) { near = true; break; } }
+    if (!near && a > bv) { bv = a; bi = y * G + x; }
+  }
+  if (bi < 0 || bv < BIRTH * mx) return null;   // no emergent structure strong enough to birth a map
+  const px = bi % G, py = (bi / G) | 0;
+  // convert the peak (pixel) → a map. Position → normalized fixed point → tx,ty via fp = t/(1−s). θ from the local intensity
+  // gradient (the satellite direction). s from the peak amplitude (brighter = lower s, like the inject's amp∝1−s).
+  const s = Math.max(0.25, Math.min(0.7, 1 - bv / mx * 0.6));
+  let gx = 0, gy = 0;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const X=px+dx, Y=py+dy; if(X<0||X>=G||Y<0||Y>=G) continue;
+    const a = Math.hypot(field[(Y*G+X)*2], field[(Y*G+X)*2+1]); gx += dx * a; gy += dy * a; }
+  const theta = (gx || gy) ? ((Math.atan2(gy, gx) + 2*Math.PI) % (2*Math.PI)) : 0;
+  const fx = (px / (G - 1)), fy = (py / (G - 1)), d = 1 - s;   // normalized fixed point → tx,ty = fp·(1−s)
+  return { s, theta, tx: fx * d, ty: fy * d, _life: 1, _born: true };
+}
+
 // the default genome bank (K ranks). FOUR / SPIN / TRI / DIAG.
 function nlhoDefaultRules() { return [
   [{s:0.40,theta:0,tx:0.10,ty:0.10},{s:0.40,theta:0,tx:0.70,ty:0.10},{s:0.40,theta:0,tx:0.10,ty:0.70},{s:0.40,theta:0,tx:0.70,ty:0.70}],
@@ -1172,19 +1203,60 @@ function nlhoDefaultRules() { return [
   [{s:0.45,theta:0,tx:0.10,ty:0.10},{s:0.45,theta:0,tx:0.70,ty:0.70}],
 ]; }
 
+// the RESONANCE bank — genomes that are GENUINELY DISTINCT in their PHASE SIGNATURE, so the geometry-sees-geometry resonance
+// discriminates on the genome's OWN geometry (not a synthetic overlay; the default bank is phase-degenerate, 3/4 ranks θ=0). The
+// phase a lens imprints is dominated by WHERE its fixed-point centres sit (the focus term a·r² about each centre). So a
+// position-distinct genome → a position-distinct phase pattern → a grid-robust resonance signature. Each rank places its K
+// centres in a different ARRANGEMENT (the "note" is the spatial pattern, which the phase encodes), plus a distinct θ/s.
+function nlhoResonanceRules() {
+  // distinct fixed-point ARRANGEMENTS with LOW mutual overlap (the discrimination = how little two patterns' centres coincide).
+  // Measured contrast on this set: the matching key recovers ~100%, mismatches 6–72% (clean discrimination; nearby shapes like
+  // the diamond/diagonal partially co-resonate — honest, like two similar-shaped rooms amplifying a similar note).
+  const layouts = [
+    [[0.20,0.20],[0.80,0.20],[0.20,0.80],[0.80,0.80]],   // rank 0 — wide SQUARE (corners)
+    [[0.50,0.20],[0.22,0.72],[0.78,0.72]],               // rank 1 — TRIANGLE (apex up, centre offset)
+    [[0.50,0.25],[0.30,0.55],[0.70,0.55],[0.50,0.85]],   // rank 2 — DIAMOND (tall)
+    [[0.20,0.50],[0.50,0.20],[0.80,0.50],[0.50,0.80]],   // rank 3 — DIAMOND (wide, rotated 45° from r2)
+  ];
+  // each rank's NOTE (aggregate θ) is a clean value WITHIN the θ-slider range [−π, π], evenly spaced so the user can dial to it:
+  // notes = [−2.4, −0.8, 0.8, 2.4]. All K maps share the rank's θ (so the aggregate IS that note — no spread that pushes it out of
+  // range). The SPATIAL layout still distinguishes the shape; θ is the tunable note. s varies for a focus-distinct signature.
+  const notes = [-2.4, -0.8, 0.8, 2.4];
+  return layouts.map((pts, r) => {
+    const th = notes[r], s = 0.42 + 0.06 * r;
+    return pts.map(([tx, ty]) => ({ s, theta: th, tx, ty }));
+  });
+}
+
 // ── §7.98/7.102/7.103 THE GENOME LENS = linOp (gauge/dynamics split + sub-pixel seam). Returns the lens prescription
 //    (centers from the genome fixed points) + the GPU operator. P = { sMul, thAdd, tx, ty, propT, opMode, fullGrid }.
 //    opMode: 'phase' (pure linOp e^{iφ}) | 'metric' (affineEyeCenters resample) | 'gauge' (metric macro-translate +
 //    phase micro focus/shear + sub-pixel phase tilt). The medium operates on the medium in its own terms.
+// genomeAggregate(rules): the genome's CHARACTERISTIC geometry as a single {s, theta} — the dominant rotation (the map with the
+// largest |θ|) and the mean contraction. ONE definition shared by the lens internals AND the UI seed, so they agree (the seed
+// shows what the lens applies). map[0] alone is often trivial; the aggregate captures the genome's real character.
+function genomeAggregate(rules) {
+  if (!rules || !rules.length) return { s: 0.5, theta: 0 };
+  let thMax = 0, sSum = 0;
+  for (const m of rules) { if (Math.abs(m.theta || 0) > Math.abs(thMax)) thMax = m.theta || 0; sSum += (m.s ?? 0.5); }
+  return { s: sSum / rules.length, theta: thMax };
+}
 const _SUBPIX_CAL = 1 / 0.972;   // §7.103b sub-pixel tilt calibration for the IFS ring-Laplacian's small-k group velocity
 function makeGenomeLens(gpu, rules, dt, G, P = {}) {
   const fullGrid = P.fullGrid !== false, rad = fullGrid ? G : (NLHO_R_MAX + 6);
   const fit = nlhoFixedPointFit(rules, G), centers = [];
   const cside = fullGrid ? G : nlhoGenRegion(G).side, cx0 = fullGrid ? 0 : nlhoGenRegion(G).x0, cy0 = fullGrid ? 0 : nlhoGenRegion(G).y0;
   for (const mm of fit.fps) { const vx = fit.pad + (mm.fx - fit.minX) * fit.sc, vy = fit.pad + (mm.fy - fit.minY) * fit.sc; centers.push(cx0 + Math.round(vx * (cside - 1)), cy0 + Math.round(vy * (cside - 1))); }
-  const s = Math.max(0.2, Math.min(1.6, (Math.max(0.05, 1 - (rules[0].s ?? 0.5)) + 0.5) * (P.sMul ?? 1)));
-  const th = (rules[0].theta || 0) + (P.thAdd ?? 0), tx = P.tx ?? 0, ty = P.ty ?? 0, propT = P.propT ?? 2;
+  // ABSOLUTE sliders: the lens's global scale/rotation are driven DIRECTLY by the slider params (sMul = the scale, thAdd = the
+  // rotation) — NO genome baseline added. The genome supplies the fixed-point CENTRES (its geometry/satellite structure via the fit
+  // above); the sliders own the global s/θ outright. So a slider value IS the lens parameter (not an offset from the genome).
+  const s = Math.max(0.2, Math.min(1.6, P.sMul ?? 1));
+  const th = (P.thAdd ?? 0), tx = P.tx ?? 0, ty = P.ty ?? 0, propT = P.propT ?? 2;
   const a = (1 - s) * 0.06, beta = th * 0.04, mode = P.opMode || 'phase', holoT = Math.max(0, P.holoT | 0);
+  // focalDt = a CONTINUOUS multiplier on the focal step size (default 1) → SUB-STEP focal distance. propT is an integer
+  // step COUNT (can't loop a fraction); focalDt scales each step's dt, so total focal distance = propT·(dt·focalDt) tunes
+  // finely (e.g. propT=1, focalDt=0.1 → a tenth-step). The sub-pixel gauge seam uses the SAME total distance to stay calibrated.
+  const focalDt = Math.max(0.05, P.focalDt ?? 1), fdt = dt * focalDt;
   const centersTx = new Float64Array(centers.length); for (let k = 0; k < centers.length; k += 2) { centersTx[k] = centers[k] + tx; centersTx[k + 1] = centers[k + 1] + ty; }
   // the phase-plate pass (the genome's lens element), applied to the field ALREADY on the GPU.
   const _plate = () => {
@@ -1192,7 +1264,7 @@ function makeGenomeLens(gpu, rules, dt, G, P = {}) {
     else if (mode === 'gauge') {   // §7.103/103b: integer translate via metric (exact), fractional + focus/shear via phase
       const itx = Math.round(tx), ity = Math.round(ty), fdx = tx - itx, fdy = ty - ity;
       if (itx || ity) gpu.affineEyeCenters([1,0,0,1],[itx,ity],centers,rad);
-      const kpp = -_SUBPIX_CAL / (2 * Math.max(1, propT) * dt);   // sub-pixel phase tilt (calibrated to the IFS Laplacian)
+      const kpp = -_SUBPIX_CAL / (2 * Math.max(1, propT) * fdt);   // sub-pixel phase tilt (calibrated to the focal distance propT·fdt)
       gpu.linOp({ centers, a, beta, vtx: 0, kx: kpp*fdx, ky: kpp*fdy });
     } else gpu.linOp({ centers: centersTx, a, beta, vtx: 0 });    // §7.102 pure phase form = the lens IS linOp
   };
@@ -1204,7 +1276,7 @@ function makeGenomeLens(gpu, rules, dt, G, P = {}) {
     if (holoT > 0) gpu.stepEyeN(holoT, dt);     // FORWARD into the hologram domain
     _plate();
     if (holoT > 0) gpu.stepEyeN(holoT, -dt);    // BACK-propagate to reconstruct
-    if (propT > 0) gpu.stepEyeN(propT, dt);     // focal propagation (the lens forms its image)
+    if (propT > 0) gpu.stepEyeN(propT, fdt);    // focal propagation — step size fdt=dt·focalDt → tunable sub-step focal distance
   };
   return { run, centers, s, th, fit };
 }
@@ -1224,10 +1296,718 @@ function probeSubpixelSeam(gpu, dt, G, axis = 'x') {
   gpu.setEyePsi(saved); return out;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// LENS STACK — the general lens mechanics, factored from medium.js (the meta-circular world lens) so BOTH the world
+// lens (pass-through) and the eye (trap) compose from the SAME ops. Conforms to the algebra's operator style: a
+// LensOp is a FIELD OPERATOR (field, gpu, ctx) → field', the same shape as operatorModality's `xform`. A STACK is
+// FUNCTIONAL COMPOSITION of LensOps — itself a LensOp (closed under the type → a stack can be an op inside another
+// stack, and drops into operatorModality/bind for holographic computing). The runner is UNTYPED (no trap/pass
+// branch): trap-vs-pass is EMERGENT from ordering (recon-first = trap). The held recon-wavefront is FIRST-CLASS via
+// ctx.recon (written by opRecon), so a trap's captured central wavefront is named/addressable without typing the runner.
+//
+//   LensOp  : (field:Float64[2N], gpu, ctx) → field'    // transforms the field; may read/write ctx
+//   ctx     : { bar, G, dt, rules, P, recon?, selectedRank?, recallScores?, ... }   // the shared pipeline context
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// composeLens(...ops): functional left-to-right composition → a LensOp. The UNTYPED runner (just reduce).
+function composeLens(...ops) {
+  const flat = ops.flat().filter(Boolean);
+  return (field, gpu, ctx) => flat.reduce((f, op) => op(f, gpu, ctx) || f, field);
+}
+
+// ── genome-as-wavefront helpers (pure; the §7.100 code=data substrate the self/coevolve/recall ops share). ───────
+// the recursive-lens CLOCK depth at `bar`: triangle 0↔MAXD↔0 advancing opSpeed steps/bar (the IFS-clock rate).
+function barClockDepth(bar, opSpeed = 6, MAXD = 24) {
+  const sp = Math.max(1, opSpeed | 0), ph = ((bar | 0) * sp) % (2 * MAXD);
+  return Math.max(1, ph < MAXD ? ph : 2 * MAXD - ph);
+}
+// the genome's fixed points as full-grid pixel centres (the lens centres / θ-satellite anchors).
+function genomeFpCenters(rules, G) {
+  const fit = nlhoFixedPointFit(rules, G), cen = [];
+  for (const mm of fit.fps) { const vx = fit.pad + (mm.fx - fit.minX) * fit.sc, vy = fit.pad + (mm.fy - fit.minY) * fit.sc;
+    cen.push(1 + Math.round(vx * (G - 3)), 1 + Math.round(vy * (G - 3))); }
+  return cen;
+}
+// the genome's CODE as a wavefront: a main blob + a θ-satellite at each fixed point (code=data, the self-mode input).
+function genomeCodeField(rules, G) {
+  const cen = genomeFpCenters(rules, G), N = G * G, f = new Float64Array(2 * N), r = 4;
+  const put = (X, Y, a) => { if (X >= 0 && X < G && Y >= 0 && Y < G) f[(Y * G + X) * 2] += a; };
+  for (let i = 0; i < rules.length; i++) { const cx = cen[i*2], cy = cen[i*2+1], th = rules[i].theta || 0;
+    put(cx, cy, 0.9); put(cx + Math.round(r * Math.cos(th)), cy + Math.round(r * Math.sin(th)), 0.5); }
+  return f;
+}
+// read the lensed field's local phase-gradient direction at each centre by COMPLEX-MOMENT (§7.100) → θ per map (or null).
+function readGenomeGrad(rules, lensed, G) {
+  const cen = genomeFpCenters(rules, G);
+  return rules.map((m, i) => { const cx0 = cen[i*2], cy0 = cen[i*2+1], RR = 6;
+    let Mxr=0, Mxi=0, Myr=0, Myi=0; const at = (X, Y) => { const k = (Y*G+X)*2; return [lensed[k], lensed[k+1]]; };
+    for (let dy=-RR; dy<=RR; dy++) for (let dx=-RR; dx<=RR; dx++) { const X=cx0+dx, Y=cy0+dy; if (X<1||X>=G-1||Y<1||Y>=G-1) continue;
+      const [r0,i0] = at(X,Y); const a2 = r0*r0+i0*i0; if (a2 < 1e-3) continue; const [rx,ix] = at(X+1,Y), [ry,iy] = at(X,Y+1);
+      Mxr+=a2*(rx*r0+ix*i0); Mxi+=a2*(ix*r0-rx*i0); Myr+=a2*(ry*r0+iy*i0); Myi+=a2*(iy*r0-ry*i0); }
+    const gx = Math.atan2(Mxi, Mxr), gy = Math.atan2(Myi, Myr);
+    return (Math.abs(gx)+Math.abs(gy) < 1e-4) ? null : Math.atan2(gy, gx); });
+}
+// the θ-walk laws (§7.100d): CONTRACT (θ←absolute read, snaps to the fixed point) | ORBIT (θ+=ω+κ·sin(read−θ), free walk).
+// `dead` (optional per-map bool array) = the map's CODE was DESTROYED in the medium (occluded below threshold) → it TERMINATES:
+// the program LOST that map, so its CONTRIBUTION COLLAPSES — amplitude decays toward 0 (it DROPS OUT of the generator/attractor,
+// it does not freeze in place looking alive). A clean re-derivation (program present again) restores full amplitude = resurrect.
+// _dead = the carried amplitude (0..1) per map; a dead map decays s·_dead, a live one recovers toward 1 (so partial damage heals).
+function thetaWalk(rules, grad, law = 'orbit', dead = null) {
+  const TWO = 2*Math.PI, wrap = t => ((t % TWO) + TWO) % TWO;
+  const amp = (m, i) => {   // carry a per-map life fraction in m._life (1=alive); dead → decay ×0.5, live → recover toward 1
+    const life = (m._life == null ? 1 : m._life);
+    return dead && dead[i] ? Math.max(0, life * 0.5) : Math.min(1, life + 0.34);
+  };
+  if (law === 'contract') return rules.map((m, i) => ({ ...m, _life: amp(m, i), theta: (dead && dead[i]) ? (m.theta || 0) : (grad[i] == null ? (m.theta || 0) : wrap(grad[i])) }));
+  const omega = 0.30, kappa = 0.12;   // ORBIT: ω dominates → never locks; κ<ω read coupling modulates the orbit
+  return rules.map((m, i) => { const th = m.theta || 0, life = amp(m, i);
+    if (dead && dead[i]) return { ...m, _life: life, theta: th };   // TERMINATED: code gone → drive (ω) gone → θ frozen, amplitude collapsing
+    return { ...m, _life: life, theta: wrap(th + omega + (grad[i] == null ? 0 : kappa*Math.sin(grad[i]-th))) }; });
+}
+
+// applyLife(rules): bake the carried _life fraction into the map's amplitude `s` → a dead map (life→0) drops out of the
+// generator/attractor (its soliton vanishes); a recovered map (life→1) is unchanged. Returns render-ready rules (s scaled).
+function applyLife(rules) {
+  return rules.map(m => (m._life == null || m._life >= 0.999) ? m : { ...m, s: (m.s || 0) * m._life });
+}
+
+// codeAlive(field, centers, G, thr): per-map liveness — true if the map's code-energy at its fixed-point centre survived
+// (sum |ψ|² in a small window ≥ thr·nominal). After occlusion, a destroyed map → false → it TERMINATES in thetaWalk.
+function codeAlive(field, centers, G, thr = 0.25) {
+  const RR = 4, alive = [];
+  for (let i = 0; i < centers.length; i += 2) {
+    const cx = centers[i], cy = centers[i+1]; let e = 0;
+    for (let dy = -RR; dy <= RR; dy++) for (let dx = -RR; dx <= RR; dx++) {
+      const X = cx+dx, Y = cy+dy; if (X<0||X>=G||Y<0||Y>=G) continue; const k = (Y*G+X)*2; e += field[k]*field[k] + field[k+1]*field[k+1];
+    }
+    alive.push(e);   // raw energy; the caller thresholds against the clean (un-occluded) energy
+  }
+  return alive;
+}
+
+// runGenomeLens(gpu, rules, depth, G, dt, P): apply makeGenomeLens `depth` times to the field on the GPU (the limit cycle).
+function runGenomeLens(gpu, rules, depth, G, dt, P = {}) {
+  const lg = makeGenomeLens(gpu, rules, dt, G, P);
+  for (let q = 0; q < depth; q++) lg.run();
+}
+
+// ── THE LENS OPS (factories → LensOp). Each is a field operator closed over its params; pure of app state. ───────
+
+// opGeometryLens: the genome lens (linOp, the optical chip / IFS-clock). depthFn(ctx)→passes (1 = single, barClockDepth = clock).
+function opGeometryLens(rulesFn, { depthFn = () => 1, P = {} } = {}) {
+  return (field, gpu, ctx) => {
+    const rules = rulesFn(ctx); if (!rules || !rules.length) return field;
+    gpu.setEyePsi(field); runGenomeLens(gpu, rules, depthFn(ctx), ctx.G, ctx.dt, { ...ctx.P, ...P });
+    return gpu.readEyePsi();
+  };
+}
+
+// opRecall: the §9 [H] content-addressable SELECT. The MEDIUM binds the cue against each stored genome (gpu.bindEyeField,
+// the field product) + soliton transport, reduces+energy-normalizes → matched-filter score; argmax → ctx.selectedRank.
+// bank = the K stored rule-sets; cueFn(ctx)→{cue, ecue} the (corrupted) probe. recallT = transport depth. Identity on ψ.
+// MEMOIZED: the K GPU [H] round-trips are pure f(keyFn(ctx)) (bar + planted + cueClean + bankVer) — recompute only when the
+// key changes, not every subtick. keyFn(ctx)→string lists every input the select reads (a stale key serves a stale rank).
+function opRecall(bankFn, cueFn, { recallT = 12, keyFn = null } = {}) {
+  return (field, gpu, ctx) => {
+    const bank = bankFn(ctx); if (!bank || !bank.length) return field;
+    if (keyFn) { const k = keyFn(ctx); if (ctx._recallKey === k) return field; ctx._recallKey = k; }
+    let { cue, ecue } = cueFn(ctx); const N = ctx.G * ctx.G, saved = gpu.readEyePsi(), scores = [];
+    // PROGRAM-MODALITY OCCLUSION: damage the CUE (the probe the medium reads) — the program's recognition input is occluded
+    // (seed = bar → f(bar) peer-pure, re-derived clean each bar = resurrect). The matched score drops / a wrong rank can win.
+    cue = occludeField(gpu, cue, ctx, ctx.bar * 101 + 1);
+    ecue = 0; for (let i = 0; i < N; i++) ecue += cue[i*2]*cue[i*2] + cue[i*2+1]*cue[i*2+1];
+    for (let r = 0; r < bank.length; r++) {
+      const gF = new Float64Array(2*N); nlhoGenInject(gF, bank[r], ctx.G);
+      // …and damage the STORED PROGRAM (the injected genome AS HELD in the medium) — the program-hologram itself is occluded
+      // (per-rank seed → distinct holes). recall must now recognize a damaged cue against damaged stored programs.
+      const gOcc = occludeField(gpu, gF, ctx, ctx.bar * 101 + 7 + r);
+      const gConj = new Float64Array(2*N); let er = 0;
+      for (let i = 0; i < N; i++) { gConj[i*2] = gOcc[i*2]; gConj[i*2+1] = -gOcc[i*2+1]; er += gOcc[i*2]*gOcc[i*2] + gOcc[i*2+1]*gOcc[i*2+1]; }
+      gpu.setEyePsi(cue); gpu.bindEyeField(gConj);
+      gpu.stepEyeN(recallT, ctx.dt); gpu.stepEyeN(recallT, -ctx.dt);
+      const bf = gpu.readEyePsi(); let cr = 0, ci = 0; for (let i = 0; i < N; i++) { cr += bf[i*2]; ci += bf[i*2+1]; }
+      scores.push((ecue > 0 && er > 0) ? Math.hypot(cr, ci) / Math.sqrt(ecue * er) : 0);
+    }
+    gpu.setEyePsi(saved);
+    let win = 0; for (let r = 1; r < scores.length; r++) if (scores[r] > scores[win]) win = r;
+    ctx.selectedRank = win; ctx.recallScores = scores;
+    return field;   // recall SELECTS — identity on the field; the following opGeometryLens applies the chosen genome
+  };
+}
+
+// opSelfEvolve: code=data θ-walk. Re-derives the genome from a seed rank to `bar` (peer-pure f(bar)): each step lenses
+// the genome's own code, reads θ back (§7.100), writes it. Writes ctx.selfRules (+ returns the lensed code as the field).
+// seedFn(ctx)→rules (the genome to evolve, e.g. bank[selectedRank]); law = 'orbit'|'contract'; opSpeed = walk rate.
+// MEMOIZED: the bar·opSpeed-iteration θ-walk is pure f(bar, seed, law) — re-derive ctx.selfRules only when the key changes;
+// every subtick just re-runs ONE lens pass on the cached genome (cheap) for the live wavefront. lawFn lets the law ride ctx.
+function opSelfEvolve(seedFn, { law = 'orbit', lawFn = null, opSpeed = 6, cap = 600, keyFn = null } = {}) {
+  return (field, gpu, ctx) => {
+    const seed = seedFn(ctx); if (!seed || !seed.length) return field;
+    const lw = lawFn ? lawFn(ctx) : law;
+    const k = keyFn ? keyFn(ctx) : `${ctx.bar}|${lw}`;
+    if (ctx._selfKey !== k || !ctx.selfRules) {   // re-derive the genome to `bar` (peer-pure f(bar)); else reuse the cache
+      const nIter = Math.min(ctx.bar * Math.max(1, opSpeed | 0), cap);
+      let rules = seed.map(m => ({ ...m }));
+      const occOn = ctx.occ && (ctx.occ.mode|0) && (ctx.occ.r||0) > 0;
+      for (let s = 0; s < nIter; s++) {
+        // PROGRAM-MODALITY OCCLUSION: damage the CODE-FIELD (the genome's code=data wavefront) before each θ-read. A map whose
+        // code is DESTROYED (energy at its centre falls below threshold) TERMINATES — its θ freezes (no field to drive it). The
+        // surviving maps keep walking. seed = bar·step → f(bar) peer-pure; the genome is RE-DERIVED clean each bar → RESURRECT.
+        const cleanCode = genomeCodeField(rules, ctx.G);
+        const centers = genomeFpCenters(rules, ctx.G);
+        let dead = null;
+        let codeF = cleanCode;
+        if (occOn) {
+          const e0 = codeAlive(cleanCode, centers, ctx.G);
+          codeF = occludeHolographic(gpu, cleanCode, ctx, ctx.bar * 211 + s);   // HOLOGRAPHIC: spread→occlude→recon (holoT = redundancy)
+          const e1 = codeAlive(codeF, centers, ctx.G);
+          // a map DIES when its surviving energy falls below `kill`. HOLOGRAPHIC REDUNDANCY: more spread (holoT) = the code is
+          // delocalized over the aperture, so destroying a center takes MORE damage → the kill threshold RELAXES toward 0 with
+          // holoT. holoT=0 → localized → kill at 25% (fragile); high holoT → kill only near-total loss (survives big occlusions).
+          const T = Math.max(0, (ctx.occ.holoT|0)), kill = 0.25 * Math.exp(-T / 8);   // 0.25 → ~0.07 @T=8 → ~0.02 @T=16
+          dead = e0.map((e, i) => e > 1e-9 && (e1[i] / e) < kill);
+        }
+        gpu.setEyePsi(codeF); runGenomeLens(gpu, rules, 1, ctx.G, ctx.dt, ctx.P); const lensed = gpu.readEyePsi();
+        rules = thetaWalk(rules, readGenomeGrad(rules, lensed, ctx.G), lw, dead);
+      }
+      // GROW (§7.88 writable-operator-atlas, inverse of kill): AFTER the θ-walk (NOT per iteration — that was the freeze: the deep-
+      // lens probe × ~nIter/4 was thousands of GPU passes). Run it a SMALL bounded number of times — at most (growMax − K) births,
+      // each from the ACCUMULATED deep-lensed field (the genome's dynamics run out to the attractor's spread structure). The medium
+      // reads its OWN field and adopts emergent peaks → peer-pure f(bar). Capped so a key change is cheap (≤ a few extra passes).
+      if (ctx.growMax && rules.length < ctx.growMax) {
+        const births = Math.min(ctx.growMax - rules.length, 4);   // bound the work: at most a few new maps per re-derivation
+        for (let b = 0; b < births; b++) {
+          gpu.setEyePsi(genomeCodeField(rules, ctx.G)); runGenomeLens(gpu, rules, 18, ctx.G, ctx.dt, ctx.P);
+          const born = growMapFromField(rules, gpu.readEyePsi(), ctx.G, ctx.growBirth ?? 0.15);
+          if (!born) break;   // no more emergent structure → stop (don't invent maps)
+          rules = rules.concat([born]);
+        }
+      }
+      ctx.selfRules = rules; ctx._selfKey = k;
+      ctx.selfLife = rules.map(m => (m._life == null ? 1 : m._life));   // per-map life (0=terminated) → the render fades dead maps
+    }
+    // the live wavefront (one lens pass on the cached genome) — also damaged (holographically) so the displayed code shows the occlusion.
+    let codeIn = genomeCodeField(ctx.selfRules, ctx.G);
+    codeIn = occludeHolographic(gpu, codeIn, ctx, ctx.bar * 211);
+    gpu.setEyePsi(codeIn); runGenomeLens(gpu, ctx.selfRules, 1, ctx.G, ctx.dt, ctx.P);
+    return gpu.readEyePsi();   // the lensed code = the self-evolved wavefront (occluded)
+  };
+}
+
+// opCoevolve: refine a REPLICA genome by peak-detect feedback (peer-pure f(bar), from a deterministic source). Each step
+// lenses the source, finds the peak, migrates each fixed point's tx,ty toward it → ctx.replicaRules. srcFn(ctx)→source field.
+// MEMOIZED: the bar-step peak-chase is pure f(bar, seed) from a deterministic source — re-derive ctx.replicaRules only on a
+// key change. keyFn(ctx)→string (default: bar). The following opGeometryLens runs the cached replica every subtick (cheap).
+function opCoevolve(seedFn, srcFn, { opSpeed = 6, window = 24, lr = 0.10, keyFn = null } = {}) {
+  return (field, gpu, ctx) => {
+    const k = keyFn ? keyFn(ctx) : `${ctx.bar}`;
+    if (ctx._coevKey === k && ctx.replicaRules) return field;
+    const seed = seedFn(ctx), src = srcFn(ctx); if (!seed || !src) return field;
+    ctx._coevKey = k;
+    const N = ctx.G * ctx.G, steps = Math.min(ctx.bar, window), saved = gpu.readEyePsi();
+    let rules = seed.map(m => ({ ...m }));
+    for (let s = 0; s < steps; s++) { gpu.setEyePsi(src); runGenomeLens(gpu, rules, barClockDepth(ctx.bar, opSpeed), ctx.G, ctx.dt, ctx.P);
+      const lensed = gpu.readEyePsi(); let pbi=-1, pbv=0;
+      for (let i = 0; i < N; i++) { const a = lensed[i*2]**2 + lensed[i*2+1]**2; if (a > pbv) { pbv = a; pbi = i; } }
+      if (pbi >= 0 && pbv > 1e-9) { const pkx = pbi % ctx.G, pky = (pbi / ctx.G) | 0;
+        rules = rules.map((m, idx) => { const d = Math.max(1e-3, 1 - m.s), rate = lr * (0.5 + 0.5*idx/Math.max(1, rules.length-1));
+          return { ...m, tx: m.tx + rate*((pkx - ctx.G/2)*d - m.tx), ty: m.ty + rate*((pky - ctx.G/2)*d - m.ty) }; }); } }
+    gpu.setEyePsi(saved); ctx.replicaRules = rules;
+    return field;   // coevolve refines the model — identity on the field; opGeometryLens applies the refined genome
+  };
+}
+
+// nlhoRuptureAdapt: the CRITIQUE'S mechanism — the genome ADAPTS to a ruptured field via readGenomeGrad → thetaWalk (NOT navigation
+// to a predefined B). After an instanton rupture, the wave field carries a NEW gradient; readGenomeGrad registers it at each fixed
+// point, thetaWalk drifts the genome's θ to that gradient. The genome "learns the new attractor geometry" the ruptured wave supports
+// — an emergent DISCOVERY of a new vacuum, not a switch. One adaptation step per call (caller runs it per bar). law: 'orbit'|'contract'.
+//   ruptured = the live post-kick field (the energy landscape the genome reads). Returns the drifted rules. Pure: f(rules, ruptured).
+function nlhoRuptureAdapt(gpu, rules, ruptured, G, dt, P = {}, { law = 'contract' } = {}) {
+  // read the ruptured wave's phase gradient at each of the genome's fixed points, then walk θ toward it (the critique's exact loop).
+  const grad = readGenomeGrad(rules, ruptured, G);
+  return thetaWalk(rules, grad, law, null);   // contract law → θ snaps toward the read gradient (settles to what the field supports)
+}
+
+// nlhoInstantonHologram: the "instanton hologram" idea (record→conj(ref)→recon) in OUR architecture — linOp ref + opHologram/opRecon,
+// phase-mode. PROBLEM it addresses: the live ruptured field is CHAOTIC (re-condensing to A), so its gradient points back at A and
+// the genome barely drifts (measured θ-drift 0.19rad, corr→A 98%). A HOLOGRAPHIC reconstruction is a SHARPER phase-front:
+//   1. RECORD: forward-propagate the ruptured field T steps into the diffraction domain (opHologram) — the delocalized "plate".
+//   2. CONJ(ref): multiply by the conjugate reference carrier (linOp e^{-i·kx·x}) — the proposal's phase-conjugation (a matched
+//      filter that re-aligns the recorded fringes to the reference, sharpening the reconstruction).
+//   3. RECON: backward-propagate T steps (opRecon) — collapse the plate back to a CLEAN reconstructed phase-front of the rupture.
+// Returns the reconstructed field — a sharper gradient for readGenomeGrad to read than the raw chaotic ruptured field. refK = the
+// reference carrier wavenumber (the proposal's REF_KX). T = the holographic depth. Pure GPU op (restores the buffer).
+function nlhoInstantonHologram(gpu, ruptured, G, dt, { refK = 0.10, T = 12 } = {}) {
+  const saved = gpu.readEyePsi();
+  gpu.setEyePsi(ruptured);
+  if (T > 0) gpu.stepEyeN(T, dt);                          // 1. RECORD → diffraction/plate domain (delocalized)
+  gpu.linOp({ kx: -refK, ky: 0 });                         // 2. CONJ(ref): multiply by e^{-i·refK·x} (phase-conjugate the reference carrier)
+  if (T > 0) gpu.stepEyeN(T, -dt);                         // 3. RECON → collapse the plate back to the reconstructed phase-front
+  const recon = gpu.readEyePsi();
+  gpu.setEyePsi(saved);
+  return recon;
+}
+
+// nlhoLensWalk: LENS-SPACE TUNNEL (measured barrier-free, probe_lensspace.mjs). A→B can't cross in ENERGY-space (the attractor
+// re-condenses every rupture to A), but the genome's IDENTITY is its PHASE-LENS, and the phase path φ_A→φ_B is BARRIER-FREE (energy
+// flat, matched-filter swings A→B smoothly). KEY: walk the PHASE FIELD φ_t=(1−t)φ_A+t·φ_B, NOT genome parameters (param lerp breaks
+// across different map counts 4-vs-3). NATIVE: phases compose multiplicatively, so applying A's plate at coeff (1−t) then B's at t
+// = e^{i((1−t)φ_A+t·φ_B)} = the interpolated plate — exactly the barrier-free path, in two linOp passes. The CARRIED CONTENT is the
+// medium RECALLING ITS OWN RESIDENT OPERATORS (nlhoGenInject = self-hosted code-as-wavefront reconstruction, same primitive as
+// opRecall→opGeometryLens): recalled-A (1−t) blended with recalled-B (t). NOT a hand-placed seed and NOT emergent discovery — the
+// probe arc (probe_recall_select.mjs) measured that phase can't transport geometry and nothing A-derived points at B, so B is
+// RECALLED (the selection of rank=B is the replicated ⚡tunnel decision). `field` arg ignored. t∈[0,1]: 0=recalled-A, 1=recalled-B.
+function nlhoLensWalk(gpu, _field, genomeA, genomeB, t, G, dt, P = {}, { depth = 6, propT = 2 } = {}) {
+  const tt = Math.max(0, Math.min(1, t));
+  const fitA = nlhoFixedPointFit(genomeA, G), fitB = nlhoFixedPointFit(genomeB, G);
+  const cenA = [], cenB = [];
+  for (const mm of fitA.fps) { const vx = fitA.pad + (mm.fx - fitA.minX) * fitA.sc, vy = fitA.pad + (mm.fy - fitA.minY) * fitA.sc; cenA.push(1 + Math.round(vx*(G-3)), 1 + Math.round(vy*(G-3))); }
+  for (const mm of fitB.fps) { const vx = fitB.pad + (mm.fx - fitB.minX) * fitB.sc, vy = fitB.pad + (mm.fy - fitB.minY) * fitB.sc; cenB.push(1 + Math.round(vx*(G-3)), 1 + Math.round(vy*(G-3))); }
+  const aggA = genomeAggregate(genomeA), aggB = genomeAggregate(genomeB);
+  const aA = (1-aggA.s)*0.06*(1-tt), betaA = aggA.theta*0.04*(1-tt);   // A's plate coefficients scaled by (1−t)
+  const aB = (1-aggB.s)*0.06*tt,     betaB = aggB.theta*0.04*tt;       // B's plate coefficients scaled by t
+  // CARRIED CONTENT = the medium RECALLING ITS OWN RESIDENT OPERATORS (self-hosted, NOT a hand-placed seed). nlhoGenInject IS the
+  // medium reconstructing a genome from its own code (the same primitive opRecall→opGeometryLens uses to rebuild a resident operator);
+  // we blend recalled-A (weight 1−t) + recalled-B (weight t). HONESTY (probe_recall_select.mjs measured the whole arc): the medium
+  // CANNOT discover/transport B from an A-rupture (phase can't move energy; recall of an A-rupture reads A; nothing A-derived points at
+  // B) — so B is RECALLED, not created. The SELECTION (which rank = B) is the replicated ⚡tunnel decision (peer-deterministic). The
+  // world CHOOSES the transition; the medium EXECUTES it by recalling B from _rules. This `seed` = self-hosted reconstruction of the
+  // chosen resident operator, t-blended; the phase lens φ_A→φ_B deforms on top. NOT emergent discovery — honest recall + selection.
+  const seed = new Float64Array(2 * G * G);
+  const gA = new Float64Array(2 * G * G), gB = new Float64Array(2 * G * G);
+  try { nlhoGenInject(gA, genomeA, G); } catch (e) {}   // recall A from its own code (the medium's resident operator A)
+  try { nlhoGenInject(gB, genomeB, G); } catch (e) {}   // recall B from its own code (the chosen resident operator B)
+  for (let i = 0; i < 2 * G * G; i++) seed[i] = (1 - tt) * gA[i] + tt * gB[i];   // t-blend of the two recalled operators
+  gpu.setEyePsi(seed);
+  for (let p = 0; p < depth; p++) {
+    gpu.linOp({ centers: cenA, a: aA, beta: betaA, vtx: 0 });   // e^{i(1−t)φ_A}
+    gpu.linOp({ centers: cenB, a: aB, beta: betaB, vtx: 0 });   // · e^{i·t·φ_B}  = e^{i((1−t)φ_A+t·φ_B)} (the interpolated lens)
+    if (propT > 0) gpu.stepEyeN(propT, dt);                     // focal propagation (turns the phase into the carried structure)
+  }
+  return gpu.readEyePsi();
+}
+
+// nlhoClockMaps: build genome B's affine maps for ifsWarpEye in the GPU SHADER's convention (GLSL_IFS_WARP — VERIFIED against the
+// shader source): rotation is about the GRID CENTRE (rel=(x−ctr)−tinv, src=minv·rel+ctr), so the map is M=s·R(θ) with t=(tx−0.5)·G
+// (the opCodeWarp convention). A fixed-point form t=(I−M)·c rotates about the ORIGIN — WRONG for this shader → washes the field
+// (browser: solid-bright, corr 23%). The readout refs (_clockRef) run THIS SAME GPU path, so the attractor lands consistently with
+// the refs (GPU-faithful probe: refA/refB overlap 12%, corr→B reaches 99% — distinct, real transport).
+function nlhoClockMaps(rules, G) {
+  return rules.map(m => { const s = Math.max(0.15, Math.min(1.6, m.s ?? 0.5)), th = m.theta || 0, ct = Math.cos(th), sn = Math.sin(th);
+    return { m: [s*ct, -s*sn, s*sn, s*ct], t: [((m.tx ?? 0.5) - 0.5) * G, ((m.ty ?? 0.5) - 0.5) * G] }; });
+}
+
+// ★ nlhoClockWalk: THE INSTANTON THAT TUNNELS, built on the CHAOS-GAME (the CONTRACTIVE point-set op — gpu.renderChaosGame). The
+// earlier ifsWarpEye build FLOODED: it's a complex-field SUPERPOSITION (1/√K·Σ warped copies) = field-AVERAGING → iterating drives
+// everything to a flat DC field (measured E×1300, peak/mean→1). The chaos-game is the CORRECT operator: it iterates POINT CHAINS
+// p←M·(p−½)+t (the true Hutchinson map) and accumulates DENSITY → CONVERGES to the SPARSE attractor, no flood. THE WALK = the
+// chaos-game ITERATION DEPTH: few iters = chains barely moved from their spread start (diffuse, the ruptured vacuum), more iters =
+// converged onto B's attractor. So `ticks` (0..ticksMax) maps to iters → the density migrates A-spread → B-attractor, the honest
+// contraction. `seedField` is unused (the chaos-game's chains ARE the medium iterating B's maps from any start = the IFS law).
+// Returns a packed-complex field: amplitude = sqrt(density) (the attractor's invariant measure), phase 0. Leaves it on the eye buffer.
+function nlhoClockWalk(gpu, seedField, genomeB, ticks, G, { ticksMax = 10, chains = 30000 } = {}) {
+  // map the walk parameter to chaos-game iteration depth: tick 0 → ITERS_MIN (barely contracted, diffuse), tick max → ITERS_FULL (B's attractor)
+  const ITERS_MIN = 1, ITERS_FULL = 16;
+  const iters = Math.round(ITERS_MIN + (ITERS_FULL - ITERS_MIN) * Math.max(0, Math.min(1, ticks / Math.max(1, ticksMax))));
+  const out = gpu.renderChaosGame(genomeB, { P: G, chains, iters });   // CONTRACTIVE: converges to the sparse attractor (no flood)
+  const N = G * G, f = new Float64Array(2 * N), px = out.pixels;       // px = RGBA density heatmap (P×P), red channel = density ramp
+  for (let i = 0; i < N; i++) { const r = px[i*4] / 255; f[i*2] = Math.sqrt(Math.max(0, r)); f[i*2+1] = 0; }   // amplitude = √density, phase 0
+  gpu.setEyePsi(f);
+  return f;
+}
+
+// ★ nlhoDammannImage: HONEST IMAGING of a genome's K-point constellation by WAVE INTERFERENCE (probe_planewave2 — the first
+// controlled pass). Plane-wave input + ADDITIVE K-branch Dammann (Σ_k plane·e^{iφ_k}, single-center converging lenses) + CONJUGATE
+// placement (lens at 2c0−k so the focus lands ON the target point), then propagate (stepEyeN = the medium imaging by diffraction).
+// NOT a render (renderChaosGame is a trick — discards the wave); NOT a multiply (that's a single centroid focus). The image RESPONDS
+// to the genome → keyed by the tunneled label. Returns the imaged constellation field (amplitude=the K foci) on the GPU eye buffer.
+function nlhoDammannImage(gpu, genome, G, dt, { a = -0.05, propT = 8 } = {}) {
+  const fit = nlhoFixedPointFit(genome, G), N = G * G, cN = (G - 1) / 2;
+  // conjugate-placed lens centers (image lands on genomeFpCenters): for each fixed point c, place the lens at 2c0−c
+  const cen = [];
+  for (const mm of fit.fps) { const vx = fit.pad + (mm.fx - fit.minX) * fit.sc, vy = fit.pad + (mm.fy - fit.minY) * fit.sc;
+    const cx = 1 + Math.round(vx * (G - 3)), cy = 1 + Math.round(vy * (G - 3)); cen.push(Math.round(2*cN - cx), Math.round(2*cN - cy)); }
+  const K = cen.length >> 1, norm = K > 0 ? 1 / Math.sqrt(K) : 1;
+  // ADDITIVE superposition of K plane-wave×(single-center converging lens) branches (the Dammann/beam-splitter — NOT multiply)
+  const acc = new Float64Array(2 * N);
+  for (let k = 0; k < K; k++) { const lx = cen[k*2], ly = cen[k*2+1];
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const dx = x - lx, dy = y - ly, p = a * (dx*dx + dy*dy);   // plane wave (=1) × e^{i·a·r²}
+      const i = (y*G + x) * 2; acc[i] += Math.cos(p) * norm; acc[i+1] += Math.sin(p) * norm; } }
+  gpu.setEyePsi(acc);
+  if (propT > 0) gpu.stepEyeN(propT, dt);   // the MEDIUM images by diffraction (the lensed branches focus to the K points)
+  return gpu.readEyePsi();
+}
+
+// nlhoCoevolveTunnel: EMERGENT A→B migration via PER-MAP fixed-point chase. The migration TARGET is B's ACTUAL fixed points
+// (genomeFpCenters(targetB) — where B's attractor's energy concentrates, computed exactly, not from a noisy lensed read that's
+// distorted by the current A-lens and chases a moving wrong target). Each of A's maps migrates toward its NEAREST B fixed point
+// (round-robin cover so every B-point is claimed), moving the FULL {s,θ,tx,ty} toward B's map → the genome physically becomes B,
+// not a mid-barrier clump. No hard-switch: the rules move under the energy landscape B defines (the critique's "coevolve adjusts wᵢ
+// so the IFS fixed-point migrates A→B"). Returns refined rules + _maxD (distance to B, px) so the caller LOCKS on convergence.
+function nlhoCoevolveTunnel(gpu, rules, targetB, G, dt, P = {}, { lr = 0.35 } = {}) {
+  if (!targetB || !targetB.length) return rules.map(m => ({ ...m }));
+  const cen = genomeFpCenters(rules, G), bcen = genomeFpCenters(targetB, G);   // current fixed pts + B's fixed pts (pixel)
+  const K = bcen.length >> 1;
+  // per-map ASSIGNMENT: each map → nearest B fixed point; round-robin any UNCLAIMED B point onto a map (so all of B is covered).
+  const assign = rules.map((_, i) => { const cx = cen[i*2], cy = cen[i*2+1]; let bj = 0, bd = 1e18;
+    for (let j = 0; j < K; j++) { const d = (cx-bcen[j*2])**2 + (cy-bcen[j*2+1])**2; if (d < bd) { bd = d; bj = j; } } return bj; });
+  const covered = new Set(assign); for (let j = 0; j < K; j++) if (!covered.has(j)) { assign[j % rules.length] = j; covered.add(j); }
+  // CONVERGENCE: max distance (px) from a current fixed point to its assigned B fixed point. Small → the genome has reached B → LOCK.
+  let maxD = 0; for (let i = 0; i < rules.length; i++) { const bj = assign[i]; const d = Math.hypot(cen[i*2]-bcen[bj*2], cen[i*2+1]-bcen[bj*2+1]); if (d > maxD) maxD = d; }
+  // MIGRATE the full {s,θ,tx,ty} toward the assigned B map (so the attractor BECOMES B, not just repositions): tx,ty so the fixed
+  // point lands on B's point; s,θ toward B's map's. fp_target = bcen normalized; t = (I−sR)·fp for the CURRENT s,θ being migrated.
+  const out = rules.map((m, i) => { const bj = assign[i], bm = targetB[bj % targetB.length];
+    const sN = (m.s||0.5) + lr*((bm.s||0.5) - (m.s||0.5)), thN = (m.theta||0) + lr*((bm.theta||0) - (m.theta||0));
+    const fxt = bcen[bj*2] / (G-1), fyt = bcen[bj*2+1] / (G-1), co = Math.cos(thN), si = Math.sin(thN);
+    const txT = fxt - sN*(co*fxt - si*fyt), tyT = fyt - sN*(si*fxt + co*fyt);
+    return { ...m, s: sN, theta: thN, tx: (m.tx||0) + lr*(txT - (m.tx||0)), ty: (m.ty||0) + lr*(tyT - (m.ty||0)) }; });
+  Object.defineProperty(out, '_maxD', { value: maxD, enumerable: false });
+  return out;
+}
+
+// ── OPTICS OPS (the eye's physical apparatus — the TRAP). opRecon is the APERTURE that catches the incoming wavefront
+//    and lifts it into a held RECONSTRUCTION (ctx.recon = the central captured wavefront). opAutofocus chooses the focal
+//    plane by sharpness; opPropagate is forward focal propagation. These make a stack a TRAP when opRecon comes FIRST —
+//    the runner stays untyped; trap-vs-pass is just the ordering. (Recon physics = real backward propagation stepEyeN(-dt).)
+
+// perceptSharpness: peak²/total energy — high when the percept is CONCENTRATED (in focus). The autofocus objective.
+function perceptSharpness(field, N) { let pk=0, sum=0; for (let i=0;i<N;i++){ const a=field[i*2]**2+field[i*2+1]**2; if(a>pk)pk=a; sum+=a; } return sum>1e-12 ? pk/sum : 0; }
+
+// opAutofocus: the eye focuses ITSELF — sweep focal planes on the incoming field, keep the depth that maximizes percept
+// sharpness → ctx.focusDepth (the chosen focal plane the following opRecon reads at). f(field) → deterministic. Identity on ψ.
+// MEMOIZED: the plane-sweep is the eye's most expensive op (planes × stepEyeN + a GPU READBACK each → readback stalls dominate).
+// It is pure f(incoming field) and the field only changes per bar/phase — so re-sweep only when the key changes; subticks reuse
+// the cached focusDepth. INCREMENTAL: instead of a full back-prop to each plane (Σ d ≈ Pd·planes/2 steps), step Δ between planes
+// (the field is already at the previous plane) → Pd total steps. Together this cuts ~10× readbacks + ~planes/2× the propagation.
+function opAutofocus({ maxDepth = 64, planes = 10, keyFn = null } = {}) {
+  return (field, gpu, ctx) => {
+    const k = keyFn ? keyFn(ctx) : `${ctx.bar}|${(ctx.phaseT||0).toFixed(2)}|${maxDepth|0}`;
+    if (ctx._afKey === k && ctx.focusDepth != null) return field;   // reuse the cached focal plane (no sweep this subtick)
+    const N = ctx.G * ctx.G, saved = gpu.readEyePsi(), Pd = Math.max(8, Math.min(400, maxDepth|0));
+    const stepD = Math.max(1, Math.round(Pd/planes));
+    let best = { d: 1, sh: -1 };
+    gpu.setEyePsi(field);   // start at the field; walk BACKWARD incrementally (each plane = +stepD more steps from the last)
+    for (let d = stepD; d <= Pd; d += stepD) {
+      gpu.stepEyeN(stepD, -ctx.dt);   // INCREMENTAL: advance Δ from the previous plane (not a fresh full back-prop)
+      const sh = perceptSharpness(gpu.readEyePsi(), N); if (sh > best.sh) best = { d, sh };
+    }
+    gpu.setEyePsi(saved); ctx.focusDepth = best.d; ctx.focusSharp = best.sh; ctx._afKey = k;
+    return field;   // autofocus only CHOOSES the plane — identity on ψ; opRecon reads at ctx.focusDepth
+  };
+}
+
+// opHologram: FORWARD-propagate the incoming wavefront T steps INTO the diffraction/hologram domain (§7.40). The near-field
+// object spreads into a DELOCALIZED interference pattern — THE HOLOGRAM (every part now carries info about every part →
+// occlusion-resistant). Bigger T = deeper = more delocalized. Writes ctx.hologram (first-class) + returns it. This is the
+// FORWARD half of the trap (record); opRecon is the backward half (read). depthFn(ctx)→T (the holographic time-depth).
+function opHologram({ depthFn = null, depth = 12 } = {}) {
+  return (field, gpu, ctx) => {
+    const T = Math.max(0, (depthFn ? depthFn(ctx) : depth) | 0);
+    ctx.holoT = T;
+    if (T === 0) { ctx.hologram = field; return field; }   // T=0 → no hologram domain (the near-field object IS the "hologram")
+    gpu.setEyePsi(field); gpu.stepEyeN(T, ctx.dt);   // forward → the diffraction domain (the spread hologram)
+    ctx.hologram = gpu.readEyePsi();   // the HELD hologram — the delocalized record (EYE ◀)
+    return ctx.hologram;
+  };
+}
+
+// opRecon: THE TRAP READ — RECONSTRUCT the held hologram by backward propagation (the matched depth = ctx.holoT, §7.101i the
+// lossless temporal coordinate). The delocalized hologram collapses back into the localized image — the eye's PERCEPT. Reads
+// the depth from ctx.holoT (set by opHologram) so forward T and backward T MATCH (the exact-inverse round-trip → clean recon).
+// Writes ctx.recon (first-class) + returns it as the field the rest of the stack acts on (EYE ▸).
+function opRecon({ depthFn = null, depth = 12 } = {}) {
+  return (field, gpu, ctx) => {
+    // depthFn(ctx) is the explicit depth (manual/matched). If it returns undefined (autofocus mode), opAutofocus's ctx.focusDepth
+    // wins over the matched ctx.holoT — so the eye reads at the AUTOFOCUSED plane, not the forward-spread plane.
+    const explicit = depthFn ? depthFn(ctx) : undefined;
+    const D = Math.max(1, (explicit ?? ctx.focusDepth ?? ctx.holoT ?? depth) | 0);
+    gpu.setEyePsi(field); gpu.stepEyeN(D, -ctx.dt);   // backward propagation → the reconstruction (matched-depth → clean)
+    ctx.recon = gpu.readEyePsi();   // the HELD reconstruction — the eye's percept (the trap read the hologram back)
+    return ctx.recon;               // the rest of the stack acts on the reconstructed percept
+  };
+}
+
+// opPropagate: forward focal propagation (the pass-through focal step / the lens forming its image). propT steps of stepEyeN.
+function opPropagate({ propT = 2 } = {}) {
+  return (field, gpu, ctx) => { if (propT <= 0) return field; gpu.setEyePsi(field); gpu.stepEyeN(propT, ctx.dt); return gpu.readEyePsi(); };
+}
+
+// occludeField(gpu, field, ctx, seed?): DAMAGE any wavefront in place — the physically-honest occlusion (eye.js's H=OCCL
+//    family, the SAME GPU primitive gpu.applyEyeHologram). The damage params ride ctx.occ = { mode, r, block } so occlusion is
+//    a UNIFORM MEDIUM PROPERTY hitting EVERY wavefront — the IMAGE (the trap hologram) AND the PROGRAM (the recall cue, the
+//    self code-field, the injected genome). ctx.occ.mode 6=LEFT-slab|7=RZero|8=RNois; r=fraction; block=px. mode/r 0 → identity.
+//    Returns the damaged field (a fresh array; the input is not mutated beyond the GPU buffer). `seed` offsets the random pattern.
+function occludeField(gpu, field, ctx, seed = 0) {
+  const oc = ctx.occ; if (!oc) return field;
+  const m = oc.mode | 0, frac = Math.max(0, Math.min(1, oc.r || 0));
+  if (!m || frac <= 0) return field;
+  gpu.setEyePsi(field);
+  gpu.applyEyeHologram(m, frac, { block: (oc.block | 0) || 8, seed: (oc.seed || 0) + seed });
+  return gpu.readEyePsi();
+}
+
+// occludeHolographic(gpu, field, ctx, seed?): the HOLOGRAPHIC occlusion — spread the field forward by ctx.occ.holoT (delocalize:
+// every region carries the whole), occlude the SPREAD record, then reconstruct backward (matched depth → exact inverse). This is
+// the §7.101i round-trip applied to the PROGRAM: at holoT=0 it's plain (localized) occlusion → damage ERASES; at high holoT the
+// code is delocalized → the SAME occlusion only DIMS → the program SURVIVES bigger damage and RESURRECTS better. The honest
+// "program hologram": higher holoT = more redundancy. Returns the reconstructed (damaged-then-healed) field.
+function occludeHolographic(gpu, field, ctx, seed = 0) {
+  const oc = ctx.occ; if (!oc || !(oc.mode|0) || (oc.r||0) <= 0) return field;
+  const T = Math.max(0, oc.holoT|0);
+  if (T === 0) return occludeField(gpu, field, ctx, seed);   // no spread → localized occlusion (the damage erases)
+  gpu.setEyePsi(field); gpu.stepEyeN(T, ctx.dt);             // forward → the spread hologram (the code delocalized)
+  const spread = occludeField(gpu, gpu.readEyePsi(), ctx, seed);   // occlude the DELOCALIZED record
+  gpu.setEyePsi(spread); gpu.stepEyeN(T, -ctx.dt);           // backward → reconstruct (matched depth → clean where undamaged)
+  return gpu.readEyePsi();
+}
+
+// opOcclude: the IMAGE-modality occlusion op (used in the trap, between opHologram and opRecon). Damages the SPREAD HOLOGRAM
+//    via occludeField → the recon's survival measures holographic redundancy (high holoT spreads info → damage DIMS not
+//    ERASES). Writes ctx.occluded (first-class — EYE ◀ shows the damage). Reads the damage params from ctx.occ (set by the app).
+function opOcclude() {
+  return (field, gpu, ctx) => {
+    const oc = ctx.occ; if (!oc || !(oc.mode|0) || (oc.r||0) <= 0) return field;   // identity (no damage)
+    ctx.occluded = occludeField(gpu, field, ctx);   // the damaged wavefront (EYE ◀ reflects it)
+    return ctx.occluded;
+  };
+}
+
+// ── makePerception(spec): the PERCEPTION sub-stack for a mode (the part shared by EVERY lens, medium or eye). One place
+//    that maps a mode → the composed ops: recall/coevolve SELECT-then-run, self = the standalone θ-walk, pass/clock = the
+//    plain genome lens. spec wires the app's data into the ops (the bank, the cue, the seed, the source, the genome, depth).
+//    Returns a LensOp. This is the body of a stack; makeTrapStack wraps it with the optical trap (hologram→recon) for the eye.
+function makePerception(mode, spec) {
+  const { bankFn, cueFn, seedFn, srcFn, genomeFn, depthFn, lawFn, opSpeed, recallT, P } = spec;
+  if (mode === 'self' || mode === 'recallself') {
+    // recallself = recall SELECTS which genome, then self EVOLVES it (recognition → adaptation); self = walk the seed directly.
+    const recallStep = mode === 'recallself' ? opRecall(bankFn, cueFn, { recallT, keyFn: spec.recallKeyFn }) : null;
+    return composeLens(recallStep, opSelfEvolve(seedFn, { lawFn, opSpeed, keyFn: spec.selfKeyFn, P }));
+  }
+  const sel = mode === 'recall'   ? opRecall(bankFn, cueFn, { recallT, keyFn: spec.recallKeyFn })
+            : mode === 'coevolve' ? opCoevolve(seedFn, srcFn, { opSpeed, keyFn: spec.coevKeyFn, P })
+            : null;   // pass/clock = no select; just run the active genome
+  return composeLens(sel, opGeometryLens(genomeFn, { depthFn, P }));
+}
+
+// opCodeMask: THE CODE GATES THE IMAGE CONTENT — IN THE MEDIUM (§7.90 binding=computation, ψ_image·ψ_code via gpu.bindEyeField,
+//    the GLSL_FIELD_MUL complex product). The genome's generator-events ARE the operand B (its real footprint in the medium —
+//    not a JS-invented mask); the MULTIPLY happens on the GPU (the medium operating on the medium, "the optical chip"), NOT a CPU
+//    loop. The product is field content the soliton/IFS then transports (§9). Where the code has footprint, image content passes;
+//    elsewhere it is suppressed → mutating {s,θ,tx,ty} reshapes WHICH content survives. gainFn(ctx)→0..1 (interpolate identity↔bound).
+//    The operand is normalized to a 0..~1 footprint (so the product GATES, doesn't blow up amplitude); the soft extent rides the
+//    genome's own satellite radius. off → identity.
+function opCodeMask(maskFn, { gainFn = null } = {}) {
+  return (field, gpu, ctx) => {
+    const g = gainFn ? gainFn(ctx) : 1; if (g <= 0) return field;
+    const rules = maskFn(ctx); if (!rules || !rules.length) return field;
+    const G = ctx.G, N = G * G;
+    // operand B = the genome's footprint over the IMAGE (its fixed points spread across the whole grid, NOT the corner generator
+    // region), each a BROAD Gaussian so the gate is a smooth, image-spanning mask — at g=1 it SUPPRESSES where the genome has no
+    // structure but does NOT nuke the whole image to bare blobs. B = (1−g)·1 + g·footprint → g=0 ⇒ B≡1 (no-op), g=1 ⇒ full gate.
+    const centers = genomeFpCenters(rules, G);   // the genome's fixed points as full-grid pixel centres (where its attractor lives)
+    const sig = Math.max(4, G / 6), s2 = 2 * sig * sig, B = new Float64Array(2 * N);   // broad footprint (σ ∝ grid → image-spanning)
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+      let foot = 0;
+      for (let c = 0; c < centers.length; c += 2) { const dx = x - centers[c], dy = y - centers[c+1]; foot = Math.max(foot, Math.exp(-(dx*dx + dy*dy) / s2)); }
+      B[(y*G+x)*2] = (1 - g) + g * foot; }   // real operand (magnitude gate), imag = 0
+    // THE MEDIUM DOES THE MULTIPLY: load the image, bindEyeField(B) = GPU ψ·=B, read the bound percept back.
+    gpu.setEyePsi(field);
+    gpu.bindEyeField(B);
+    ctx.codeMasked = gpu.readEyePsi();   // first-class (the in-medium bound percept)
+    return ctx.codeMasked;
+  };
+}
+
+// opCodeWarp: THE CODE AS A GEOMETRIC OPERATOR (data=code, §7.92/7.97 METRIC transform). NOT painted content — the genome's
+//    {s,θ,tx,ty} IS an affine map M=s·R(θ), t=(tx,ty), executed by the medium's OWN operator gpu.affineEyeCenters (a coordinate
+//    RESAMPLE: out(x)=src(M⁻¹·(x−t))) — no JS painting. So the code ROTATES / SCALES / TRANSLATES the image by warping its space.
+//    Mutating the code = mutating the warp (θ→rotate, s→scale, tx,ty→translate). This is the self-hosting form: the operator is
+//    the curvature of the space, residue-free. warpFn(ctx)→rules; gainFn(ctx)→0..1 (interpolate identity↔full warp). off → identity.
+// paramGainFn(ctx)→{ s, theta, tx, ty } (each a 0..1+ multiplier on that parameter's contribution to the warp; default all = g).
+// mapCountFn(ctx)→int: how many of the genome's K maps PARTICIPATE = the REPLICATION COUNT (each map = one warped copy COMPLEX-
+//   SUPERPOSED into the result, interfering). 1 = single warp; K = full IFS. Clamped to [1, genome's map count]. null → all maps.
+function opCodeWarp(warpFn, { gainFn = null, paramGainFn = null, mapCountFn = null } = {}) {
+  return (field, gpu, ctx) => {
+    const g = gainFn ? gainFn(ctx) : 1; if (g <= 0) return field;
+    let rules = warpFn(ctx); if (!rules || !rules.length) return field;
+    const G = ctx.G;
+    // REPLICATION COUNT: keep the first `nMaps` of the genome's maps (each adds one copy to the union). Honest — it selects how
+    // many of the genome's REAL maps act, it does not invent copies. Clamp to [1, K].
+    if (mapCountFn) { const nMaps = Math.max(1, Math.min(rules.length, mapCountFn(ctx) | 0)); rules = rules.slice(0, nMaps); }
+    // per-parameter FRACTIONS (0..1, default 1) — effective gain per DOF = master g × fraction. So each slider scales how much
+    // that geometric DOF participates: e.g. theta=1,others=0 → pure rotation; s=1,others=0 → pure scale. null → all follow master.
+    const pg = paramGainFn ? paramGainFn(ctx) : null, fr = (v) => (v == null ? 1 : v);
+    const gS = g * fr(pg && pg.s), gTh = g * fr(pg && pg.theta), gTx = g * fr(pg && pg.tx), gTy = g * fr(pg && pg.ty);
+    // THE FULL K-MAP IFS OPERATOR: ψ' = (1/√K)·Σₖ fₖ(ψ). Each map fₖ = sₖ·R(θₖ) about the grid centre + translate (txₖ,tyₖ) — a
+    // §7.97 METRIC coordinate-remap (the affine resample; the honest form for a geometric transform). The K warped wavefronts are
+    // COMPLEX-SUPERPOSED (they INTERFERE — the true wave-combine), one GPU pass (gpu.ifsWarpEye). Per-parameter gains blend EACH of
+    // {s,θ,tx,ty} toward identity independently (each slider isolates one geometric DOF). NOTE: the LENS phase mode is the pure
+    // ψ·e^{iφ} circular medium (no resample); the warp NEEDS the metric resample to rotate/scale an extended image — both honest.
+    const maps = rules.map(m => {
+      const sRaw = Math.max(0.15, Math.min(1.6, (m.s ?? 0.5)));
+      const s = 1 + (sRaw - 1) * gS;                         // scale blended toward 1 by gS
+      const th = (m.theta || 0) * gTh, ct = Math.cos(th), sn = Math.sin(th);   // rotation blended toward 0 by gTh
+      return { m: [s*ct, -s*sn, s*sn, s*ct], t: [((m.tx ?? 0.5) - 0.5) * G * gTx, ((m.ty ?? 0.5) - 0.5) * G * gTy] };
+    });
+    gpu.setEyePsi(field);
+    gpu.ifsWarpEye(maps);                 // the K affine maps, complex-superposed (interfering), one GPU pass, in-medium
+    ctx.codeWarped = gpu.readEyePsi();    // first-class (the full K-map IFS-transformed percept)
+    return ctx.codeWarped;
+  };
+}
+
+// makeTrapStack(spec): THE EYE = a TRAP = a lens COMPOSITION. opHologram (FORWARD T → record, ctx.hologram = EYE ◀) then
+//    opRecon (BACKWARD T → read, ctx.recon = EYE ▸) then PERCEPTION on the reconstruction. recon-FIRST ⇒ trap (the ordering
+//    IS the trap; the runner stays untyped). The SAME makePerception body runs the eye's clock/recall/self ON ITS RECON —
+//    so the eye operates meta-circularly on its lifted replica of the world. holoTFn/reconDFn(ctx)→T. opticsFn(ctx)→bool.
+function makeTrapStack(mode, spec) {
+  return composeLens(
+    spec.opticsFn && spec.opticsFn(spec.ctx)
+      // re-sweep only a few times per bar (phaseT is continuous wall-clock → QUANTIZE to ~8 bins/unit so the memo actually hits;
+      // keying on raw phaseT would miss every frame). Bar + phase-bin + recon depth = everything that moves the incoming field.
+      ? opAutofocus({ maxDepth: (spec.reconDFn ? spec.reconDFn() : 24) * 2,
+                      keyFn: (c) => `${c.bar}|${Math.floor((c.phaseT||0)*2)}|${spec.reconDFn?spec.reconDFn():24}` })
+      : null,
+    opHologram({ depthFn: spec.holoTFn }),   // FORWARD T → ctx.hologram (EYE ◀ raw)
+    // OCCLUDE the SPREAD HOLOGRAM (the IMAGE modality, honest H=OCCL) — damage the delocalized record before reconstructing.
+    // ctx.hologram → the DAMAGED field so EYE ◀ shows the occlusion; the recon's survival = holographic redundancy at this holoT.
+    // (The PROGRAM modality is occluded INSIDE opRecall/opSelfEvolve — the cue & code-field — so ALL modalities degrade, not just image.)
+    opOcclude(),
+    (field, gpu, ctx) => { if (ctx.occluded) ctx.hologram = ctx.occluded; return field; },   // EYE ◀ reflects the damage
+    // ── THE CODE ACTS ON THE WAVEFRONT *BEFORE* RECON (the physical story: woven into the delocalized hologram, not stamped on
+    //    the formed picture). Two distinct couplings, each behind its own gain (0 → identity):
+    //  (a) WARP — code as a GEOMETRIC OPERATOR (data=code, §7.97 metric): affineEyeCenters rotates/scales/translates the space.
+    spec.codeWarpGainFn ? opCodeWarp(spec.maskFn, { gainFn: spec.codeWarpGainFn, paramGainFn: spec.paramGainFn, mapCountFn: spec.mapCountFn }) : null,
+    //  (b) GATE — code as CONTENT (§7.90 binding ψ·ψ_code): the genome field masks which content survives.
+    spec.codeMaskGainFn ? opCodeMask(spec.maskFn, { gainFn: spec.codeMaskGainFn }) : null,
+    opRecon({ depthFn: spec.reconDFn }),     // BACKWARD T → ctx.recon  (EYE ▸ raw, reconstructed from the code-acted hologram)
+    makePerception(mode, spec),              // perceive ON the recon (the eye's own mode, meta-circular)
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// U(1) OBSERVER-LENS ALGEBRA (u-register arc step 3; doc/proper-time-metric.md §12) — the observer
+// descriptor {mode, phase, beta, omega, prec} as an algebraic VALUE, pure functions only (no medium,
+// no GPU, no clock: the algebra knows THAT an op evaluates against a worldline time, never how the
+// medium accounts it). Conventions, matching medium.js exactly:
+//   phase — the AUTHORED reference angle (W: the live engine accumulator, which ALSO absorbs its own
+//           precession at each beat; V/P: the drain-time aphase ledger, precession NOT included);
+//   prec  — the INTEGRATED precession Σω per own-beat for slots whose phase excludes it (V/P; W keeps
+//           prec = 0 since its phase already carries it) → angle(op) = phase + prec is UNIFORM: the
+//           total instantaneous reference angle for every slot;
+//   beta  — pin stiffness multiplier. NOT part of the read transform (β is dynamics — how hard the
+//           field is pulled toward the reference — not what an observer's read DOES to a field), so
+//           apply() deliberately ignores it; compose multiplies it (stacked pins stack stiffness);
+//   omega — precession rate (rad per own slot-beat), the time component of the lens.
+// THE MODEL LAWS this algebra states (and chainRead measures the medium against):
+//  · the 'id'/'phase' sector is ABELIAN — link phases add exactly, chain().defect ≡ 0 by construction;
+//    a nonzero MEASURED ε is the medium deviating from the model, never algebra error.
+//  · 'metric' (affine resample, §7.97) and 'gauge' (affine + tilt) compose by the SEMIDIRECT PRODUCT —
+//    the actual group of this optics: acting a THEN b on a field gives
+//      A = A_b·A_a  (non-abelian: order matters)      t = A_b·t_a + t_b
+//      k = k_b + k_a·A_b⁻¹  (the tilt PULLED BACK through b's map)
+//      φ = φ_a + φ_b − (k_a·A_b⁻¹)·t_b  (the translation's phase correction)
+//    with β multiplying and ω/prec adding as before. compose() is closed over the full table now;
+//    null is returned only for UNKNOWN modes — refuse rather than fake.
+// Element (all fields optional, defaults = identity): { mode, phase, kx, ky, A:[axx,axy,ayx,ayy], tx, ty,
+// beta, omega, prec }. Spatial convention: CENTERED coordinates ξ = x − c, c = (G−1)/2, field interleaved
+// [re,im] row-major (idx = (y·G + x)·2); the map acts ξ_out = A·ξ_in + t; the phase profile
+// φ(ξ) = phase + prec + k·ξ applies in the OUTPUT frame (so angle(op) stays the k=0 center reference).
+const lensU1 = (() => {
+  const IDA = [1, 0, 0, 1];
+  const _A = (op) => op.A || IDA;
+  const hasA = (op) => { const A = _A(op); return A[0] !== 1 || A[1] !== 0 || A[2] !== 0 || A[3] !== 1 || !!(op.tx || op.ty); };
+  const hasK = (op) => !!(op.kx || op.ky);
+  const mul2 = (B, A) => [B[0] * A[0] + B[1] * A[2], B[0] * A[1] + B[1] * A[3], B[2] * A[0] + B[3] * A[2], B[2] * A[1] + B[3] * A[3]];   // B·A
+  const inv2 = (A) => { const d = A[0] * A[3] - A[1] * A[2]; return d ? [A[3] / d, -A[1] / d, -A[2] / d, A[0] / d] : null; };
+  const KNOWN = new Set(['id', 'phase', 'metric', 'gauge']);
+  const modeOf = (mA, mK) => mA ? (mK ? 'gauge' : 'metric') : (mK ? 'phase' : 'id');
+  // ── ℂ* GENERALIZATION (the `gain` component; U(1) → ℂ*): a U(1) element is e^{iφ} (unit modulus, UNITARY →
+  //    norm-preserving → COMPACT → intrinsically runaway-proof). Dropping unit-modulus gives r·e^{iφ} = (gain, phase)
+  //    — the group ℂ* under multiplication: phases ADD, gains MULTIPLY. Still abelian, still a group. `gain` defaults
+  //    to 1 EVERYWHERE (`op.gain ?? 1`), so every U(1) call site is the gain≡1 slice, byte-unchanged. This is the ONE
+  //    honest extension that stays a Lie group AND makes runaway possible: ℂ* is NON-compact (r unbounded above), so
+  //    apply is no longer unitary and self-hosting can diverge in the r dimension — the medium's amplitude/energy as
+  //    a first-class lens component. The medium's energy CAP becomes, in this algebra, a BOUND on gain (see lensC1).
+  const L = {
+    id: () => ({ mode: 'id', phase: 0, gain: 1, kx: 0, ky: 0, A: [1, 0, 0, 1], tx: 0, ty: 0, beta: 1, omega: 0, prec: 0 }),
+    wrap: (x) => Math.atan2(Math.sin(x), Math.cos(x)),
+    angle: (op) => op.phase + (op.prec || 0),                                   // the k=0 CENTER reference angle (for tilted/metric ops: the reference at ξ=0, a partial reading of the full profile)
+    evalAt: (op, dTau) => op.phase + (op.prec || 0) + (op.omega || 0) * dTau,   // predicted angle dTau proper-time units AHEAD (per-op clock — the caller supplies each op's own dτ)
+    compose: (a, b) => {                                                        // a THEN b (apply(b, apply(a, ψ)) ≡ apply(compose(a,b), ψ))
+      if (!a || !b || !KNOWN.has(a.mode ?? 'id') || !KNOWN.has(b.mode ?? 'id')) return null;
+      const Ab = _A(b), Abi = inv2(Ab); if (!Abi) return null;
+      const A = mul2(Ab, _A(a));
+      const tx = Ab[0] * (a.tx || 0) + Ab[1] * (a.ty || 0) + (b.tx || 0), ty = Ab[2] * (a.tx || 0) + Ab[3] * (a.ty || 0) + (b.ty || 0);
+      const kpx = (a.kx || 0) * Abi[0] + (a.ky || 0) * Abi[2], kpy = (a.kx || 0) * Abi[1] + (a.ky || 0) * Abi[3];   // k_a·A_b⁻¹ (row form)
+      const kx = (b.kx || 0) + kpx, ky = (b.ky || 0) + kpy;
+      const out = { mode: '', phase: a.phase + b.phase - (kpx * (b.tx || 0) + kpy * (b.ty || 0)), gain: (a.gain ?? 1) * (b.gain ?? 1), kx, ky, A, tx, ty,
+        beta: a.beta * b.beta, omega: (a.omega || 0) + (b.omega || 0), prec: (a.prec || 0) + (b.prec || 0) };   // ℂ*: gains MULTIPLY (as phases add)
+      out.mode = modeOf(hasA(out), hasK(out)); return out; },
+    invert: (op) => { if (!op || !KNOWN.has(op.mode ?? 'id')) return null;      // compose(op, invert(op)) = id (β inverts, ω/prec negate — the anti-aged inverse lens)
+      const A = _A(op), Ai = inv2(A); if (!Ai) return null;
+      const out = { mode: '', phase: -op.phase - ((op.kx || 0) * (op.tx || 0) + (op.ky || 0) * (op.ty || 0)), gain: (op.gain ?? 1) ? 1 / (op.gain ?? 1) : 1,   // ℂ*: gain inverts (1/r)
+        kx: -((op.kx || 0) * A[0] + (op.ky || 0) * A[2]), ky: -((op.kx || 0) * A[1] + (op.ky || 0) * A[3]),
+        A: Ai, tx: -(Ai[0] * (op.tx || 0) + Ai[1] * (op.ty || 0)), ty: -(Ai[2] * (op.tx || 0) + Ai[3] * (op.ty || 0)),
+        beta: op.beta ? 1 / op.beta : 1, omega: -(op.omega || 0), prec: -(op.prec || 0) };
+      out.mode = modeOf(hasA(out), hasK(out)); return out; },
+    link: (a, b) => L.wrap((b.phase + (b.prec || 0)) - (a.phase + (a.prec || 0))),   // predicted pairwise read a→b (gauge-invariant: a difference of center references)
+    chain: (ops) => { if (!ops || ops.length < 2) return null;
+      const links = []; let s = 0;
+      for (let i = 0; i + 1 < ops.length; i++) { const l = L.link(ops[i], ops[i + 1]); links.push(l); s += l; }
+      const composed = L.link(ops[0], ops[ops.length - 1]);
+      return { links, composed, defect: L.wrap(s - composed) }; },              // defect ≡ 0 in the abelian model — stated so the meter's contract is explicit
+    apply: (op, psi, G) => {                                                    // β deliberately NOT applied (pin stiffness is dynamics, not read); ℂ*: SCALE by gain (unitary only when gain=1); metric path = bilinear resample, zero-fill outside
+      const phi0 = (op.phase || 0) + (op.prec || 0), gn = op.gain ?? 1;
+      const mA = hasA(op), mK = hasK(op);
+      if (!mA && !mK) { const c = gn * Math.cos(phi0), s = gn * Math.sin(phi0), r = new Float64Array(psi.length);   // r·e^{iφ}·ψ
+        for (let j = 0; j < psi.length; j += 2) { r[j] = psi[j] * c - psi[j + 1] * s; r[j + 1] = psi[j] * s + psi[j + 1] * c; } return r; }
+      const n = psi.length >> 1; if (!G) G = Math.round(Math.sqrt(n));
+      const c0 = (G - 1) / 2, Ai = inv2(_A(op)); if (!Ai) return null;
+      const r = new Float64Array(psi.length);
+      for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+        const xi = x - c0, yi = y - c0;                                         // output ξ
+        let sr = 0, si = 0;
+        if (mA) { const ux = xi - (op.tx || 0), uy = yi - (op.ty || 0);
+          const sx = Ai[0] * ux + Ai[1] * uy + c0, sy = Ai[2] * ux + Ai[3] * uy + c0;   // source cell
+          const x0 = Math.floor(sx), y0 = Math.floor(sy), fx = sx - x0, fy = sy - y0;
+          for (let dy = 0; dy <= 1; dy++) for (let dx = 0; dx <= 1; dx++) {
+            const X = x0 + dx, Y = y0 + dy; if (X < 0 || Y < 0 || X >= G || Y >= G) continue;
+            const w = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy), j = (Y * G + X) * 2;
+            sr += w * psi[j]; si += w * psi[j + 1]; }
+        } else { const j = (y * G + x) * 2; sr = psi[j]; si = psi[j + 1]; }
+        const th = phi0 + (op.kx || 0) * xi + (op.ky || 0) * yi, ct = gn * Math.cos(th), st = gn * Math.sin(th), j = (y * G + x) * 2;   // gain scales the metric read too
+        r[j] = sr * ct - si * st; r[j + 1] = sr * st + si * ct; }
+      return r; },
+    // ── ℂ* helpers (the general group): logGain (=ln r) is the natural coordinate — it composes ADDITIVELY like phase,
+    //    so (phase, logGain) is a uniform 2-vector. capGain bounds r (the medium's energy law as an algebra op). ──
+    idC: (gain = 1) => ({ ...L.id(), gain }),
+    logGain: (op) => Math.log(op.gain ?? 1),
+    capGain: (op, rMax) => ((op.gain ?? 1) > rMax ? { ...op, gain: rMax } : op),
+    // pin(op) / unpin(op): the SUBMANIFOLD projections. pin → the U(1) slice (gain forced to 1 — energy renormalized,
+    // the amplitude DOF removed); unpin → the element as-is in ℂ* (its gain becomes free to vary). "lensU1 → lensC1"
+    // for a live worldline IS unpin: not a mutation of the element (it always has all fields) but a change of WHICH
+    // algebra governs it — a worldline acquiring the amplitude degree of freedom. repin projects it back (gain → 1).
+    pin: (op) => (op.gain === 1 ? op : { ...op, gain: 1 }),
+    unpin: (op) => op,   // identity on the element — "unpinned" is a governance choice the caller records, not a field
+  };
+  return L;
+})();
+// lensC1 — the FULL ℂ* group (gain free). lensU1 (above) is its UNITARY SUBGROUP: same object, but callers that use
+// lensU1 DECLARE "I stay on the compact, energy-preserving, runaway-proof slice" (gain≡1). The subgroup relation is
+// real and load-bearing — the thin apps' determinism-via-compactness depends on staying pinned. A worldline moves
+// lensU1 → lensC1 by UNPINNING (gaining the amplitude DOF); ← by REPINNING (lensU1.pin, gain → 1). The names encode
+// intent; `pin`/`unpin` are the transitions between the two governances.
+const lensC1 = lensU1;
+
 export { makeRegion, makeCarrier, linOp, linDemod, makeBand, makeDepthBand, subspaceCoherence, regionsOverlap,
          regionEventSoliton, regionWaveSoliton, defaultWaveCells, imageSoliton, place, atDepth,
          bind, regionBind, gate, recognizePure, recognizeFull, recall, geometrySoliton, operatorModality, operatorSoliton, operatorSolitonCyc, fitOperatorSoliton, unite, evalSolitonTemporalAt, evalSolitonTemporalLiveAt, lesionTravellingField, measureCarrierCrosstalk,
          probeObjects, PROBE_OBJECT_NAMES, makeProbeField,
-         nlhoGenRegion, nlhoFixedPointFit, nlhoGenInject, nlhoReadGenerator, nlhoDefaultRules, makeGenomeLens, probeSubpixelSeam };
+         nlhoGenRegion, nlhoFixedPointFit, nlhoGenInject, nlhoReadGenerator, nlhoDefaultRules, nlhoResonanceRules, makeGenomeLens, genomeAggregate, probeSubpixelSeam,
+         composeLens, barClockDepth, genomeFpCenters, genomeCodeField, readGenomeGrad, thetaWalk, runGenomeLens,
+         opGeometryLens, opRecall, opSelfEvolve, opCoevolve, nlhoCoevolveTunnel, nlhoRuptureAdapt, nlhoInstantonHologram, nlhoLensWalk, nlhoClockWalk, nlhoClockMaps, nlhoDammannImage,
+         perceptSharpness, opAutofocus, opHologram, opRecon, opPropagate, opOcclude, occludeField, occludeHolographic, applyLife,
+         opCodeMask, opCodeWarp, makePerception, makeTrapStack, lensU1, lensC1 };
 // CARRIER path (eventSoliton, carrierEventSoliton, carrierWaveSoliton, evalSolitonAt) moved to
 // soliton-algebra-research.js (§7.44/§7.47: the live app is temporal; carriers are the non-live original).

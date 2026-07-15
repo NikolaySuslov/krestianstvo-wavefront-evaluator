@@ -55,7 +55,14 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 //                       Synthesis = adjoint back-projection → intensity reconstruction
 //
 // ── Default IFS clock parameters ─────────────────────────────────────────────
-export const IFS_MAPS_DEFAULT = [
+// KEPLER-SPECTRUM TEST (native clock law): the fractal clock's scale-period constants ARE these ratios
+// (childDelay = delay × ratio; keplerIFS() measures the per-depth ratio live). GOLDEN-ONLY run: a single
+// ratio ⇒ measured slope must be exactly 0.618 (no survivor bias possible) and the kernel rings must land
+// on a φ-spaced ladder (…17, 11, 7, 4 — floor-cut at IFS_MIN_DELAY/DELAY_SCALE ≈ 4.2). Revert = swap arrays.
+export const IFS_MAPS_golden = [
+  0.6180339887,  // φ⁻¹ — golden ratio ONLY (the single-constant log-periodic clock)
+];
+export const IFS_MAPS_DEFAULT = [   // the original six-ratio spectrum (restore by renaming back to IFS_MAPS_DEFAULT)
   0.3090169944,  // cos(72°)   — pentagonal / icosahedral
   0.4142135623,  // √2 - 1     — silver ratio
   0.5,           // 1/2        — dyadic

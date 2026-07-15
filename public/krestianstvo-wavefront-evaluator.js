@@ -9,7 +9,7 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 // Deterministic reactive execution engine for multiplayer distributed apps.
 // Built on Renkon (reactive programs) + Krestianstvo - Renkon VM | Croquet synchronisation model.
 //
-// Exports: W, makeRng, makeMeta, makeWorld, makeView, makeShim, makePeer,
+// Exports: W, makeRng, makeMeta, makeWorld, makeView, makeShim, makePeer, makeTauKernel (kwe-tau.js),
 //          _worldNextAt, _worldSnapshot, META_PROGRAM, _VIEW_PROGRAM,
 //          makeIfsClock
 // ═══════════════════════════════════════════════════════════════════════════
@@ -19,16 +19,24 @@ export { ProgramState };
 
 // ── Priority queue (_Q) ───────────────────────────────────────────────────────
 const _Q = (() => {
-  const enqueue = (q, e) => [...q, e].sort((a, b) => a.fireAt - b.fireAt);
+  // Entries are due either on COORDINATE time (fireAt ≤ wallTime — ctx.future) or on PROPER time (fireAtTau ≤ the
+  // node's __clock reading — ctx.futureTau). τ entries carry NO fireAt (never Infinity: JSON.stringify(Infinity)
+  // → null would silently corrupt the join snapshot); absence sorts last, never coordinate-ready, never blocks
+  // stability (a τ future waiting on a stable world can never fire — honestly parked).
+  const enqueue = (q, e) => [...q, e].sort((a, b) => ((a.fireAt ?? Infinity) - (b.fireAt ?? Infinity)));
   const split   = (q, now) => ({
-    ready: q.filter(e => e.fireAt <= now),
-    later: q.filter(e => e.fireAt >  now),
+    ready: q.filter(e => e.fireAt !== undefined && e.fireAt <= now),
+    later: q.filter(e => e.fireAt === undefined || e.fireAt >  now),
   });
-  const nextAt  = (q) => q.length > 0 ? q[0].fireAt : Infinity;
+  const nextAt  = (q) => { for (const e of q) { if (e.fireAt !== undefined) return e.fireAt; } return Infinity; };
   return Object.freeze({ enqueue, split, nextAt });
 })();
 
 // ── XOROSHIRO128+ PRNG ────────────────────────────────────────────────────────
+// The proper-time kernel (per-worldline clocks + deterministic τ dispatch — the medium's τ arc, crystallized).
+// Also reachable by app factories as globalThis.KWETau. See public/kwe-tau.js for the determinism laws L1–L6.
+export { makeTauKernel } from './kwe-tau.js';
+
 export const makeRng = (s0, s1, s2, s3) => {
   const sm = (x) => {
     x = (x + 0x9e3779b9) >>> 0;
@@ -74,14 +82,28 @@ export const W = (() => {
       if (appRef._outbox[nodeId].length === 0) delete appRef._outbox[nodeId];
     }
 
-    const { ready: ownReady, later } = _Q.split(state._queue ?? [], wallTime);
-    const allReady = [...inbound, ...ownReady];
+    const { ready: ownReady, later: laterAll } = _Q.split(state._queue ?? [], wallTime);
+
+    const { _queue, _nextAt, _depth: _prevDepth, _lt: _prevLt, ...userState0 } = state;
+
+    // ── PROPER-TIME DISPATCH (futureTau — the τ arc's W-node layer; laws in public/kwe-tau.js) ──────────────────
+    // A node may declare its clock as the reserved handler key  __clock: (state) => number  — a PURE, MONOTONE
+    // function of the node's own replicated state (its heartbeat: cycles completed, steps lived, beats counted —
+    // the model-level analog of the medium's beat detector; the kernel may know THAT a node has a clock, never WHY
+    // it ticks). ctx.futureTau(dTau, msg) fires when the clock has advanced by dTau from the SCHEDULING state —
+    // "when this node's matter has aged by dTau", not "in dTau milliseconds". No __clock ⇒ τ ≡ wallTime and
+    // futureTau reduces EXACTLY to future (the no-op guarantee). τ readiness is evaluated once per pulse against
+    // the incoming replicated state → deterministic (L1); a τ entry on a node whose clock stands WAITS, honestly.
+    const clockFn = handlers.__clock;
+    const tauNow0 = clockFn ? clockFn(userState0) : wallTime;
+    const tauReady = laterAll.filter(e => e.fireAtTau !== undefined && tauNow0 >= e.fireAtTau);
+    const later = tauReady.length ? laterAll.filter(e => !tauReady.includes(e)) : laterAll;
+    const allReady = [...inbound, ...ownReady, ...tauReady];
 
     if (!isSubTick && (state._lt ?? -1) !== logicalTime) {
       allReady.unshift({ fireAt: wallTime, msg: "__macro", payload: pulse, _depth: 0 });
     }
 
-    const { _queue, _nextAt, _depth: _prevDepth, _lt: _prevLt, ...userState0 } = state;
     let userState = userState0;
     let newQueue  = later;
     let maxDepthSeen = 0;
@@ -110,6 +132,8 @@ export const W = (() => {
         },
         futureInf: (msg, payload) =>
           effects.push({ kind: "future", fireAt: wallTime, msg, payload, _depth: entryDepth }),
+        futureTau: (dTau, msg, payload) =>
+          effects.push({ kind: "futureTau", dTau, msg, payload }),   // resolved AFTER the handler returns, against the post-handler state ("aged by dTau from the moment this verb finished")
         localReflector: (tickMsg, innerTickDelay = 0, extraPayload = {}) =>
           effects.push({ kind: "future", fireAt: wallTime + innerTickDelay,
                          msg: tickMsg, payload: { ...extraPayload, _isLocalTick: true, _innerTickDelay: innerTickDelay },
@@ -122,6 +146,10 @@ export const W = (() => {
         if (eff.kind === "future") {
           newQueue = _Q.enqueue(newQueue,
             { fireAt: eff.fireAt, msg: eff.msg, payload: eff.payload, _depth: eff._depth ?? 0 });
+        } else if (eff.kind === "futureTau") {
+          const tNow = clockFn ? clockFn(userState) : wallTime;   // post-handler state (replicated → deterministic)
+          newQueue = _Q.enqueue(newQueue,
+            { fireAtTau: tNow + eff.dTau, msg: eff.msg, payload: eff.payload, _depth: 0 });   // no fireAt: never coordinate-ready, JSON-safe (see _Q)
         } else if (eff.kind === "send" && appRef) {
           appRef._outbox ??= {};
           appRef._outbox[eff.targetId] ??= [];
@@ -148,7 +176,7 @@ export const W = (() => {
     const flat = nodes.flatMap(n => Array.isArray(n) ? n : [n]);
     return outboxEmpty && flat.every(n =>
       !n ||
-      ((n._queue ?? []).every(e => e.fireAt > wall) && (n._depth ?? 0) === 0)
+      ((n._queue ?? []).every(e => e.fireAt === undefined || e.fireAt > wall) && (n._depth ?? 0) === 0)   // a pending τ entry does NOT block stability: on a stable world its clock cannot advance, so it is honestly parked
     );
   };
 
@@ -424,7 +452,7 @@ export const makeMeta = (peerId, rngSeed = null, reflectorMs = 50) => {
         if (ArrayBuffer.isView(val) && !(val instanceof DataView)) return { __f64: Array.from(val) };
         return val;
       }));
-    const snap = { time: _localLt, worlds: {} };
+    const snap = { time: _localLt, worlds: {}, rng: W.rng.state() };   // W.rng's LIVE counters ship with the join snapshot: the model's in-flight cascades (e.g. fresnelBeat's _ifsFireChildren, 2 draws/beat) consume the stream between _launchSlot reseeds — a joiner restored mid-cascade at the DEFAULT rng state draws different child delays → different ring radii at the next finalize → same kernel ver, different CONTENT → permanent field fork (live-caught twice; the queue itself already ships)
     console.group('%c[SNAP TAKE] peer=' + peerId + ' t=' + _localLt, 'color:#f90;font-weight:bold');
     for (const [worldId, worldPS] of ps.app.registry) {
       const app = worldPS.app;
@@ -440,6 +468,10 @@ export const makeMeta = (peerId, rngSeed = null, reflectorMs = 50) => {
         _lastPulseId:  app._lastPulseId || 0,
         _lastPulse:    app._lastPulse ? _safeClone(app._lastPulse) : null,
       };
+      // App-level snapshot hook: lets a renderer inject LIVE state (e.g. a soliton ψ field that lives in the GPU, not a world node) into the snapshot
+      // AT JOIN TIME ONLY (takeSnapshot runs on a request_snapshot). Typed arrays the hook adds are serialized as {__f64:...} below — but the hook runs
+      // after _safeClone, so it must add already-cloneable data ({__f64:[...]} form). Off the render path; one capture per join.
+      if (typeof app._snapHook === 'function') { try { app._snapHook(snap.worlds[worldId]); } catch (e) { console.warn('[SNAP] _snapHook failed', e); } }
       const nodeNames = Object.keys(nodes);
       console.log('  world=' + worldId + ' lt=' + (app.logicalTime || 0) + ' nodes=[' + nodeNames.join(',') + ']');
       for (const [k, v] of Object.entries(nodes)) {
@@ -458,6 +490,7 @@ export const makeMeta = (peerId, rngSeed = null, reflectorMs = 50) => {
     }
     const snapTime = snap.time || 0;
     _localLt = snapTime;
+    if (snap.rng) W.rng.restore(snap.rng);   // resume the leader's EXACT rng stream (see takeSnapshot: mid-cascade joiner parity; pre-rng snapshots skip = old behavior)
     console.group('%c[SNAP APPLY] peer=' + peerId + ' t=' + snapTime, 'color:#58a6ff;font-weight:bold');
     for (const [worldId, worldPS] of ps.app.registry) {
       const saved = snap.worlds[worldId];

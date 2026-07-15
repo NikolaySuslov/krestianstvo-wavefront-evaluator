@@ -243,6 +243,7 @@ same continuous object.
 | Instanton tunneling (vortex-driven A→B) | `instanton3.js` | ✅ vortex injection |
 | Instanton hologram (record/reconstruct an event) | `instanton_hologram.js` | ✅ RECORD/RECON |
 | Driven-dissipative stable display | `SRC_ALPHA` relaxation | ✅ across apps |
+| Frameless algebra scene — persistent travelling field, never rebuilt (§7.55) | `evalSolitonTemporalLiveAt` (`soliton-algebra.js`), ⟲ PERSIST in `eye.js` | ✅ measured: sparse modalities free, dense image −4%, state exactly replayable |
 | Frameless graphics framework (general) | — | ◻ vision / research direction |
 
 ---

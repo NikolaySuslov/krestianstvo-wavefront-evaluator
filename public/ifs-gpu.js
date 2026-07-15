@@ -171,6 +171,7 @@ export class IFSGpu {
     this._progFieldMul    = this._compileStep(GLSL_FIELD_MUL);   // §7.90 pure-medium binding (complex ψA·ψB)
     this._progRotCenters  = this._compileStep(GLSL_ROTATE_CENTERS); // §7.92 θ-operator: rotate ψ about each main
     this._progAffineCenters = this._compileStep(GLSL_AFFINE_CENTERS); // §7.98 general metric op: affine ψ about each main
+    this._progIfsWarp     = this._compileStep(GLSL_IFS_WARP);       // full K-map IFS Hutchinson union (one GPU pass, no readbacks)
     this._progLensGenome  = this._compileStep(GLSL_LENS_GENOME);   // §7.98 genome lens phase-plate (optical chip, 1 GPU pass)
     this._progCopy        = this._compileStep(GLSL_COPY);
     this._progStepRecord  = this._compileStep(GLSL_STEP_RECORD);
@@ -198,7 +199,15 @@ export class IFSGpu {
     this._progOpDotUA         = this._compileStep(GLSL_OP_DOT_UA_ROWS);     // §7.58b rank atlas
     this._progScatterMadAtlas = this._compileStep(GLSL_SCATTER_MAD_ATLAS);
     this._progNlKick          = this._compileStep(GLSL_NL_KICK);            // §7.60 nonlinear decision kick
+    this._progSelfFocus       = this._compileStep(GLSL_SELF_FOCUS);         // self-focus: amplitude saturation, momentum-conserving localizer
+    this._progLowpass         = this._compileStep(GLSL_LOWPASS);            // IFS-native low-pass contraction (suppresses high-k spurious vortices → charge-conserving)
+    this._progDensContract    = this._compileStep(GLSL_DENS_CONTRACT);      // IFS-native GPE: saturable density-dependent contraction (the |ψ|²ψ term, real-space, no FFT)
+    this._progCgl             = this._compileStep(GLSL_CGL);                // CGL dissipative-soliton balance (linear loss + cubic gain + quintic saturation)
     this._progNlSpm           = this._compileStep(GLSL_NL_SPM);             // §7.82 saturable SPM (the real _nlHalf)
+    this._progEyeSuperpose    = this._compileStep(GLSL_EYE_SUPERPOSE);      // coevolve: ψ_eye += β·obj (GPU)
+    this._progEyeContract     = this._compileStep(GLSL_EYE_CONTRACT);       // full-authority hold: ψ ← (1−λ)ψ + λ·obj (contraction, GPU)
+    this._progEyeScale        = this._compileStep(GLSL_EYE_SCALE);          // coevolve: ψ *= s (energy-cap scale, GPU)
+    this._progEnergyRows      = this._compileStep(GLSL_ENERGY_ROWS);        // coevolve: row-reduce Σ|ψ|² (energy)
     this._progDissip          = this._compileStep(GLSL_DISSIP);             // §7.82 driven-dissipative pass
     this._progAddForce        = this._compileStep(GLSL_ADD_FORCE);          // §7.82 GPU-resident clock forcing
     this._progPhaseAccum      = this._compileStep(GLSL_PHASE_ACCUM);        // §7.82 on-GPU phase accumulator
@@ -249,11 +258,20 @@ export class IFSGpu {
       scatterMadTex: { acc: ul(this._progScatterMadTex,'u_acc'), w: ul(this._progScatterMadTex,'u_w'), sA: ul(this._progScatterMadTex,'u_sA'), sB: ul(this._progScatterMadTex,'u_sB'), reset: ul(this._progScatterMadTex,'u_reset') },
       opDotUA:         { atlasU: ul(this._progOpDotUA,'u_atlasU'), atlasA: ul(this._progOpDotUA,'u_atlasA'), cyc: ul(this._progOpDotUA,'u_cyc'), K: ul(this._progOpDotUA,'u_K'), nBins: ul(this._progOpDotUA,'u_nBins'), G: ul(this._progOpDotUA,'u_G') },
       nlKick:          { psi: ul(this._progNlKick,'u_psi'), gamma: ul(this._progNlKick,'u_gamma'), th: ul(this._progNlKick,'u_th'), w: ul(this._progNlKick,'u_w') },
+      selfFocus:       { psi: ul(this._progSelfFocus,'u_psi'), th: ul(this._progSelfFocus,'u_th'), gp: ul(this._progSelfFocus,'u_gp'), lo: ul(this._progSelfFocus,'u_lo') },   // self-focus localizer (gain-above-threshold)
+      lowpass:         { psi: ul(this._progLowpass,'u_psi'), beta: ul(this._progLowpass,'u_beta'), G: ul(this._progLowpass,'u_G') },   // IFS-native low-pass (3x3 blend, charge-conserving)
+      densContract:    { psi: ul(this._progDensContract,'u_psi'), gamma: ul(this._progDensContract,'u_gamma') },   // IFS-native GPE density-dependent contraction
+      cgl:             { psi: ul(this._progCgl,'u_psi'), delta: ul(this._progCgl,'u_delta'), eps: ul(this._progCgl,'u_eps'), mu: ul(this._progCgl,'u_mu'), dt: ul(this._progCgl,'u_dt') },   // CGL dissipative-soliton
       fieldMul:        { a: ul(this._progFieldMul,'u_a'), b: ul(this._progFieldMul,'u_b') },   // §7.90 pure-medium binding
       rotCenters:      { psi: ul(this._progRotCenters,'u_psi'), delta: ul(this._progRotCenters,'u_delta'), n: ul(this._progRotCenters,'u_n'), centers: ul(this._progRotCenters,'u_centers'), rad: ul(this._progRotCenters,'u_rad'), G: ul(this._progRotCenters,'u_G') },   // §7.92 θ-operator
       affineCenters:   { psi: ul(this._progAffineCenters,'u_psi'), minv: ul(this._progAffineCenters,'u_minv'), tinv: ul(this._progAffineCenters,'u_tinv'), n: ul(this._progAffineCenters,'u_n'), centers: ul(this._progAffineCenters,'u_centers'), rad: ul(this._progAffineCenters,'u_rad'), G: ul(this._progAffineCenters,'u_G') },   // §7.98 general metric op
+      ifsWarp:         { psi: ul(this._progIfsWarp,'u_psi'), minv: ul(this._progIfsWarp,'u_minv'), tinv: ul(this._progIfsWarp,'u_tinv'), n: ul(this._progIfsWarp,'u_n'), G: ul(this._progIfsWarp,'u_G'), smooth: ul(this._progIfsWarp,'u_smooth') },   // full K-map IFS union (+ smooth: 0=bicubic, 1=bilinear)
       lensGenome:      { psi: ul(this._progLensGenome,'u_psi'), n: ul(this._progLensGenome,'u_n'), centers: ul(this._progLensGenome,'u_centers'), a: ul(this._progLensGenome,'u_a'), beta: ul(this._progLensGenome,'u_beta'), vtx: ul(this._progLensGenome,'u_vtx'), k: ul(this._progLensGenome,'u_k'), phaseT: ul(this._progLensGenome,'u_phaseT') },   // §7.98/§7.102 genome lens = GPU linOp (mul, SPACETIME)
       nlSpm:           { psi: ul(this._progNlSpm,'u_psi'), gamma: ul(this._progNlSpm,'u_gamma'), isat: ul(this._progNlSpm,'u_isat'), dt: ul(this._progNlSpm,'u_dt') },
+      eyeSuperpose:    { psi: ul(this._progEyeSuperpose,'u_psi'), obj: ul(this._progEyeSuperpose,'u_obj'), beta: ul(this._progEyeSuperpose,'u_beta') },
+      eyeContract:     { psi: ul(this._progEyeContract,'u_psi'), obj: ul(this._progEyeContract,'u_obj'), lambda: ul(this._progEyeContract,'u_lambda') },
+      eyeScale:        { psi: ul(this._progEyeScale,'u_psi'), s: ul(this._progEyeScale,'u_s') },
+      energyRows:      { a: ul(this._progEnergyRows,'u_a'), G: ul(this._progEnergyRows,'u_G') },
       dissip:          { psi: ul(this._progDissip,'u_psi'), alpha: ul(this._progDissip,'u_alpha'), pump: ul(this._progDissip,'u_pump'), ptarget: ul(this._progDissip,'u_ptarget'), dt: ul(this._progDissip,'u_dt') },
       addForce:        { psi: ul(this._progAddForce,'u_psi'), amp: ul(this._progAddForce,'u_amp'), sig2: ul(this._progAddForce,'u_sig2'), G: ul(this._progAddForce,'u_G') },
       phaseAccum:      { psi: ul(this._progPhaseAccum,'u_psi'), acc: ul(this._progPhaseAccum,'u_acc'), ox: ul(this._progPhaseAccum,'u_ox'), oy: ul(this._progPhaseAccum,'u_oy') },
@@ -1250,6 +1268,82 @@ export class IFSGpu {
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
 
+  // SELF-FOCUS the eye field: amplitude saturation |ψ|→tanh(gain·|ψ|)/gain, phase preserved. The momentum-conserving localizer the medium
+  // lacked — confines a soliton as a stable particle WITHOUT a positional target (so a momentum kick survives). One GPU pass, ping-pong.
+  applyEyeSelfFocus(th, gp, lo) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.selfFocus;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progSelfFocus);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.th, th); gl.uniform1f(u.gp, gp); gl.uniform1f(u.lo, lo);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: IFS-native LOW-PASS contraction on the eye field (charge-conserving smoothing — suppresses high-k spurious vortices).
+  //    β = smoothing weight (0.3 validated). Ping-pongs the eye buffer like applyEyeSelfFocus.
+  applyEyeLowpass(beta) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.lowpass;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progLowpass);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.beta, beta); gl.uniform1f(u.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: IFS-native GPE density-dependent contraction ψ→ψ/(1+γ|ψ|²) on the eye field (charge-conserving; holds the vortex core node).
+  //    γ = GPE strength (0.5 validated). Ping-pongs the eye buffer like applyEyeLowpass.
+  applyEyeDensContract(gamma) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.densContract;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progDensContract);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.gamma, gamma);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: CGL dissipative-soliton balance ψ*=exp((−δ+ε|ψ|²−μ|ψ|⁴)dt) on the eye field. linear loss δ + cubic gain ε + quintic loss μ
+  //    → a stable interior dissipative soliton (attracting fixed point). Ping-pongs the eye buffer.
+  applyEyeCgl(delta, eps, mu, dt) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.cgl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progCgl);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.delta, delta); gl.uniform1f(u.eps, eps); gl.uniform1f(u.mu, mu); gl.uniform1f(u.dt, dt);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
   // ── §7.90 Public: PURE-MEDIUM BINDING — multiply the eye field by an operand field B, in place, ON THE GPU
   //    (complex ψ_eye·ψ_B per cell, no JS dot product). This is the operator's binding done AS A MEDIUM OPERATION:
   //    the two fields interact cell-by-cell, the product becomes eye field content, and the soliton/IFS dynamics
@@ -1318,6 +1412,30 @@ export class IFSGpu {
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
 
+  // ── Public: FULL K-MAP IFS WARP (Hutchinson union) on the eye field — ONE GPU pass, no per-map readbacks. maps = array of
+  //    { m:[m00,m01,m10,m11], t:[tx,ty] } (each map's forward affine, centred at the grid middle). The shader inverts each map,
+  //    samples the K pre-images, keeps the max-magnitude → W(image)=⋃ₖ fₖ(image). Replaces the K-readback CPU loop in opCodeWarp.
+  ifsWarpEye(maps, smooth = 0) {   // smooth=1 → bilinear (non-ringing, orbit transport); default 0 → Catmull-Rom (sharp, IFS render — unchanged)
+    const gl = this._gl, G = this._G, n = Math.min(8, maps.length);
+    const minv = new Float32Array(8 * 4), tinv = new Float32Array(8 * 2);
+    for (let k = 0; k < n; k++) { const m = maps[k].m, t = maps[k].t || [0, 0];
+      const det = m[0]*m[3] - m[1]*m[2], id = Math.abs(det) > 1e-9 ? 1/det : 0;
+      const mi = [m[3]*id, -m[1]*id, -m[2]*id, m[0]*id];
+      minv[k*4]=mi[0]; minv[k*4+1]=mi[1]; minv[k*4+2]=mi[2]; minv[k*4+3]=mi[3];
+      tinv[k*2]=mi[0]*t[0] + mi[1]*t[1]; tinv[k*2+1]=mi[2]*t[0] + mi[3]*t[1]; }
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.ifsWarp;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progIfsWarp);
+    gl.uniform1i(u.psi, 0); gl.uniform4fv(u.minv, minv); gl.uniform2fv(u.tinv, tinv); gl.uniform1i(u.n, n); gl.uniform1i(u.G, G);
+    if (u.smooth) gl.uniform1f(u.smooth, smooth);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
   // ── §7.102 Public: linOp (transform/mul form) on the eye field — ψ ·= e^{iφ}, one GPU pass, no readback. THE medium's
   //    spatial operator content·e^{iφ} (here content=ψ, mode=mul), φ = linear k·r + genome-lens quadratic (focus/shear/
   //    vortex). opts: { kx, ky, centers, a, beta, vtx }. centers=[] + lens coeffs=0 ⇒ pure linear carrier/θ-shift.
@@ -1357,6 +1475,80 @@ export class IFSGpu {
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+
+  // ── Public: COEVOLVE superpose ψ_eye += β·obj (GPU). obj = the _obj texture (set via setObjField). One shader pass, ping-pongs the eye buffer.
+  applyEyeSuperpose(beta) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyeSuperpose;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEyeSuperpose);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.obj, 1); gl.uniform1f(u.beta, beta);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // ── Public: FULL-AUTHORITY HOLD contraction ψ ← (1−λ)ψ + λ·obj (GPU). obj = the _obj texture (setObjField).
+  //    A contraction (not the additive superpose): |ψ−obj| shrinks ×(1−λ) per call → cross-GPU float divergence
+  //    on the unpinned halo decays, restoring peer-determinism the way W's re-locking drive does. λ=1 = projection.
+  applyEyeContract(lambda) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyeContract;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEyeContract);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.obj, 1); gl.uniform1f(u.lambda, lambda);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // ── Public: COEVOLVE energy-cap ψ *= sqrt(targetE / E) (GPU). E = Σ|ψ|² via a row-reduce → 1×1 readback (G floats, not G²) → scale shader.
+  //    Far cheaper than the full-grid readback+JS-loop: one tiny scalar comes back, the scale stays on GPU.
+  applyEyeEnergyCap(targetE) {
+    const gl = this._gl, G = this._G;
+    this.opCycleInit();   // ensure the reduction scratch/FBOs exist (idempotent)
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    // E = Σ|ψ|² (re²+im²): row-reduce → _opDotTex → col-finish → 1×1 scalar → read G... actually 1 float (no full-grid readback)
+    const ur = this._u.energyRows;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEnergyRows); gl.uniform1i(ur.a, 0); gl.uniform1i(ur.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._opColFinish('A');   // sum the G row-sums → 1×1 scalar slot A
+    const sf = new Float32Array(4); gl.bindFramebuffer(gl.FRAMEBUFFER, this._opSclAFbo); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, sf); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const E = sf[0]; if (!(E > 1e-9) || !(targetE > 0)) return;
+    const s = Math.sqrt(targetE / E);
+    const src2 = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyeScale;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEyeScale);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.s, s);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src2);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // ── Public: GPU Σ|ψ|² of the eye field (1-float readback, no full-grid loop). For controllers that MEASURE energy without rescaling (adaptive-ε).
+  readEyeEnergy() {
+    const gl = this._gl, G = this._G;
+    this.opCycleInit();
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const ur = this._u.energyRows;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEnergyRows); gl.uniform1i(ur.a, 0); gl.uniform1i(ur.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._opColFinish('A');
+    const sf = new Float32Array(4); gl.bindFramebuffer(gl.FRAMEBUFFER, this._opSclAFbo); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, sf); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return sf[0];
   }
 
   // ── §7.82 Public: driven-dissipative pass on the eye field (loss α + saturable gain pump→Pt). NON-unitary. ─
@@ -2461,18 +2653,27 @@ void main() {
 const GLSL_LAP_FUNC = /* glsl */`
 highp float ringLap(sampler2D psi, ivec2 coord, int comp,
                     isampler2D rings, int nRings, int ringCount) {
-  // Standard NN Laplacian (nearest-neighbour stencil)
+  // 9-POINT ISOTROPIC LAPLACIAN (Oono-Puri / Mehrstellen): lap = (4·ortho + diag − 20·ctr)/6.
+  // The 5-point NN stencil destroys DIAGONAL momentum (its dispersion error grows fast off-axis), so a
+  // self-advecting soliton's group velocity breaks at the grid scale and it radiates a wake / pins to the
+  // grid (Peierls-Nabarro). The 9-point stencil is isotropic to O(h⁴) — it pushes dispersion error far out
+  // into the Brillouin zone, so a phase-gradient (momentum) actually GRIPS the grid and transports the mass
+  // coherently. Weights sum to 0 (conserves constants) → drop-in safe for every stepEyeN/plate consumer.
   int G  = u_G;
-  ivec2 xp = ivec2((coord.x + 1) % G, coord.y);
-  ivec2 xm = ivec2((coord.x - 1 + G) % G, coord.y);
-  ivec2 yp = ivec2(coord.x, (coord.y + 1) % G);
-  ivec2 ym = ivec2(coord.x, (coord.y - 1 + G) % G);
-  float ctr = texelFetch(psi, coord, 0)[comp];
-  float lap = texelFetch(psi, xp, 0)[comp]
-            + texelFetch(psi, xm, 0)[comp]
-            + texelFetch(psi, yp, 0)[comp]
-            + texelFetch(psi, ym, 0)[comp]
-            - 4.0 * ctr;
+  ivec2 xp   = ivec2((coord.x + 1) % G, coord.y);
+  ivec2 xm   = ivec2((coord.x - 1 + G) % G, coord.y);
+  ivec2 yp   = ivec2(coord.x, (coord.y + 1) % G);
+  ivec2 ym   = ivec2(coord.x, (coord.y - 1 + G) % G);
+  ivec2 xpyp = ivec2((coord.x + 1) % G, (coord.y + 1) % G);
+  ivec2 xmym = ivec2((coord.x - 1 + G) % G, (coord.y - 1 + G) % G);
+  ivec2 xpym = ivec2((coord.x + 1) % G, (coord.y - 1 + G) % G);
+  ivec2 xmyp = ivec2((coord.x - 1 + G) % G, (coord.y + 1) % G);
+  float ctr   = texelFetch(psi, coord, 0)[comp];
+  float ortho = texelFetch(psi, xp, 0)[comp] + texelFetch(psi, xm, 0)[comp]
+              + texelFetch(psi, yp, 0)[comp] + texelFetch(psi, ym, 0)[comp];
+  float diag  = texelFetch(psi, xpyp, 0)[comp] + texelFetch(psi, xmym, 0)[comp]
+              + texelFetch(psi, xpym, 0)[comp] + texelFetch(psi, xmyp, 0)[comp];
+  float lap = (4.0 * ortho + diag - 20.0 * ctr) / 6.0;
 
   // IFS ring contributions
   for (int d = 0; d < nRings; d++) {
@@ -2688,6 +2889,80 @@ void main() {
   vec2 c = u_centers[hit], rel = (x - c) - u_tinv;
   vec2 src = vec2(u_minv.x*rel.x + u_minv.y*rel.y, u_minv.z*rel.x + u_minv.w*rel.y) + c;
   fragColor = vec4(fetchBilinear(src), 0.0, 1.0);
+}`;
+
+// FULL K-MAP IFS WARP — the K affine maps applied + COMPLEX SUPERPOSED in ONE GPU pass (no per-map readbacks). For each output
+// pixel x, loop the K maps; each map fₖ has inverse-linear u_minv[k] and inverse-translate u_tinv[k]; sample the pre-image
+// src = Minv·(x−t) (centered at grid middle), and SUM the K complex samples ((1/√K)·Σ fₖ(ψ)) → the warped wavefronts INTERFERE
+// (honest wave-combine, not the max-magnitude attractor-render convention). One pass, the medium combines the K maps. u_n ≤ 8.
+const GLSL_IFS_WARP = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform vec4  u_minv[8];     // per-map inverse linear [m00,m01,m10,m11]
+uniform vec2  u_tinv[8];     // per-map inverse translation
+uniform int   u_n;
+uniform int   u_G;
+uniform float u_smooth;      // 0 = Catmull-Rom (sharp, default — IFS render); 1 = bilinear (non-ringing, orbit transport)
+out vec4 fragColor;
+vec2 tap(ivec2 i) { return texelFetch(u_psi, clamp(i, ivec2(0), ivec2(u_G-1)), 0).xy; }
+// BICUBIC (Catmull-Rom) sample of ψ at fractional pixel p — a 4×4 cubic kernel. Sharper than bilinear (much less low-pass
+// smoothing) and near energy-preserving for smooth fields → reduces the per-resample loss of the metric remap. The complex
+// (re,im) channels are interpolated together (the Catmull-Rom kernel is linear, so it commutes with the complex structure).
+float cr(float t, float a0, float a1, float a2, float a3) {   // 1-D Catmull-Rom at fraction t over 4 samples
+  return a1 + 0.5*t*(a2 - a0 + t*(2.0*a0 - 5.0*a1 + 4.0*a2 - a3 + t*(3.0*(a1 - a2) + a3 - a0)));
+}
+vec2 fetchBicubic(vec2 p) {
+  vec2 f = floor(p), fr = p - f; ivec2 i = ivec2(f);
+  vec2 row[4];
+  for (int r = 0; r < 4; r++) {
+    vec2 s0 = tap(i + ivec2(-1, r-1)), s1 = tap(i + ivec2(0, r-1)), s2 = tap(i + ivec2(1, r-1)), s3 = tap(i + ivec2(2, r-1));
+    row[r] = vec2(cr(fr.x, s0.x, s1.x, s2.x, s3.x), cr(fr.x, s0.y, s1.y, s2.y, s3.y));
+  }
+  return vec2(cr(fr.y, row[0].x, row[1].x, row[2].x, row[3].x), cr(fr.y, row[0].y, row[1].y, row[2].y, row[3].y));
+}
+// BILINEAR (tent) sample — NON-RINGING (no negative lobes/overshoot). Catmull-Rom is sharp but RINGS at edges (negative overshoot), and chained
+// over many warps the ringing compounds into high-frequency NOISE (orbit's degradation). Bilinear is gently low-pass (slight blur) but injects NO
+// ringing → no noise accumulation. Used by orbit (u_smooth=1); the IFS attractor render keeps Catmull-Rom (u_smooth=0, byte-identical to before).
+vec2 fetchBilinear(vec2 p) {
+  vec2 f = floor(p), fr = p - f; ivec2 i = ivec2(f);
+  vec2 s00 = tap(i), s10 = tap(i+ivec2(1,0)), s01 = tap(i+ivec2(0,1)), s11 = tap(i+ivec2(1,1));
+  vec2 a = mix(s00, s10, fr.x), b = mix(s01, s11, fr.x);
+  return mix(a, b, fr.y);
+}
+// PHASE-AWARE bilinear (u_smooth=2): interpolate MAGNITUDE and PHASE separately, not re/im. Bilinear of re/im AVERAGES neighbors → for a phase-varying
+// field opposite phases CANCEL → amplitude destroyed (the fractional-warp shatter/drain). Here: magnitudes interp bilinearly (no cancellation); phase via
+// the COMPLEX-VECTOR sum direction (mix of unit phasors, robust to wrap). Recombine |ψ|·e^{iφ}. A fractional shift then PRESERVES a complex structured field.
+vec2 fetchPhaseAware(vec2 p) {
+  vec2 f = floor(p), fr = p - f; ivec2 i = ivec2(f);
+  vec2 s00 = tap(i), s10 = tap(i+ivec2(1,0)), s01 = tap(i+ivec2(0,1)), s11 = tap(i+ivec2(1,1));
+  // bilinear MAGNITUDE (no phase cancellation)
+  float m00=length(s00), m10=length(s10), m01=length(s01), m11=length(s11);
+  float mag = mix(mix(m00,m10,fr.x), mix(m01,m11,fr.x), fr.y);
+  // bilinear PHASE as a vector sum of unit phasors (each weighted by bilinear weight) → robust direction, no 2π-wrap artifacts
+  vec2 d = mix(mix(s00,s10,fr.x), mix(s01,s11,fr.x), fr.y);   // re/im mix gives the right ANGLE even though its magnitude cancels
+  float dl = length(d);
+  return (dl > 1e-12) ? mag * (d/dl) : vec2(0.0);             // |ψ| from magnitude-interp, e^{iφ} from the (normalized) re/im-mix direction
+}
+vec2 fetchSample(vec2 p) { return (u_smooth > 1.5) ? fetchPhaseAware(p) : (u_smooth > 0.5) ? fetchBilinear(p) : fetchBicubic(p); }
+void main() {
+  // gl_FragCoord is the pixel CENTER (x+0.5). For the ORBIT path (u_smooth=1) use the integer texel coord so an integer translation lands on integers
+  // (fr=0 = lossless); otherwise every sample sits at fr=0.5 = max interpolation, which for a complex (phase-varying) field averages neighbors and
+  // DESTROYS ~18% of magnitude per warp (measured: orbit's energy sink). The IFS-render path (u_smooth=0) keeps gl_FragCoord.xy EXACTLY (unchanged).
+  // smooth=1 (bilinear, integer-warp path) floors so integer t lands on fr=0 (lossless). smooth=2 (phase-aware, FRACTIONAL warp) keeps the −0.5 pixel-
+  // center so fractional t samples fractionally (the honest continuous metric). smooth=0 (IFS render) keeps gl_FragCoord exactly.
+  vec2 x = (u_smooth > 1.5) ? (gl_FragCoord.xy - 0.5) : (u_smooth > 0.5) ? floor(gl_FragCoord.xy) : gl_FragCoord.xy;
+  vec2 ctr = vec2(float(u_G)*0.5);
+  // COMPLEX SUPERPOSITION (honest wave-combine): ψ'(x) = (1/√K)·Σₖ fₖ(ψ)(x). The K warped wavefronts ADD as complex amplitudes
+  // → they INTERFERE (constructive/destructive), the true way K transformed fields combine in a linear medium. (Was max-magnitude,
+  // an IFS-attractor rendering convention, NOT wave physics.) 1/√K = energy-preserving normalization for K equal-amplitude fields.
+  vec2 sum = vec2(0.0);
+  for (int k = 0; k < 8; k++) { if (k >= u_n) break;
+    vec2 rel = (x - ctr) - u_tinv[k];
+    vec2 src = vec2(u_minv[k].x*rel.x + u_minv[k].y*rel.y, u_minv[k].z*rel.x + u_minv[k].w*rel.y) + ctr;
+    sum += fetchSample(src);   // complex add (re,im) → interference; bicubic (sharp) or bilinear (non-ringing, orbit) per u_smooth
+  }
+  float norm = (u_n > 0) ? inversesqrt(float(u_n)) : 1.0;
+  fragColor = vec4(sum * norm, 0.0, 1.0);
 }`;
 
 // §7.98 GENOME LENS PHASE-PLATE (GPU port of eye.js lensXform's per-pixel loop): at each cell, find the NEAREST
@@ -3109,6 +3384,19 @@ void main() {
   fragColor = vec4(s, 0.0, 0.0, 1.0);
 }`;
 
+// ENERGY row-reduce: per row y, sum |ψ|² = re²+im² across x (DOT_ROWS sums only the real channel — energy needs both). Pairs with GLSL_COL_FINISH.
+const GLSL_ENERGY_ROWS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_a;
+uniform int u_G;
+out vec4 fragColor;
+void main() {
+  int y = int(gl_FragCoord.y);
+  float s = 0.0;
+  for (int x = 0; x < u_G; x++) { vec2 p = texelFetch(u_a, ivec2(x,y), 0).xy; s += p.x*p.x + p.y*p.y; }
+  fragColor = vec4(s, 0.0, 0.0, 1.0);
+}`;
+
 const GLSL_SCATTER_MAD = /* glsl */`#version 300 es
 precision highp float;
 uniform sampler2D u_acc;     // current accumulation (R = value)
@@ -3213,6 +3501,132 @@ void main() {
   float ph = u_gamma * smoothstep(u_th, u_th + u_w, I);
   float c = cos(ph), s = sin(ph);
   fragColor = vec4(c*psi.x - s*psi.y, s*psi.x + c*psi.y, 0.0, 1.0);
+}`;
+
+// SELF-FOCUS (the missing momentum-conserving localizer): amplitude SATURATION |ψ|→tanh(s·|ψ|)/s, phase UNCHANGED. A cubic-NLS-like
+// confinement WITHOUT a positional target — it concentrates energy toward the saturation level (low amp boosted, high amp capped) so a
+// soliton stays localized as a stable PARTICLE, but its PHASE GRADIENT (momentum) is preserved (we only rescale magnitude). This is the
+// piece the medium lacked: stepRecord's only localizer was the amplitude-BLEND toward a static target (which deletes momentum). Self-focus
+// confines with NO target → a momentum kick survives → the soliton can be thrown across a barrier. u_gain = saturation steepness s.
+const GLSL_SELF_FOCUS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_th;     // intensity threshold (peak above it GAINS, background below DECAYS)
+uniform float u_gp;     // gain above threshold (per pass)
+uniform float u_lo;     // loss below threshold (per pass)
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, coord, 0).xy;
+  float I = psi.x*psi.x + psi.y*psi.y;
+  // GAIN-ABOVE-THRESHOLD self-focus (probe_selffocus_form: tanh FLATTENS, cubic RUNS AWAY, this STAYS stable): high-I peak grows, low-I
+  // background decays → energy migrates to the peak = CONFINEMENT, no flatten/no collapse. MAGNITUDE only (phase kept) → momentum preserved.
+  float g = I > u_th ? (1.0 + u_gp) : (1.0 - u_lo);
+  fragColor = vec4(psi.x * g, psi.y * g, 0.0, 1.0);
+}`;
+
+// CGL — the COMPLEX GINZBURG-LANDAU dissipative-soliton balance (probe_cgl_soliton.mjs: a genuine ATTRACTING fixed point, E plateaus,
+// no blowup/drain). ψ *= exp((−δ + ε|ψ|² − μ|ψ|⁴)·dt): LINEAR LOSS −δ kills radiation (clean background); CUBIC GAIN +ε|ψ|² feeds the
+// soliton core; QUINTIC LOSS −μ|ψ|⁴ caps it (sets a self-selected stable amplitude — can't blow up). Cubic-only blows up, linear-only
+// drains; ALL THREE balanced = a real interior dissipative soliton (no boundary needed). Magnitude only (phase kept → momentum preserved).
+const GLSL_CGL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_delta;   // linear loss δ (kills radiation)
+uniform float u_eps;     // cubic gain ε (feeds the soliton)
+uniform float u_mu;      // quintic loss μ (saturates → stable amplitude, no blowup)
+uniform float u_dt;
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float a2 = psi.x*psi.x + psi.y*psi.y;
+  float g = exp((-u_delta + u_eps*a2 - u_mu*a2*a2) * u_dt);
+  fragColor = vec4(psi.x * g, psi.y * g, 0.0, 1.0);
+}`;
+
+// IFS-NATIVE LOW-PASS CONTRACTION — the charge-conserving piece (probe_gpe_native.mjs). A topological winding IS conserved in the
+// continuum, but a discrete propagator NUCLEATES spurious vortex-antivortex pairs at the GRID SCALE (high-k) that pollute the charge
+// (bare ring-Laplacian: a clean Q=1 drifts to Q=−11 by t100). The IFS contraction is NATIVELY LOW-PASS (a smoothing/averaging round-trip);
+// applying it SUPPRESSES those high-k spurious pairs while leaving the smooth large-scale winding intact → Q=1.00 stays clean to t100
+// across all radii (β=0.3 validated; the full native GPE = this + density-contract also holds). A 3×3 blend: ψ→(1−β)ψ + β·mean(3×3).
+// COMPLEX (re+im together) so the phase winding is smoothed coherently (not the amplitude alone). β = smoothing weight (0=off).
+const GLSL_LOWPASS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_beta;   // smoothing weight (0..1); 0.3 validated charge-conserving
+uniform float u_G;      // grid size
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  int G = int(u_G);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  vec2 sum = vec2(0.0); float cnt = 0.0;
+  for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++) {
+    ivec2 p = c + ivec2(dx,dy);
+    if (p.x<0 || p.x>=G || p.y<0 || p.y>=G) continue;
+    sum += texelFetch(u_psi, p, 0).xy; cnt += 1.0;
+  }
+  vec2 mean = cnt>0.0 ? sum/cnt : psi;
+  fragColor = vec4(mix(psi, mean, u_beta), 0.0, 1.0);
+}`;
+
+// EYE SUPERPOSE — ψ_eye += β·obj (complex add of the operator-attractor texture into the eye). The interference-coevolve step of transport/objorbit,
+// on the GPU (was a CPU readback + JS loop + upload per step). u_obj = the regenerated object (uploaded once/frame via setObjField).
+const GLSL_EYE_SUPERPOSE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_obj;
+uniform float u_beta;
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  vec2 obj = texelFetch(u_obj, c, 0).xy;
+  fragColor = vec4(psi + u_beta*obj, 0.0, 1.0);
+}`;
+
+// EYE CONTRACT — ψ ← (1−λ)·ψ + λ·obj, a CONTRACTION toward the operator (full-authority hold). Unlike superpose
+// (ψ += β·obj, additive → the previous field's GPU-float deviation survives forever), this SHRINKS |ψ−obj| by
+// factor (1−λ) each application → cross-GPU float spread on the unpinned halo decays geometrically, the same
+// re-locking that keeps the driven W peer-deterministic. λ=1 ⇒ exact projection onto obj (byte = obj's bytes).
+const GLSL_EYE_CONTRACT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_obj;
+uniform float u_lambda;
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  vec2 obj = texelFetch(u_obj, c, 0).xy;
+  fragColor = vec4(mix(psi, obj, u_lambda), 0.0, 1.0);
+}`;
+
+// EYE SCALE — ψ *= s, a uniform real scale (the energy-cap, given the precomputed factor s=sqrt(E0/E)). Pairs with the GPU energy sum (opDot machinery).
+const GLSL_EYE_SCALE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_s;
+out vec4 fragColor;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); fragColor = vec4(texelFetch(u_psi, c, 0).xy * u_s, 0.0, 1.0); }`;
+
+// IFS-NATIVE GPE — saturable DENSITY-DEPENDENT CONTRACTION ψ→ψ/(1+γ|ψ|²). The |ψ|²ψ Gross-Pitaevskii term expressed AS the medium's own
+// contraction biased by intensity (NOT a grafted explicit exp(−iγ|ψ|²dt) phase kick — probe_native_gpe_charge.mjs measured that the PHASE
+// form DESTABILIZES the vortex/scatters Q = the §7.100c foreign-graft trap, while THIS density-contraction CONSERVES the full multi-charge:
+// Qtot=4 stable to t60, no annihilation, with low-pass). Amplitude-only (phase kept → winding untouched); the saturable 1/(1+γ|ψ|²) carves
+// & holds the vortex core node from the dynamics (a healing length). γ=0.5 validated (γ=2 over-contracts → spurious cores). Rides the round-trip.
+const GLSL_DENS_CONTRACT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_gamma;   // GPE interaction strength (0.5 validated charge-conserving; higher over-contracts)
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  float a2 = psi.x*psi.x + psi.y*psi.y;
+  float sc = 1.0 / (1.0 + u_gamma * a2);   // saturable density-dependent contraction (amplitude only → phase/winding preserved)
+  fragColor = vec4(psi.x * sc, psi.y * sc, 0.0, 1.0);
 }`;
 
 // ── §7.82 LEAVE THE LINEAR/UNITARY LIMIT — the two passes that host the attractor-genome (§7.80/§7.81).
@@ -3733,11 +4147,10 @@ void main() {
   vec2  psi   = texelFetch(u_psi, coord, 0).xy;
   float norm  = 1.0 / sqrt(max(u_smoothMax, 1e-18));
   float amp   = sqrt(psi.x*psi.x + psi.y*psi.y) * norm;
-  if (amp < 0.015) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
   float hue = (atan(psi.y, psi.x) / (2.0 * 3.14159265) + 1.0);
   hue = hue - floor(hue);  // fract
   float v   = clamp(log(1.0 + 6.0 * amp) / log(7.0), 0.0, 1.0);
-  // HSV → RGB (integer hi sector)
+  // FULL-SATURATION hue → RGB (integer hi sector), value = v — the honest phase color, unchanged
   float h6  = hue * 6.0;
   float hi  = floor(h6);
   float f   = h6 - hi;
@@ -3751,6 +4164,12 @@ void main() {
   else if (sec == 3) rgb = vec3(0.0,q,  v);
   else if (sec == 4) rgb = vec3(t0, 0.0,v);
   else               rgb = vec3(v,  0.0,q);
+  // SMOOTH EDGE FADE (was: a hard amp<0.015 to-black clip, which BIT the continuous wave into jagged
+  // pixelated black holes wherever the amplitude rippled below threshold -- "wave broken by pixels in dark").
+  // smoothstep fades the wave continuously to black across a small amplitude band, so the edge stays smooth
+  // and the phase color is honest and untouched. The low tail dims to black gracefully instead of clipping.
+  float fade = smoothstep(0.004, 0.03, amp);
+  rgb *= fade;
   fragColor = vec4(rgb, 1.0);
 }`;
 

@@ -22,6 +22,12 @@ import hologram4NativeApp    from "./apps/hologram4_native.js";
 import hologram4NativeNoGpuApp from "./apps/hologram4_native_nogpu.js";
 import eyeApp  from "./apps/eye.js";
 import mediumApp from "./apps/medium.js";
+import mediumU1App from "./apps/medium-u1.js";               // medium.js's SUCCESSOR (clean rebuild): transport → U(1) register → dual-layer holography on the extracted engine + laws + cloned world
+//import mediumU1OracleApp from "./apps/medium-u1-oracle.js";   // ORACLE: the full medium.js copy under its own selo — a live reference to diff the clean rebuild against (removed at archive time)
+import observersApp from "./apps/observers.js";
+import rhythmApp from "./apps/rhythm.js";
+import ifsClockApp from "./apps/ifsclock.js";
+import selfhostApp from "./apps/selfhost.js";
 import nls3App        from "./apps/nls3.js";
 import nls4App        from "./apps/nls4.js";
 import instanton3App        from "./apps/instanton3.js";
@@ -38,6 +44,12 @@ import rosslerApp  from "./apps/rossler.js";
 import fractal1App from "./apps/fractal1.js";
 
 export const APPS = {
+  observers:        observersApp,
+  rhythm:           rhythmApp,
+  ifsclock:         ifsClockApp,
+  selfhost:         selfhostApp,
+  'medium-u1':      mediumU1App,
+  //'medium-u1-oracle': mediumU1OracleApp,
   medium:           mediumApp,
   eye:              eyeApp,
   hologram4_native: hologram4NativeApp,
