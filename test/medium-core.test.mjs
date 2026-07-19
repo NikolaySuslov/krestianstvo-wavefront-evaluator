@@ -2,7 +2,7 @@
 // Run: node test/medium-core.test.mjs. The bank must be a faithful re-housing of medium.js's
 // descriptor store: stable ops reference, identity reset, lossless snapshot round-trip, exact
 // legacy-key mapping, and sanitization that degrades to identity components (never NaN).
-import { makeObserverBank, normalizeVirtEvent, applySettingsVerb, applyVirtVerb, makeStepClock, makeCouplingStore, muxClocks, makeRippleClock, makeIFSClock, makeSelfHost, makeStampedInput, hashField, hashNums, opNums, ampCorr, phaseCorr, syncClockRate } from '../public/medium-core.js';
+import { secondMomentTorus, virialSpec, regionStepX, leapfrogStepX, coverStep, capReduce, coverResidual, spectralShift, crossCorrScan, makeObserverBank, normalizeVirtEvent, applySettingsVerb, applyVirtVerb, makeStepClock, makeCouplingStore, muxClocks, makeRippleClock, makeIFSClock, makeSelfHost, makeStampedInput, hashField, hashNums, opNums, ampCorr, phaseCorr, syncClockRate, kernelSymbol, kernelABCD, packetD, qSpmRate, qStep, qFixedPoint, fft2d, kernelPropagateSpectral, kernelLambdaGrid, secondMoment, virialRateX, slCasimir } from '../public/medium-core.js';
 import { lensU1 as L } from '../public/soliton-algebra.js';
 
 let ok = true; const chk = (n, c) => { if (!c) { ok = false; console.log(`FAIL ${n}`); } else console.log(`  ok  ${n}`); };
@@ -289,5 +289,313 @@ const near = (a, b, t = 1e-12) => Math.abs(a - b) < t;
   chk('syncClockRate with no tauK is safe (flips stepClk only)', syncClockRate(s2, null, 0, 3) === true && s2.rate === 3);
 }
 
-console.log(ok ? '\nALL PASS (medium-core observer bank + beat providers + stamped input + determinism primitives)' : '\nFAILURES ABOVE');
+{
+  // ── kernelSymbol / kernelABCD — the IFS-native ABCD slice (gate A of the metaplectic arc) ──
+  // exact full ring (float offsets — the math check; the GPU quantizes to ints, which only perturbs D slightly):
+  // ⟨δδ^T⟩ over a circle of radius r = (r²/2)·I → D = (1 + w·r²)·I, dipole = 0, symbol(0) = 0 (conservation).
+  const r = 6, n = 64, w = 0.5, ring = [];
+  for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; ring.push(r * Math.cos(a), r * Math.sin(a)); }
+  const fit = kernelABCD([r], [w], [ring], { dt: 0.05, T: 16 });
+  chk('kernelABCD: full ring → isotropic D = (1 + w·r²)·I', near(fit.D[0], 1 + w * r * r, 1e-9) && near(fit.D[2], 1 + w * r * r, 1e-9) && near(fit.D[1], 0, 1e-9));
+  chk('kernelABCD: full ring is centrosymmetric → dipole ≈ 0 (Hermitian)', fit.hermitian);
+  chk('kernelSymbol: λ(0) = 0 exactly (conservation — the DC term vanishes)', near(kernelSymbol([r], [w], [ring], 0, 0).re, 0, 1e-12) && near(kernelSymbol([r], [w], [ring], 0, 0).im, 0, 1e-12));
+  const kk = 0.01, exx = kernelSymbol([r], [w], [ring], kk, 0).re;
+  chk('kernelSymbol: low-k symbol tracks the quadratic −Dxx·k²', near(exx, -fit.D[0] * kk * kk, 1e-5));
+  chk('kernelABCD: kKnee = j₀,₁/r_max (the clock\'s own low-pass knee)', near(fit.kKnee, 2.404825557695773 / r, 1e-12));
+  chk('kernelABCD: the ±T free block B = D·T·dt', near(fit.abcd.B[0], fit.D[0] * 16 * 0.05, 1e-12) && near(fit.abcd.B[3], fit.D[2] * 16 * 0.05, 1e-12));
+  const [vgx, vgy] = fit.vg(0.3, 0);
+  chk('kernelABCD: group velocity v_g = D·k·dt (the descK → drift prediction)', near(vgx, fit.D[0] * 0.3 * 0.05, 1e-12) && near(vgy, 0, 1e-12));
+  // two-point "ring" along x → anisotropic D: Dxx = 1 + 2wr², Dyy = 1, principal axis θ = 0
+  const fit2 = kernelABCD([r], [w], [[r, 0, -r, 0]], {});
+  chk('kernelABCD: two-point x-pair → Dxx = 1 + 2wr², Dyy = 1 (anisotropy derived, axis θ=0)', near(fit2.D[0], 1 + 2 * w * r * r, 1e-9) && near(fit2.D[2], 1, 1e-9) && near(fit2.eig.theta, 0, 1e-9) && fit2.aniso > 1);
+  // asymmetric kernel (a single offset) → non-zero dipole = the non-Hermitian check fires
+  const fit3 = kernelABCD([r], [w], [[r, 0]], {});
+  chk('kernelABCD: non-centrosymmetric kernel → dipole ≠ 0 (Hermiticity check catches it)', !fit3.hermitian && near(fit3.drift[0], 4 * w * r, 1e-9));
+}
+
+{
+  // ── gate C: the q register (σ, b) — the engine recipe projected onto the Gaussian ansatz ──
+  // SPM cubic limit (Isat → ∞): the quadrature must recover the CLOSED FORM ḃ_NL = −γP/(2πσ⁴).
+  const sg = 10, P = 100, gam = 20;
+  const cub = qSpmRate(sg, P, gam, 1e12);
+  chk('qSpmRate cubic limit → ḃ_NL = −γP/(2πσ⁴) (the 2D variational focusing term, recovered)', near(cub.rb, -gam * P / (2 * Math.PI * sg ** 4), Math.abs(cub.rb) * 1e-4));
+  // linear-only spreading: qStep must reproduce the EXACT Gaussian law σ²(t) = σ0² + (D·t/σ0)²
+  const st = { sigma: 8, b: 0, phi: 0, P: 50 }; const D = 2.4, dt = 0.12, N = 200;
+  for (let i = 0; i < N; i++) qStep(st, { D, gamma: 0, isat: 1, dt });
+  const t = N * dt;
+  chk('qStep linear-only: σ²(t) = σ0² + (D·t/σ0)² EXACTLY (the complex-parameter law is closed form)', near(st.sigma * st.sigma, 8 * 8 + (D * t / 8) ** 2, 1e-9));
+  chk('qStep conserves P (the cap holds it)', st.P === 50);
+  // SPM-only: pure phase — σ untouched, b driven NEGATIVE (focusing chirp)
+  const st2 = { sigma: 8, b: 0, phi: 0, P: 50 };
+  qStep(st2, { D: 0, gamma: 20, isat: 1, dt: 0.12 });
+  chk('qStep SPM-only: σ unchanged (pure phase), b < 0 (focusing chirp)', near(st2.sigma, 8, 1e-12) && st2.b < 0);
+  // fixed point in the SATURABLE engine regime: exists, stable, breathing Ω real. NOTE the PREDICTION hiding in
+  // the bracket: at engine params (γ=20, Isat=1, P~300) the free-soliton equilibrium is a TIGHT core σ* ≈ 1–2 px
+  // (deep saturation) — the wide probe shape is held by the PIN (injection lock), not by the free NL balance.
+  const fp = qFixedPoint({ Dof: 2.4, gamma: 20, isat: 1, P: 300, lo: 0.4 });
+  chk('qFixedPoint saturable (engine regime): σ* exists, STABLE, breathing Ω > 0 (saturation arrests Townes)', fp.sigma !== null && fp.stable && fp.Omega > 0);
+  chk('qFixedPoint saturable: the free equilibrium is a TIGHT core (σ* < 3 px — the pin, not NL balance, holds wide shapes)', fp.sigma < 3);
+  // cubic regimes are scale-free — NO σ*: P > P_c ⇒ collapse (runaway DERIVED), P < P_c ⇒ spread
+  const Pc = 2 * Math.PI * 2.4 / 20;
+  const up = qFixedPoint({ Dof: 2.4, gamma: 20, isat: 1e12, P: Pc * 4 });
+  const dn = qFixedPoint({ Dof: 2.4, gamma: 20, isat: 1e12, P: Pc / 4 });
+  chk('qFixedPoint cubic P>P_c → regime "collapse" (RUNAWAY is a register prediction now)', up.sigma === null && up.regime === 'collapse');
+  chk('qFixedPoint cubic P<P_c → regime "spread" (the minimum soliton power, derived)', dn.sigma === null && dn.regime === 'spread');
+  // packetD: flattening lattice dispersion ⇒ D̄(σ small) < D(k→0), and D̄ → D(k→0) as σ → ∞ (gate B's lesson)
+  const r = 6, n = 64, w = 0.5, ring = [];
+  for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; ring.push(r * Math.cos(a), r * Math.sin(a)); }
+  const D0 = kernelABCD([r], [w], [ring], {}).D[0];
+  const Dnear = packetD([r], [w], [ring], 200), Dtight = packetD([r], [w], [ring], 8);
+  chk('packetD → k→0 D for a wide packet (σ=200: within 0.1%)', Math.abs(Dnear - D0) / D0 < 1e-3);
+  chk('packetD < k→0 D for a tight packet (the lattice curvature flattens transport — the gate B shortfall)', Dtight < D0 * 0.98);
+}
+
+{
+  // ── gate D: the SPECTRAL register — the engine's discrete linear step, diagonalized ──
+  const G = 32, N = G * G;
+  // fft2d round trip = identity
+  const rr = new Float64Array(N), ii = new Float64Array(N);
+  let seed = 42; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let j = 0; j < N; j++) { rr[j] = rnd() - 0.5; ii[j] = rnd() - 0.5; }
+  const rr0 = Float64Array.from(rr), ii0 = Float64Array.from(ii);
+  fft2d(rr, ii, G, false); fft2d(rr, ii, G, true);
+  let fmax = 0; for (let j = 0; j < N; j++) fmax = Math.max(fmax, Math.abs(rr[j] - rr0[j]), Math.abs(ii[j] - ii0[j]));
+  chk('fft2d: forward∘inverse = identity (1e-12)', fmax < 1e-12);
+
+  // REFERENCE x-space leapfrog (verbatim GLSL_STEP1/2/3 + GLSL_LAP_FUNC semantics, torus, f64) — the independent
+  // implementation the spectral path must match EXACTLY (same linear map, different basis).
+  const ringO = [3, 0, 2, 2, 0, 3, -2, 2, -3, 0, -2, -2, 0, -3, 2, -2], rw = 0.4, nu = 4 * rw / (ringO.length / 2);
+  const ringLap = (src) => { const out = new Float64Array(N);
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const g = (xx, yy) => src[((yy + 4 * G) % G) * G + ((xx + 4 * G) % G)];
+      const ortho = g(x + 1, y) + g(x - 1, y) + g(x, y + 1) + g(x, y - 1);
+      const diag = g(x + 1, y + 1) + g(x - 1, y - 1) + g(x + 1, y - 1) + g(x - 1, y + 1);
+      let l = (4 * ortho + diag - 20 * src[y * G + x]) / 6;
+      let acc = 0; for (let p = 0; p < ringO.length; p += 2) acc += g(x + ringO[p], y + ringO[p + 1]);
+      out[y * G + x] = l + nu * (acc - (ringO.length / 2) * src[y * G + x]); }
+    return out; };
+  const refStepN = (f, T, dt) => { const R = new Float64Array(N), I = new Float64Array(N);
+    for (let j = 0; j < N; j++) { R[j] = f[j * 2]; I[j] = f[j * 2 + 1]; }
+    for (let s = 0; s < T; s++) { let L = ringLap(I); for (let j = 0; j < N; j++) R[j] -= (dt / 4) * L[j];
+      L = ringLap(R); for (let j = 0; j < N; j++) I[j] += (dt / 2) * L[j];
+      L = ringLap(I); for (let j = 0; j < N; j++) R[j] -= (dt / 4) * L[j]; }
+    const out = new Float64Array(2 * N); for (let j = 0; j < N; j++) { out[j * 2] = R[j]; out[j * 2 + 1] = I[j]; } return out; };
+  const probe = new Float64Array(2 * N);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const dx = x - G / 2, dy = y - G / 2, a = Math.exp(-(dx * dx + dy * dy) / 18);
+    const ph = 0.4 * dx; probe[(y * G + x) * 2] = a * Math.cos(ph); probe[(y * G + x) * 2 + 1] = a * Math.sin(ph); }
+  const T = 7, dt = 0.11, radii = [3], weights = [rw], offs = [ringO];
+  const ref = refStepN(probe, T, dt);
+  const spec = kernelPropagateSpectral(probe, radii, weights, offs, { T, dt, G });
+  let dmax = 0; for (let j = 0; j < 2 * N; j++) dmax = Math.max(dmax, Math.abs(ref[j] - spec.field[j]));
+  chk('spectral propagator ≡ the x-space leapfrog EXACTLY (same discrete map, diagonalized — 1e-10)', dmax < 1e-10);
+  // −dt is the exact inverse (the palindromic split — why the engine's ±T round-trip is clean, per mode)
+  const back = kernelPropagateSpectral(spec.field, radii, weights, offs, { T, dt: -dt, G });
+  let bmax = 0; for (let j = 0; j < 2 * N; j++) bmax = Math.max(bmax, Math.abs(back.field[j] - probe[j]));
+  chk('spectral ±T round-trip = identity (backward is the exact inverse)', bmax < 1e-10);
+  // passband truncation: a smooth packet loses almost nothing below the cut, and the plate COMPRESSES
+  const cut = kernelPropagateSpectral(probe, radii, weights, offs, { T, dt, G, kCut: 1.2 });
+  chk('kCut truncation: smooth packet fidelity ≥ 0.999 with a real mode cut (the passband compression law)', ampCorr(cut.field, ref) > 0.999 && cut.kept < cut.total * 0.4);
+  // the λ-grid cache path (the hot-path form the holography verbs use) ≡ the direct path
+  const lam = kernelLambdaGrid(radii, weights, offs, G);
+  const viaLam = kernelPropagateSpectral(probe, null, null, null, { T, dt, G, lam });
+  let lmax = 0; for (let j = 0; j < 2 * N; j++) lmax = Math.max(lmax, Math.abs(viaLam.field[j] - spec.field[j]));
+  chk('kernelLambdaGrid cache path ≡ direct symbol path (the per-kernelVer verb cache is exact)', lmax < 1e-9);
+  // the FAST stencil-DFT grid build ≡ kernelSymbol at EVERY mode (integer offsets — the live-kernel path)
+  let gmax = 0;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+    const kx2 = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky2 = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
+    const s = kernelSymbol(radii, weights, offs, kx2, ky2);
+    gmax = Math.max(gmax, Math.abs(lam.re[j] - s.re), Math.abs(lam.im[j] - s.im)); }
+  chk('kernelLambdaGrid (stencil-DFT fast build) ≡ kernelSymbol at every mode (1e-9 — the ~100× rebuild fix)', gmax < 1e-9);
+}
+
+{
+  // ── the duality harvest: exact shift + shift-invariant scan ──
+  const G = 32, N = G * G, f = new Float64Array(2 * N);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const dx = x - 16, dy = y - 12, a = Math.exp(-(dx * dx + dy * dy) / 10);
+    const i = (y * G + x) * 2, ph = 0.3 * dx; f[i] = a * Math.cos(ph); f[i + 1] = a * Math.sin(ph); }
+  // integer spectral shift ≡ the exact torus roll
+  const s5 = spectralShift(f, 5, -3, G); let rmax = 0;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const si = (((y + 3) % G + G) % G) * G + (((x - 5) % G + G) % G);
+    rmax = Math.max(rmax, Math.abs(s5[(y * G + x) * 2] - f[si * 2]), Math.abs(s5[(y * G + x) * 2 + 1] - f[si * 2 + 1])); }
+  chk('spectralShift: integer offset ≡ the exact torus roll (1e-10)', rmax < 1e-10);
+  // fractional shift is UNITARY and exactly invertible
+  const sh = spectralShift(f, 2.5, -1.25, G), back = spectralShift(sh, -2.5, 1.25, G);
+  let bmax2 = 0, e0 = 0, e1 = 0;
+  for (let j = 0; j < 2 * N; j++) { bmax2 = Math.max(bmax2, Math.abs(back[j] - f[j])); e0 += f[j] * f[j]; e1 += sh[j] * sh[j]; }
+  chk('spectralShift: fractional shift is unitary (Parseval) and exactly invertible', bmax2 < 1e-10 && Math.abs(e1 - e0) < 1e-9 * e0);
+  // crossCorrScan finds a rolled copy at its offset with corr ≈ 1
+  const cc = crossCorrScan(f, spectralShift(f, 7, -4, G), G);
+  chk('crossCorrScan: finds a moved copy (corrMax≈1 at the true offset; zero-lag would miss it)', cc.corrMax > 0.9999 && cc.dx === 7 && cc.dy === -4 && cc.corr0 < cc.corrMax - 0.1);
+}
+
+{
+  // ── DESCENT RUNG 1: the cover law — the cocycle bit-for-bit, and the global obstruction named ──
+  const G = 32, N = G * G, ringO = [3, 0, 2, 2, 0, 3, -2, 2, -3, 0, -2, -2, 0, -3, 2, -2];
+  const radii = [3], weights = [0.4], offs = [ringO], dt = 0.11;
+  const f = new Float64Array(2 * N);
+  let seed = 77; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let j = 0; j < 2 * N; j++) f[j] = rnd() - 0.5;
+  const whole = leapfrogStepX(f, radii, weights, offs, dt, G);
+  // sanity: the x-space reference agrees with the spectral propagator (same map, different basis)
+  const spec1 = kernelPropagateSpectral(f, radii, weights, offs, { T: 1, dt, G });
+  let smax = 0; for (let j = 0; j < 2 * N; j++) smax = Math.max(smax, Math.abs(whole[j] - spec1.field[j]));
+  chk('descent: leapfrogStepX ≡ the spectral propagator (1e-10 — same map, different basis)', smax < 1e-10);
+  // THE COCYCLE: cover-step-then-glue ≡ whole-torus step, BIT FOR BIT (local ops, fixed term order, halo 3·reach)
+  for (const P of [2, 4]) {
+    const cov = coverStep(f, radii, weights, offs, dt, G, P);
+    let dmax = 0; for (let j = 0; j < 2 * N; j++) dmax = Math.max(dmax, Math.abs(cov[j] - whole[j]));
+    chk(`descent: ${P}×${P} cover + glue ≡ whole torus BIT-FOR-BIT (the cocycle holds for the local ops)`, dmax === 0);
+  }
+  // THE OBSTRUCTION: the energy cap is global. Per-patch LOCAL capping forks the glued field (wrong physics);
+  // the monoid REDUCE (fixed patch-ordered tree) reproduces the global cap to f64-order sensitivity (~1e-12).
+  const e0 = 3.7; let Ew = 0; for (let j = 0; j < 2 * N; j++) Ew += whole[j] * whole[j];
+  const sw = Math.sqrt(e0 / Ew), globalCap = Float64Array.from(whole, (v) => v * sw);
+  const pw = G / 2, partials = [];
+  const localCap = Float64Array.from(whole);
+  for (let pj = 0; pj < 2; pj++) for (let pi = 0; pi < 2; pi++) { let Ep = 0;
+    for (let y = 0; y < pw; y++) for (let x = 0; x < pw; x++) { const j = ((pj * pw + y) * G + (pi * pw + x)) * 2; Ep += whole[j] ** 2 + whole[j + 1] ** 2; }
+    partials.push(Ep);
+    const sp = Math.sqrt((e0 / 4) / Ep);
+    for (let y = 0; y < pw; y++) for (let x = 0; x < pw; x++) { const j = ((pj * pw + y) * G + (pi * pw + x)) * 2; localCap[j] *= sp; localCap[j + 1] *= sp; } }
+  let lmax = 0; for (let j = 0; j < 2 * N; j++) lmax = Math.max(lmax, Math.abs(localCap[j] - globalCap[j]));
+  chk('descent: per-patch LOCAL capping ≠ the global cap (the obstruction is real — the cap is a global datum)', lmax > 1e-6);
+  const Er = capReduce(partials), sr = Math.sqrt(e0 / Er);
+  chk('descent: the monoid REDUCE reproduces the global cap (~1e-12; the reduction TREE is part of the contract — f64 order sensitivity)', Math.abs(sr - sw) < 1e-12 * sw);
+}
+
+{
+  // ── the SPATIAL FORK-FINDER (coverResidual): clean cocycle = exactly 0; a tainted halo lights up WHERE ──
+  const G = 32, N = G * G, ringO = [3, 0, 2, 2, 0, 3, -2, 2, -3, 0, -2, -2, 0, -3, 2, -2];
+  const radii = [3], weights = [0.4], offs = [ringO], dt = 0.11;
+  const f = new Float64Array(2 * N);
+  let seed = 99; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let j = 0; j < 2 * N; j++) f[j] = rnd() - 0.5;
+  const clean = coverResidual(f, radii, weights, offs, dt, G, 2);
+  chk('fork-finder: clean cover → overlap residual EXACTLY 0 (redundant computations agree bit-for-bit)', clean.rmax === 0);
+  const t = { x: 15, y: 8, amp: 1e-3 };   // a cell near the patch seam — tainted in its OWNER only
+  const bad = coverResidual(f, radii, weights, offs, dt, G, 2, { taint: t });
+  const near = bad.at && Math.max(Math.abs(bad.at[0] - t.x), Math.abs(bad.at[1] - t.y)) <= 3 * bad.reach;
+  chk('fork-finder: a tainted halo read lights up LOCALIZED (within the 3·reach light cone of the fault)', bad.rmax > 1e-9 && near);
+}
+
+{
+  // ── THE LIGHT-CONE LAW (the theorem behind NO-EXCHANGE sharding): corrupt EVERYTHING outside a region —
+  // after one step, region cells deeper than 3·reach from the region's edge are BIT-EXACT vs the true whole-torus
+  // step. Wrong/stale/declaration-sourced boundary data can only touch the seam band; the interior is untouchable.
+  // This is what lets a regional witness take its halo from the REGISTER (the declaration) instead of a peer.
+  const G = 32, N = G * G, ringO = [3, 0, 2, 2, 0, 3, -2, 2, -3, 0, -2, -2, 0, -3, 2, -2];
+  const radii = [3], weights = [0.4], offs = [ringO], dt = 0.11, reach = 3;
+  const f = new Float64Array(2 * N);
+  let seed = 55; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let j = 0; j < 2 * N; j++) f[j] = rnd() - 0.5;
+  const whole = leapfrogStepX(f, radii, weights, offs, dt, G);
+  const R = { x0: 4, y0: 4, x1: 28, y1: 28 };                     // the region a shard-holder owns
+  const g = Float64Array.from(f);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) if (x < R.x0 || x >= R.x1 || y < R.y0 || y >= R.y1) {
+    g[(y * G + x) * 2] = rnd() * 9; g[(y * G + x) * 2 + 1] = rnd() * 9; }   // GARBAGE outside the region
+  const stepped = leapfrogStepX(g, radii, weights, offs, dt, G);
+  const band = 3 * reach; let imax = 0, smax2 = 0;
+  for (let y = R.y0; y < R.y1; y++) for (let x = R.x0; x < R.x1; x++) { const j = (y * G + x) * 2;
+    const depth = Math.min(x - R.x0, R.x1 - 1 - x, y - R.y0, R.y1 - 1 - y);
+    const d = Math.max(Math.abs(stepped[j] - whole[j]), Math.abs(stepped[j + 1] - whole[j + 1]));
+    if (depth >= band) imax = Math.max(imax, d); else smax2 = Math.max(smax2, d); }
+  chk('light-cone: garbage boundary → interior beyond 3·reach BIT-EXACT (declaration-sourced halos are honest)', imax === 0);
+  chk('light-cone: the corruption DID reach the seam band (the test has teeth)', smax2 > 1e-3);
+}
+
+{
+  // ── GATE F: the ERMAKOV–LEWIS / sl(2,ℝ) CASIMIR — I = V̈·V − ½V̇², the conserved partner of the virial law.
+  // Under LINEAR lattice evolution v_g(k) is a per-mode constant of motion ⇒ Var(x)(t) is an EXACT parabola for
+  // ANY dispersion (no quadratic band assumed) ⇒ I is exactly conserved with the register-predicted curvature
+  // (virialRateX, analytic ∇λ off the stencil) — and the parabola's turning point is fixed by t≈0 data alone:
+  // t* = −V̇₀/V̈, V_min = I/V̈ — the register calls the FOCAL EVENT before the field gets there. Cubic NL keeps
+  // the parabola (V̈ = 4DH const — the group law); saturation BENDS it (the K-breaking, measured).
+  const G = 64, N = G * G, ringO = [3, 0, 2, 2, 0, 3, -2, 2, -3, 0, -2, -2, 0, -3, 2, -2];
+  const radii = [3], weights = [0.4], offs = [ringO], dt = 0.1;
+  const mkGauss = (sig, b, amp = 0.1) => { const f = new Float64Array(2 * N);
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const dx = x - G / 2, dy = y - G / 2, r2 = dx * dx + dy * dy;
+      const a = amp * Math.exp(-r2 / (2 * sig * sig)), th = b * r2;
+      f[(y * G + x) * 2] = a * Math.cos(th); f[(y * G + x) * 2 + 1] = a * Math.sin(th); }
+    return f; };
+  const nlPhase = (f, gamma, isat, dtv) => { for (let j = 0; j < N; j++) { const re = f[j * 2], im = f[j * 2 + 1], I = re * re + im * im;
+    const th = gamma * (isat === Infinity ? I : I / (1 + I / isat)) * dtv, c = Math.cos(th), s = Math.sin(th);
+    f[j * 2] = re * c - im * s; f[j * 2 + 1] = re * s + im * c; } };
+  const runLedger = (f0, steps, gamma = 0, isat = Infinity, Dq = 0, wUse = weights) => {
+    let f = Float64Array.from(f0); const vs = [secondMoment(f, G).V];
+    for (let s = 0; s < steps; s++) { f = leapfrogStepX(f, radii, wUse, offs, dt, G); if (gamma) nlPhase(f, gamma, isat, dt); vs.push(secondMoment(f, G).V); }
+    const vddX = virialRateX(f0, radii, wUse, offs, G, { gamma, isat, Dq });
+    let s0 = vs.length, s1 = 0, s2 = 0, s3 = 0, s4 = 0, b0 = 0, b1 = 0, b2 = 0;
+    for (let i = 0; i < vs.length; i++) { const t = i * dt, v = vs[i]; s1 += t; s2 += t * t; s3 += t * t * t; s4 += t * t * t * t; b0 += v; b1 += v * t; b2 += v * t * t; }
+    const det = (a, b, c, d, e, f2, g, h, i2) => a * (e * i2 - f2 * h) - b * (d * i2 - f2 * g) + c * (d * h - e * g);
+    const Dm = det(s0, s1, s2, s1, s2, s3, s2, s3, s4);
+    const c0 = det(b0, s1, s2, b1, s2, s3, b2, s3, s4) / Dm, c1 = det(s0, b0, s2, s1, b1, s3, s2, b2, s4) / Dm, c2 = det(s0, s1, b0, s1, s2, b1, s2, s3, b2) / Dm;
+    let rms = 0; for (let i = 0; i < vs.length; i++) { const r = vs[i] - (c0 + c1 * i * dt + c2 * i * dt * i * dt); rms += r * r; } rms = Math.sqrt(rms / vs.length) / vs[0];
+    let iLo = Infinity, iHi = -Infinity;
+    for (let i = 1; i < vs.length - 1; i++) { const Vd = (vs[i + 1] - vs[i - 1]) / (2 * dt); const I = slCasimir(vddX, vs[i], Vd); iLo = Math.min(iLo, I); iHi = Math.max(iHi, I); }
+    const drift = (iHi - iLo) / (Math.abs(vddX) * vs[0]);
+    const Vd1 = (vs[2] - vs[0]) / (2 * dt), I1 = slCasimir(vddX, vs[1], Vd1);
+    let mIdx = 0; for (let i = 1; i < vs.length; i++) if (vs[i] < vs[mIdx]) mIdx = i;
+    return { vs, vddX, vddMeas: 2 * c2, rms, drift, tStar: dt - Vd1 / vddX, vMinPred: I1 / vddX, tMin: mIdx * dt, vMin: vs[mIdx], mIdx };
+  };
+  const lin = runLedger(mkGauss(5, 0), 100);
+  chk('gate F: LINEAR V(t) is an EXACT parabola on the lattice — any dispersion, no quadratic band (RMS < 1e-5·V0)', lin.rms < 1e-5);
+  chk('gate F: register-predicted curvature (analytic ∇λ) ≡ measured V̈ to 0.5% (the FD bias the Casimir caught)', Math.abs(lin.vddMeas / lin.vddX - 1) < 5e-3);
+  const chp = runLedger(mkGauss(5, -0.02), 140);
+  chk('gate F: the CASIMIR is conserved along a chirped linear trajectory (drift < 1% of V̈·V0)', chp.drift < 0.01);
+  chk('gate F: the WAIST is called from t≈0 register data — t* = −V̇₀/V̈ within 2 steps of the measured focus', chp.mIdx > 0 && chp.mIdx < chp.vs.length - 1 && Math.abs(chp.tStar - chp.tMin) < 2 * dt);
+  chk('gate F: V_min = I/V̈ matches the measured waist (< 2% of V0 — the focal depth, predicted not integrated)', Math.abs(chp.vMinPred - chp.vMin) / chp.vs[0] < 0.02);
+  const Dq = packetD(radii, weights, offs, 5);
+  const cub = runLedger(mkGauss(5, 0, 0.25), 100, 2, Infinity, Dq);
+  chk('gate F: CUBIC keeps the parabola (V̈ = 4DH const — the sl(2) group law survives the nonlinearity)', cub.rms < 2e-3);
+  chk('gate F: cubic register curvature within 8% (the Dq packet-weight gap — gate C\'s honest boundary)', Math.abs(cub.vddMeas / cub.vddX - 1) < 0.08);
+  const sat = runLedger(mkGauss(5, 0, 0.25), 100, 20, 0.01, Dq);
+  chk('gate F: SATURATION bends the parabola (RMS > 5× cubic — the K-breaking IS why collapse arrests, measured)', sat.rms > 5 * cub.rms);
+  // THE RE-KEY LAW (the clock's kernel edit as a register prediction): same probe, ring weights ×1.2 — the
+  // curvature JUMP measured under evolution must equal the descriptor-predicted ΔV̈ (virialRateX A vs B, same
+  // field). This is what lets the live [VPT] watch bookkeep kernel bumps OUT of the wear meter İ.
+  const wB = weights.map((x) => x * 1.2);
+  const linB = runLedger(mkGauss(5, 0), 100, 0, Infinity, 0, wB);
+  const dMeas = linB.vddMeas - lin.vddMeas, dPred = linB.vddX - lin.vddX;
+  chk('gate F: the RE-KEY — kernel-edit ΔV̈ measured ≡ descriptor-predicted (2% — bumps are bookkeepable, not wear)', Math.abs(dMeas / dPred - 1) < 0.02);
+  // the TORUS-AWARE moment (the wearGo lag artifact made law): a Gaussian straddling the wrap boundary must
+  // read the SAME (V, centroid) as its centered twin; the naive centroid/V read garbage there (live symptom:
+  // "lock 0.92 yet lag 64px" — every wear row lag≈60 regardless of β, speed, or distance walked).
+  const cen = secondMomentTorus(mkGauss(5, 0), G);
+  const straddle = new Float64Array(2 * N);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { let dx = (x - 2 + G) % G; if (dx > G / 2) dx -= G;
+    let dy = (y - 3 + G) % G; if (dy > G / 2) dy -= G;
+    straddle[(y * G + x) * 2] = 0.1 * Math.exp(-(dx * dx + dy * dy) / 50); }
+  const str = secondMomentTorus(straddle, G), naiv = secondMoment(straddle, G);
+  chk('gate F: torus moment — wrap-straddling Gaussian reads its true centroid (first-harmonic phase, wrap-immune)', Math.abs(str.cx - 2) < 0.05 && Math.abs(str.cy - 3) < 0.05);
+  chk('gate F: torus moment — V of the straddler ≡ V of the centered twin (0.1%); the NAIVE V is off by >10× there', Math.abs(str.V / cen.V - 1) < 1e-3 && naiv.V > 10 * str.V);
+  // the localization gauge m (circular resultant length): compact state → m≈1; a torus-filling state → m≈0,
+  // and lag/centroid observables must refuse themselves (the "lag 64px at lock 0.92" lesson made law)
+  const flat = new Float64Array(2 * N); for (let j = 0; j < N; j++) flat[j * 2] = 0.1;
+  chk('gate F: localization gauge — compact m>0.9, torus-filling m<0.05 (centroid validity is now measurable)', str.m > 0.9 && secondMomentTorus(flat, G).m < 0.05);
+  // the FFT-free re-key path: virialRateX with a cached spec bundle ≡ the direct field path (identical sums)
+  const chirped = mkGauss(5, -0.02), spec = virialSpec(chirped, G, { gamma: 2, isat: Infinity });
+  const direct = virialRateX(chirped, radii, weights, offs, G, { gamma: 2, isat: Infinity, Dq });
+  const cached = virialRateX(null, radii, weights, offs, G, { gamma: 2, isat: Infinity, Dq, spec });
+  chk('gate F: spec-cached V̈ ≡ direct field path (the register re-keys FFT-free — the spectrum is compile content)', Math.abs(cached - direct) <= 1e-12 * Math.abs(direct));
+  // the hot-path scratch pool (reuse:true) must be BIT-IDENTICAL to the allocating path — same ops, same order,
+  // only the garbage differs (the GC-pause visual-lag fix for the register engine)
+  const lamP = kernelLambdaGrid(radii, weights, offs, G);
+  const pA1 = kernelPropagateSpectral(chirped, null, null, null, { T: 1, dt: 0.12, G, lam: lamP }).field;
+  const pR1 = kernelPropagateSpectral(chirped, null, null, null, { T: 1, dt: 0.12, G, lam: lamP, reuse: true }).field;
+  let pd = 0; for (let j = 0; j < pA1.length; j++) if (pA1[j] !== pR1[j]) pd++;
+  chk('gate F: reuse:true scratch-pool propagation ≡ allocating path BIT-FOR-BIT (the fast path changes no bytes)', pd === 0);
+  // the U1 shard executor: one regional step ≡ the whole-torus step BIT-FOR-BIT inside R (the light-cone
+  // margins as an evaluation schedule), and the outside untouched byte-for-byte
+  const regF = mkGauss(6, -0.01, 0.2), regBox = { x0: 10, y0: 4, x1: 42, y1: 60 };
+  const wholeS = leapfrogStepX(regF, radii, weights, offs, 0.11, G);
+  const regS = regionStepX(regF, radii, weights, offs, 0.11, G, regBox);
+  let inDiff = 0, outDiff = 0;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = (y * G + x) * 2;
+    const inR = x >= regBox.x0 && x < regBox.x1 && y >= regBox.y0 && y < regBox.y1;
+    if (inR) { if (regS[j] !== wholeS[j] || regS[j + 1] !== wholeS[j + 1]) inDiff++; }
+    else if (regS[j] !== regF[j] || regS[j + 1] !== regF[j + 1]) outDiff++; }
+  chk('shard executor: regionStepX ≡ whole step INSIDE R bit-for-bit, outside untouched (cost ∝ |R|)', inDiff === 0 && outDiff === 0);
+}
+
+console.log(ok ? '\nALL PASS (medium-core observer bank + beat providers + stamped input + determinism primitives + kernel ABCD slice + gate-C q register + gate-D spectral propagator + gate-F Ermakov–Lewis Casimir)' : '\nFAILURES ABOVE');
 process.exit(ok ? 0 : 1);

@@ -187,6 +187,8 @@ export class IFSGpu {
     this._progAddSources            = this._compileStep(GLSL_ADD_SOURCES);
     this._srcTex              = this._makeRGF32Tex();
     this._progRenderField = this._compileStep(GLSL_RENDER_FIELD);
+    this._progRenderDesc  = this._compileStep(GLSL_RENDER_DESC);   // ℂ*-descriptor projection view (medium-u1 𝔸-slots): linOp phasor over a recorded envelope, final-pixel arithmetic only
+    this._descTex             = this._makeRGF32Tex();              // the 𝔸-slot's recorded envelope (uploaded once per recall, read-only)
     this._progRenderDiff  = this._compileStep(GLSL_RENDER_DIFF);
     this._progEyeHologram = this._compileStep(GLSL_EYE_HOLOGRAM);
     this._progRenderPhase = this._compileStep(GLSL_RENDER_PHASE);
@@ -250,6 +252,7 @@ export class IFSGpu {
       renderDiff:  { psi: ul(this._progRenderDiff, 'u_psi'), obj: ul(this._progRenderDiff, 'u_obj'), alpha: ul(this._progRenderDiff, 'u_alpha'), smoothMax: ul(this._progRenderDiff, 'u_smoothMax') },
       eyeHologram: { psi: ul(this._progEyeHologram, 'u_psi'), G: ul(this._progEyeHologram, 'u_G'), mode: ul(this._progEyeHologram, 'u_mode'), param: ul(this._progEyeHologram, 'u_param'), block: ul(this._progEyeHologram, 'u_block'), seed: ul(this._progEyeHologram, 'u_seed') },
       renderPhase: { psi: ul(this._progRenderPhase, 'u_psi'), smoothMax: ul(this._progRenderPhase, 'u_smoothMax') },
+      renderDesc:  { base: ul(this._progRenderDesc, 'u_base'), G: ul(this._progRenderDesc, 'u_G'), off: ul(this._progRenderDesc, 'u_off'), center: ul(this._progRenderDesc, 'u_center'), k: ul(this._progRenderDesc, 'u_k'), phi: ul(this._progRenderDesc, 'u_phi'), smoothMax: ul(this._progRenderDesc, 'u_smoothMax'), ampView: ul(this._progRenderDesc, 'u_ampView') },
       renderPlate: { psi: ul(this._progRenderPlate, 'u_psi'), plate: ul(this._progRenderPlate, 'u_plate'), smoothMaxPlate: ul(this._progRenderPlate, 'u_smoothMaxPlate'), smoothMaxField: ul(this._progRenderPlate, 'u_smoothMaxField'), dir: ul(this._progRenderPlate, 'u_dir') },
       waveletRecog: { scene: ul(this._progWaveletRecog,'u_scene'), G: ul(this._progWaveletRecog,'u_G'), nBands: ul(this._progWaveletRecog,'u_nBands'), nSectors: ul(this._progWaveletRecog,'u_nSectors'), bandR: ul(this._progWaveletRecog,'u_bandR'), refDesc: ul(this._progWaveletRecog,'u_refDesc'), refNorm: ul(this._progWaveletRecog,'u_refNorm'), refR: ul(this._progWaveletRecog,'u_refR'), sharpPow: ul(this._progWaveletRecog,'u_sharpPow'), energyGate: ul(this._progWaveletRecog,'u_energyGate'), disDesc: ul(this._progWaveletRecog,'u_disDesc'), disNorm: ul(this._progWaveletRecog,'u_disNorm'), disWeight: ul(this._progWaveletRecog,'u_disWeight') },
       dotRows:    { a: ul(this._progDotRows,'u_a'), b: ul(this._progDotRows,'u_b'), G: ul(this._progDotRows,'u_G') },
@@ -1111,6 +1114,7 @@ export class IFSGpu {
     const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, G, G);
+    this._scB();
     gl.useProgram(prog);
     gl.uniform1f(u.dt, dt);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
@@ -1118,6 +1122,7 @@ export class IFSGpu {
     gl.bindVertexArray(this._vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
+    this._scE();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
@@ -1172,6 +1177,52 @@ export class IFSGpu {
     gl.uniform1i(this._u.renderPhase.psi,       0);
     gl.uniform1f(this._u.renderPhase.smoothMax,  smoothMax);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindVertexArray(this._vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+  }
+
+  // ── REGIONAL WITNESS SUPPORT (descent rung 2): scissor the EYE passes to a region so a regional mirror
+  //    pays GPU only for its cells. Outside-region texels are NEVER written by the scissored passes — the app
+  //    keeps them at the register's declaration (setEyePsiBoth writes BOTH ping-pong textures so the untouched
+  //    outside stays coherent across substep parity). The cap's SCALE pass is scissored too: the declaration
+  //    band is never renormalized — only the witness's own region is capped.
+  setEyeScissor(x, y, w, h) { this._eyeScissor = (w > 0 && h > 0) ? [x | 0, y | 0, w | 0, h | 0] : null; }
+  _scB() { if (this._eyeScissor) { const gl = this._gl; gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(this._eyeScissor[0], this._eyeScissor[1], this._eyeScissor[2], this._eyeScissor[3]); } }
+  _scE() { if (this._eyeScissor) this._gl.disable(this._gl.SCISSOR_TEST); }
+  setEyePsiBoth(psi64) { this.setEyePsi(psi64);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; this.setEyePsi(psi64);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; }
+
+  // ── DESCRIPTOR PROJECTION (the ℂ* register's VIEW tier — medium-u1 𝔸-slots) ──────────────────────
+  // setDescBase uploads a recorded complex envelope ONCE (per recall); renderDescField then evaluates the
+  // linOp primitive content·e^{i(φ + k·(x−c))}, sampled at x−off (torus bilinear), as FINAL PIXEL ARITHMETIC
+  // directly to the canvas — no ping-pong, no state, and NOTHING is ever read back, so GPU float precision
+  // stays a display concern, never a determinism surface (the model is the CPU f64 register). This is the
+  // meta-circular split: model = the 6-float descriptor; view = one fragment shader.
+  setDescBase(psi64) {
+    const gl = this._gl, G = this._G, N = G * G;
+    const f32 = new Float32Array(N * 2);
+    for (let j = 0; j < N * 2; j++) f32[j] = psi64[j];
+    gl.bindTexture(gl.TEXTURE_2D, this._descTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+  renderDescField({ ox = 0, oy = 0, cx = 0, cy = 0, kx = 0, ky = 0, phi = 0, ampView = 0 } = {}, smoothMax) {
+    const gl = this._gl, G = this._G, u = this._u.renderDesc;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progRenderDesc);
+    gl.uniform1i(u.base, 0);
+    gl.uniform1i(u.ampView, ampView ? 1 : 0);
+    gl.uniform1i(u.G, G);
+    gl.uniform2f(u.off, ox, oy);
+    gl.uniform2f(u.center, cx, cy);
+    gl.uniform2f(u.k, kx, ky);
+    gl.uniform1f(u.phi, phi);
+    gl.uniform1f(u.smoothMax, smoothMax);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._descTex);
     gl.bindVertexArray(this._vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
@@ -1461,7 +1512,7 @@ export class IFSGpu {
 
   // ── §7.82 Public: saturable SPM half-step on the eye field (the real _nlHalf). γ=0 ⇒ no-op (linear). ─
   applyEyeNlSpm(gamma, isat, dt) {
-    const gl = this._gl, G = this._G;
+    const gl = this._gl, G = this._G; this._scB();
     const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
     const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
     const u = this._u.nlSpm;
@@ -1473,13 +1524,14 @@ export class IFSGpu {
     gl.bindVertexArray(this._vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
+    this._scE();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
 
   // ── Public: COEVOLVE superpose ψ_eye += β·obj (GPU). obj = the _obj texture (set via setObjField). One shader pass, ping-pongs the eye buffer.
   applyEyeSuperpose(beta) {
-    const gl = this._gl, G = this._G;
+    const gl = this._gl, G = this._G; this._scB();
     const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
     const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
     const u = this._u.eyeSuperpose;
@@ -1489,6 +1541,7 @@ export class IFSGpu {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
     gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._scE();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
@@ -1529,10 +1582,12 @@ export class IFSGpu {
     const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
     const u = this._u.eyeScale;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    this._scB();
     gl.useProgram(this._progEyeScale);
     gl.uniform1i(u.psi, 0); gl.uniform1f(u.s, s);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src2);
     gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._scE();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
@@ -4171,6 +4226,70 @@ void main() {
   float fade = smoothstep(0.004, 0.03, amp);
   rgb *= fade;
   fragColor = vec4(rgb, 1.0);
+}`;
+
+// ℂ*-DESCRIPTOR PROJECTION (medium-u1 𝔸-slots) — the register's VIEW as pure final-pixel arithmetic:
+//   ψ(x) = B(x − off) · e^{i(φ + k·(x − c))}
+// B = the recorded envelope (torus bilinear sample — matches rollField/lensC1 conventions), φ = the register
+// phase (+ fractional-bar ω from the model), k = the linOp momentum tilt (rad/cell). With ω and k both set the
+// phase fronts FLOW through the envelope at ω/|k| — the travelling-wave primitive content·e^{i(k·x+ω·t)},
+// evaluated per pixel per frame. Colormap = the SAME honest phase convention as GLSL_RENDER_PHASE (hue = arg ψ,
+// value = |ψ|, smoothstep edge fade): the full complex state shown, nothing invented, nothing hidden.
+const GLSL_RENDER_DESC = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_base;
+uniform int   u_G;
+uniform vec2  u_off;      // translation (cells): sample the envelope at x − off (torus wrap)
+uniform vec2  u_center;   // wave-packet center (px) — the k-phasor reference point
+uniform vec2  u_k;        // momentum phase tilt (rad/cell) — the linOp k·x term
+uniform float u_phi;      // global register phase (φ + ω·frac, from the CPU f64 model)
+uniform float u_smoothMax;
+uniform int   u_ampView;  // 0 = phase colormap (hue = arg ψ — motion visible), 1 = amplitude hologram colormap (same convention as the field view; global phase honestly invisible)
+in vec2 v_uv;
+out vec4 fragColor;
+${GLSL_HOLOGRAM_COLORMAP}
+vec2 sampleTorus(vec2 p) {
+  vec2  f  = fract(p);
+  ivec2 i0 = ivec2(floor(p)), G2 = ivec2(u_G);
+  ivec2 a  = ((i0 % G2) + G2) % G2;
+  ivec2 b  = (((i0 + 1) % G2) + G2) % G2;
+  vec2 b00 = texelFetch(u_base, ivec2(a.x, a.y), 0).xy;
+  vec2 b10 = texelFetch(u_base, ivec2(b.x, a.y), 0).xy;
+  vec2 b01 = texelFetch(u_base, ivec2(a.x, b.y), 0).xy;
+  vec2 b11 = texelFetch(u_base, ivec2(b.x, b.y), 0).xy;
+  return mix(mix(b00, b10, f.x), mix(b01, b11, f.x), f.y);
+}
+void main() {
+  vec2  x   = gl_FragCoord.xy - 0.5;
+  vec2  B   = sampleTorus(x - u_off);
+  float th  = u_phi + dot(u_k, x - u_center);
+  float c   = cos(th), s = sin(th);
+  vec2  psi = vec2(B.x*c - B.y*s, B.x*s + B.y*c);
+  float norm = 1.0 / sqrt(max(u_smoothMax, 1e-18));
+  float amp  = sqrt(psi.x*psi.x + psi.y*psi.y) * norm;
+  if (u_ampView == 1) {   // AMPLITUDE view — identical arithmetic to GLSL_RENDER_FIELD (the field view's colormap)
+    float lva = log(1.0 + 99.0 * amp) / log(100.0);
+    fragColor = vec4(hologramColor(lva), 1.0);
+    return;
+  }
+  float hue  = (atan(psi.y, psi.x) / (2.0 * 3.14159265) + 1.0);
+  hue = hue - floor(hue);
+  float v  = clamp(log(1.0 + 6.0 * amp) / log(7.0), 0.0, 1.0);
+  float h6 = hue * 6.0;
+  float hi = floor(h6);
+  float f  = h6 - hi;
+  float q  = v * (1.0 - f);
+  float t0 = v * f;
+  int  sec = int(mod(hi, 6.0));
+  vec3 rgb;
+  if      (sec == 0) rgb = vec3(v,  t0, 0.0);
+  else if (sec == 1) rgb = vec3(q,  v,  0.0);
+  else if (sec == 2) rgb = vec3(0.0,v,  t0);
+  else if (sec == 3) rgb = vec3(0.0,q,  v);
+  else if (sec == 4) rgb = vec3(t0, 0.0,v);
+  else               rgb = vec3(v,  0.0,q);
+  float fade = smoothstep(0.004, 0.03, amp);
+  fragColor = vec4(rgb * fade, 1.0);
 }`;
 
 // Render plate (RECORD mode) or psi amplitude (RECON mode).

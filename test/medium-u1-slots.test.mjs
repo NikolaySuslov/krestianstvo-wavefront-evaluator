@@ -4,7 +4,7 @@
 // different transport law for V than W"). The slot model unifies them: ONE leashAdvance law, the only
 // per-slot difference is movAtt(gx,gy). This test proves the unification headlessly (the leash is pure).
 // Run: node test/medium-u1-slots.test.mjs.
-import { makeLeash, leashAdvance, leashDue, makeSlot, makeSlotBank, makeSlotMux } from '../public/medium-u1-slots.js';
+import { makeLeash, leashAdvance, leashDue, leashGainPredicted, makeSlot, makeSlotBank, makeSlotMux } from '../public/medium-u1-slots.js';
 import { makeObserverBank, makeCouplingStore, muxClocks } from '../public/medium-core.js';
 import { makeSolitonEngine } from '../public/medium-gpu.js';
 
@@ -142,5 +142,47 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   chk('regH is a pure fn of descriptor scalars — same ops+steps always same hash (idempotent)', regH(makeObserverBank(4), 42) === regH(makeObserverBank(4), 42));
 }
 
-console.log(ok ? '\nALL PASS (medium-u1 slots: leash + unification + facade + mux + descriptor-tier determinism)' : '\nFAILURES ABOVE');
+// ── THE ⟲COEVO EINSTEIN LOOP, ℂ* FORM: gain-gated leash (matter's energy throttles its own transport) ────────────
+// The oracle gated on ampCorr(FIELD) — real back-reaction, but a field read (peer-local → forks) AND a self-fool
+// (reads the operator's own product). The ℂ* form gates on a GAIN observable: same feedback, register-side sensor.
+{
+  const mv = (gx, gy) => new Float64Array([gx, gy]);   // a movAtt stub: identity on the eased position
+
+  // leashGainPredicted — the DESCRIPTOR-derived observable (pure leash arithmetic, NO field)
+  { const L = makeLeash(); L.virtGo(0, 0);   // at target → no lag → matter "kept up" → g≈1
+    chk('gainPredicted ≈ 1 when the leash is AT its target (matter kept up)', leashGainPredicted(L.state, 4) > 0.99);
+    const L2 = makeLeash(); L2.virtGo(10, 0);   // target 10px away → lag saturates the gate → g→0
+    let g = 1; for (let i = 0; i < 60; i++) g = leashGainPredicted(L2.state, 4);   // EMA settles on the 10px lag
+    chk('gainPredicted → 0 when the target has run far ahead (matter lagging)', g < 0.01);
+    chk('gainPredicted is a pure fn of leash state (no field arg) → replay-safe', leashGainPredicted(makeLeash().state, 4) === leashGainPredicted(makeLeash().state, 4));
+  }
+
+  // THE LOOP: a FAR target throttles itself (the gate holds it back); a NEAR target advances freely
+  const runGain = (tx) => { const L = makeLeash(); L.virtGo(tx, 0);
+    for (let i = 0; i < 30; i++) leashAdvance(L.state, null, mv, null, (S) => leashGainPredicted(S, 4));
+    return L.state.gx; };
+  const near = runGain(1), far = runGain(30);
+  chk('gain-gated: a NEAR target is reached (gate open, g≈1 → full advance)', near > 0.99);
+  chk('gain-gated: a FAR target THROTTLES the advance — the Einstein loop (matter tells geometry how far it may go)', far < 30 * 0.5);
+  // vs the open-loop (descriptor-only) control: NO throttle → the target runs away unimpeded
+  const openLoop = (() => { const L = makeLeash(); L.virtGo(30, 0);
+    for (let i = 0; i < 30; i++) leashAdvance(L.state, null, mv, null); return L.state.gx; })();
+  chk('open-loop (no gainOf) advances FASTER than gain-gated — the gate is what throttles, not the step cap', openLoop > far);
+  chk('open-loop reaches ~1px/beat × 30 beats (the ungated ceiling)', openLoop > 29);
+
+  // DETERMINISM: the gain-gated leash is still a pure fn of leash state → two "peers" match byte-for-byte
+  const twice = () => { const L = makeLeash(); L.virtGo(7, 3); const path = [];
+    for (let i = 0; i < 25; i++) { leashAdvance(L.state, null, mv, null, (S) => leashGainPredicted(S, 4)); path.push([L.state.gx, L.state.gy]); } return JSON.stringify(path); };
+  chk('gain-gated leash is DETERMINISTIC (two peers, identical path — the gate is descriptor-side)', twice() === twice());
+
+  // the FIELD-measured gainOf (the unpinned ℂ* form) also throttles — but its observable comes from outside the leash
+  { const L = makeLeash(); L.virtGo(30, 0); let energy = 0.1;   // a "starved" soliton: low energy ratio → gate closed
+    for (let i = 0; i < 30; i++) leashAdvance(L.state, null, mv, null, () => energy);
+    chk('field-measured gainOf (unpinned ℂ*): a LOW energy ratio throttles the target (true back-reaction)', L.state.gx < 30 * 0.5);
+    const L2 = makeLeash(); L2.virtGo(30, 0); for (let i = 0; i < 30; i++) leashAdvance(L2.state, null, mv, null, () => 1.0);
+    chk('field-measured gainOf: a FULL energy ratio opens the gate (matter kept up → geometry free)', L2.state.gx > 29);
+  }
+}
+
+console.log(ok ? '\nALL PASS (medium-u1 slots: leash + unification + facade + mux + descriptor-tier determinism + ⟲coevo gain-gate)' : '\nFAILURES ABOVE');
 process.exit(ok ? 0 : 1);

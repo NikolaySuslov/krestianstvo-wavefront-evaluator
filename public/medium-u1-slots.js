@@ -30,24 +30,45 @@ export function makeLeash() {
 }
 
 // THE LEASH LAW (verbatim from the oracle _leashAdvance, generalized): advance the eased position (gx,gy)
-// toward the target (tx,ty) by ≤1px/beat × the lock-slack sigmoid, learning a slow lock baseline. TWO MODES:
-//   • FIELD-FED (field != null, corr supplied): the ⟲coevo sigmoid paces on ampCorr(field, mov) — the soliton stalls
-//     when it loses coherence with its target. This reads the FIELD → NOT replay-safe (per-peer field noise → gx forks).
-//   • DESCRIPTOR-ONLY (field == null): sig = 1, the leash advances at the full deterministic ≤1px/beat rate, a PURE
-//     function of the leash state (no field read). This is the DOP-DRIVEN REPLAY mode: gx/gy is exact-arithmetic → in
-//     regH → the attractor A=Op·ψ_base is identical on every peer → the drive op-sequence replays byte-identically.
+// toward the target (tx,ty) by ≤1px/beat × a slack sigmoid. THREE MODES (the sig throttle is the ⟲coevo
+// Einstein loop — "matter tells geometry how far it may go"; the DIFFERENCE is WHICH matter observable gates it):
+//   • FIELD-FED (field != null, corr supplied): sig paces on ampCorr(field, mov) — the soliton stalls when it loses
+//     COHERENCE with its target. Reads the FIELD → NOT replay-safe (per-peer field noise → gx forks). The oracle form.
+//   • GAIN-GATED (field == null, gainOf supplied): sig paces on a DESCRIPTOR ENERGY observable g = gainOf(L) ∈ (0,1]
+//     — matter's ENERGY STATE throttles its own transport. This is the HONEST ℂ* Einstein loop (doc §"why can't the
+//     Einstein loop be achieved — IT CAN"): the back-reaction SURVIVES but the sensor is a REGISTER coordinate, not the
+//     field. When gainOf is a pure fn of leash state (the descriptor-predicted lag), gx/gy stays exact → in regH →
+//     replay-safe. (An unpinned slot may pass a FIELD-measured gainOf for true energy back-reaction — its choice.)
+//   • DESCRIPTOR-ONLY (field == null, no gainOf): sig = 1, full deterministic ≤1px/beat, a PURE fn of leash state.
+//     The DOP-DRIVEN REPLAY default (no back-reaction; the target moves open-loop, the pinned soliton follows).
 // Returns the new moving attractor (for setObjField), or null if not chasing.
-export function leashAdvance(L, field, movAtt, corr) {
+export function leashAdvance(L, field, movAtt, corr, gainOf) {
   if (!L.go) return null;
   const mov0 = movAtt(L.gx, L.gy); if (!mov0) return null;
   let sig = 1;
   if (field && corr) { L.ll = corr(field, mov0);   // FIELD-FED pacing (not replay-safe; kept for the field-driven modes)
     if (L.l0 <= 0) L.l0 = L.ll || 1; else L.l0 = L.l0 * 0.98 + L.ll * 0.02;   // slow always-learning baseline
     sig = Math.max(0, Math.min(1, (L.ll / Math.max(1e-6, L.l0) - 0.75) * 4)); }   // the ⟲coevo sigmoid
-  else { L.ll = 1; }   // DESCRIPTOR-ONLY: full advance, no field read → gx/gy is a pure fn of the shared step (replay-safe)
+  else if (gainOf) { const g = gainOf(L); L.ll = g;   // GAIN-GATED (ℂ* honest back-reaction): energy throttles transport
+    // sig ∈ [0,1] rises with the gain observable: g≥1 (matter kept up) → full advance; g→0 (matter lagging) → target waits.
+    // Same shape as the coevo sigmoid but on the DESCRIPTOR energy, so (if gainOf is descriptor-derived) gx/gy stays exact.
+    sig = Math.max(0, Math.min(1, (g - 0.25) / 0.5)); }
+  else { L.ll = 1; }   // DESCRIPTOR-ONLY: full advance, no read → gx/gy is a pure fn of the shared step (replay-safe)
   const dx = L.tx - L.gx, dy = L.ty - L.gy, d = Math.hypot(dx, dy);   // ≤1px per beat in ANY direction (normalized step)
   if (d > 1e-9) { const st = Math.min(1, d) * sig; L.gx += (dx / d) * st; L.gy += (dy / d) * st; }
   return movAtt(L.gx, L.gy);
+}
+
+// leashGainPredicted(L, maxLag) — the DESCRIPTOR-derived energy observable for the gain-gated Einstein loop: a pure
+// function of leash state (no field). Models "how much has matter fallen behind its target": g = 1 − min(1, lag/maxLag)
+// where lag = |target − eased-position| accumulated as a slow follower of the gap. g≈1 when the soliton is at its
+// target (kept up), g→0 when the target has run far ahead (matter lagging → the loop throttles the target). In regH
+// (pure leash arithmetic) → replay-safe. The default gainOf for a PINNED slot's Einstein loop.
+export function leashGainPredicted(L, maxLag = 4) {
+  const dx = L.tx - L.gx, dy = L.ty - L.gy, lag = Math.hypot(dx, dy);
+  // EMA the lag onto the leash (L.lg) so a momentary jump doesn't spike the gate; slow follower like the coevo baseline.
+  L.lg = (L.lg == null) ? lag : (L.lg * 0.9 + lag * 0.1);
+  return Math.max(0, Math.min(1, 1 - L.lg / Math.max(1e-6, maxLag)));
 }
 
 // leashDue(L, kp, beats) — the τ_i cadence gate (verbatim from the oracle _leashDue): a commanded slot's

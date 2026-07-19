@@ -522,3 +522,572 @@ export function makeStampedInput(tauK, name, { clock = null } = {}) {
     get seen() { return seen; },
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  THE IFS-KERNEL ABCD SLICE (gate A of the metaplectic arc — the IFS-NATIVE low-k fit).
+//
+//  stepEye integrates  iψ_t = −½·L̂ψ  (Strang leapfrog: Re −= dt/4·L̂Im · Im += dt/2·L̂Re · Re −= dt/4·L̂Im),
+//  where L̂ = lap9 + Σ_d ν_d(Σ_i S_{δ_di} − n_d·I), ν_d = 4·w_d/n_d — verbatim ifs-gpu's GLSL_LAP_FUNC/setRings,
+//  re-derived here on the DESCRIPTOR side (keep in sync with the shader). L̂ is a CONVOLUTION → diagonal in k:
+//  its exact symbol λ(k) is a CLOSED FORM of the ring descriptor (radii/weights/offsets). That is the IFS-native
+//  fit: no GPU probe, no pixels — pure f64, recomputable at every fractal-clock kernel bump for free.
+//
+//  Plane wave e^{i(k·x − ωt)}:  ω(k) = −λ(k)/2  (phase advance per unit dt) · group velocity v_g = ∂ω/∂k.
+//  LOW-k:  λ(k) ≈ −k^T·D·k + i·(k·s)  with  D = I₂ (lap9 is isotropic −|k|² to 4th order) + ½·Σ_d ν_d Σ_i δδ^T
+//  and s = Σ_d ν_d Σ_i δ_i (the dipole — non-zero ⇔ non-centrosymmetric kernel ⇔ non-Hermitian k-odd gain; a
+//  Hermiticity CHECK, expected ≈0 for ring kernels). So the medium's paraxial regime IS Schrödinger with mass
+//  tensor D⁻¹, and the ABCD free block over T steps is [[I, D·T·dt],[0, I]] — the ±T hologram propagation
+//  (stepEyeN is LINEAR: no SPM in the record/recall round-trips) becomes a closed-form register operation once
+//  gate B validates the fit. D's principal axes are the measured axis-anisotropy signature, now DERIVED.
+//
+//  THE CLOCK IS ITS OWN LOW-PASS (the design note): a full ring's symbol is J₀-like — beyond k ≈ j₀,₁/r the
+//  ring ANTI-couples and the symbol oscillates; the medium itself scrambles that band. So the quadratic fit is
+//  valid exactly where the medium keeps states: compare kFit (the ±tol deviation knee, scanned along 4
+//  directions) against kKnee = j₀,₁/r_max. kFit ≳ kKnee ⇒ the ABCD slice is exact FOR EVERY STATE THE CLOCK
+//  PASSES — the fit discards only what the kernel itself discards.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// kernelSymbol(radii, weights, offs, kx, ky) — the EXACT symbol λ(k) of L̂ (re + im), closed form.
+export function kernelSymbol(radii, weights, offs, kx, ky) {
+  const cx = Math.cos(kx), cy = Math.cos(ky), cpq = Math.cos(kx + ky), cmq = Math.cos(kx - ky);
+  let re = (4 * (2 * cx + 2 * cy) + 2 * cpq + 2 * cmq - 20) / 6, im = 0;   // lap9 (exact; → −|k|² at low k)
+  for (let d = 0; d < (radii?.length || 0); d++) { const o = offs?.[d] || []; const n = o.length >> 1; if (!n) continue;
+    const nu = 4 * (weights?.[d] ?? 0) / n; let cs = 0, sn = 0;
+    for (let i = 0; i < n; i++) { const u = kx * o[i * 2] + ky * o[i * 2 + 1]; cs += Math.cos(u); sn += Math.sin(u); }
+    re += nu * (cs - n); im += nu * sn; }
+  return { re, im };
+}
+
+// kernelABCD(radii, weights, offs, { dt, T, tol }) — the low-k ABCD slice + its honest validity band.
+export function kernelABCD(radii, weights, offs, { dt = 1, T = 1, tol = 0.05 } = {}) {
+  let Dxx = 1, Dxy = 0, Dyy = 1, sx = 0, sy = 0, rMax = 0;   // D starts at I₂ (the lap9 term)
+  for (let d = 0; d < (radii?.length || 0); d++) { const o = offs?.[d] || []; const n = o.length >> 1; if (!n) continue;
+    const nu = 4 * (weights?.[d] ?? 0) / n;
+    if ((radii?.[d] || 0) > rMax) rMax = radii[d];
+    for (let i = 0; i < n; i++) { const x = o[i * 2], y = o[i * 2 + 1];
+      Dxx += 0.5 * nu * x * x; Dxy += 0.5 * nu * x * y; Dyy += 0.5 * nu * y * y; sx += nu * x; sy += nu * y; } }
+  // principal axes of D (symmetric 2×2) — the anisotropy signature, derived not probed
+  const tr = Dxx + Dyy, df = Dxx - Dyy, disc = Math.sqrt(df * df + 4 * Dxy * Dxy);
+  const D1 = (tr + disc) / 2, D2 = (tr - disc) / 2, theta = 0.5 * Math.atan2(2 * Dxy, df);
+  // kFit: the largest |k| where the quadratic tracks the exact Re λ within tol, scanned along x/y/diagonals
+  const dirs = [[1, 0], [0, 1], [Math.SQRT1_2, Math.SQRT1_2], [Math.SQRT1_2, -Math.SQRT1_2]];
+  let kFit = Infinity;
+  for (const [ux, uy] of dirs) { let kGood = 0;
+    for (let k = 0.02; k <= Math.PI; k += 0.02) { const kxx = k * ux, kyy = k * uy;
+      const ex = kernelSymbol(radii, weights, offs, kxx, kyy).re;
+      const quad = -(Dxx * kxx * kxx + 2 * Dxy * kxx * kyy + Dyy * kyy * kyy);
+      if (Math.abs(ex - quad) <= tol * Math.max(Math.abs(ex), Math.abs(quad), 1e-9)) kGood = k; else break; }
+    if (kGood < kFit) kFit = kGood; }
+  const kKnee = rMax > 0 ? 2.404825557695773 / rMax : Math.PI;   // j₀,₁/r_max — the clock's own low-pass knee
+  const Bt = T * dt;                                             // the free block's duration (x' = x + D·k·T·dt)
+  return {
+    D: [Dxx, Dxy, Dyy], eig: { D1, D2, theta }, aniso: D2 !== 0 ? D1 / D2 : Infinity,
+    drift: [sx, sy], hermitian: Math.hypot(sx, sy) < 1e-9,
+    kFit, kKnee, rMax,
+    abcd: { A: [1, 0, 0, 1], B: [Dxx * Bt, Dxy * Bt, Dxy * Bt, Dyy * Bt], C: [0, 0, 0, 0], Dm: [1, 0, 0, 1] },
+    vg: (kx, ky) => [(Dxx * kx + Dxy * ky) * dt, (Dxy * kx + Dyy * ky) * dt],   // group velocity per step at tilt k
+  };
+}
+
+// packetD(radii, weights, offs, sigma) — the PACKET-EFFECTIVE quadratic coefficient (gate B's lesson made a law):
+// the k→0 quadratic over-predicts at packet bandwidth, so fit the EXACT dispersion ω(k) = −λ(k)/2 to (D̄/2)k²
+// over the packet's OWN radial spectrum |ψ̂|²·k dk = e^{−k²σ²}·k dk — D̄ = ⟨ω·k²⟩/⟨k⁴/2⟩, direction-averaged
+// (x/y/diagonal; the measured medium is near-isotropic). D̄(σ) → the k→0 D as σ → ∞. Pure f64, no GPU.
+export function packetD(radii, weights, offs, sigma) {
+  const dirs = [[1, 0], [0, 1], [Math.SQRT1_2, Math.SQRT1_2]];
+  const kMax = 4 / sigma, n = 48; let num = 0, den = 0;
+  for (let i = 1; i <= n; i++) { const k = kMax * i / n, wgt = Math.exp(-k * k * sigma * sigma) * k;
+    let om = 0; for (const [ux, uy] of dirs) om += -0.5 * kernelSymbol(radii, weights, offs, k * ux, k * uy).re;
+    om /= dirs.length;
+    num += wgt * om * k * k; den += wgt * (k * k * k * k) / 2; }
+  return den > 0 ? num / den : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  GATE C — THE q REGISTER (width σ + chirp b): the Gaussian collective coordinates, evolved by THE ENGINE'S
+//  OWN RECIPE projected onto the ansatz. Meta-circular, not textbook: each abstract step IS the engine's Strang
+//  split (stepEye linear · applyEyeNlSpm phase · applyEyeEnergyCap) evaluated on ψ = A·e^{−r²/2σ² + i b r²/2 + iφ}
+//  (I(r) = I0·e^{−r²/σ²}, I0 = P/(πσ²), P = Σ|ψ|² — grid-sum units, cell = 1):
+//   • LINEAR: the exact Gaussian law under iψ_t = −(D̄/2)∇²ψ — complex parameter w = 1/α, α = 1/σ² − i·b,
+//     w ← w + i·D̄·dt (the ABCD B-block acting on q); Gouy φ̇ = −D̄/σ². D̄ = packetD(σ).
+//   • SPM (shader semantics VERBATIM — applyEyeNlSpm(−γ,…) applies δφ(r) = +γ·I/(1+I/Isat)·dt): projected onto
+//     the ansatz modes {1, r²} by INTENSITY-weighted least squares (u = r²/σ², weight e^{−u}: ⟨1⟩=⟨u⟩=1, ⟨u²⟩=2 →
+//     slope β = ⟨u·g⟩−⟨g⟩, intercept a0 = ⟨g⟩−β): φ̇ += a0, ḃ += 2β/σ². CUBIC LIMIT closed form: β = −γI0/4 →
+//     ḃ_NL = −γP/(2πσ⁴) — the classic 2D variational focusing term, RECOVERED not assumed.
+//   • CAP: P ← e0 every step ⇒ P is a CONSTANT of the register.
+//  b=0 balance F(σ) = D̄/σ⁴ + ḃ_NL(σ) = 0 → σ* (saturation arrests the Townes collapse — WHY the engine's
+//  soliton is stable, now DERIVED); linearized breathing Ω = √(−D̄σ*F′(σ*)). Cubic limit: F is scale-free —
+//  no σ* exists; P > P_c = 2πD̄/γ ⇒ collapse (F<0 everywhere), P < P_c ⇒ spread (F>0) — RUNAWAY and the
+//  MINIMUM SOLITON POWER are register predictions now. The GPU oracle (mu1.qTest) measures all of it.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// qSpmRate(sigma, P, gamma, isat) — the SPM projection rates: φ̇_NL = a0, ḃ_NL = rb (per unit t). Simpson
+// quadrature over u ∈ [0, 40] (f64-deterministic; closed form only exists in the cubic limit — tested against it).
+export function qSpmRate(sigma, P, gamma, isat) {
+  const I0 = P / (Math.PI * sigma * sigma);
+  const U = 40, n = 400; let m0 = 0, m1 = 0;
+  for (let i = 0; i <= n; i++) { const u = U * i / n, w = (i === 0 || i === n) ? 1 : (i % 2 ? 4 : 2);
+    const e = Math.exp(-u), g = gamma * I0 * e / (1 + I0 * e / isat);
+    m0 += w * e * g; m1 += w * e * u * g; }
+  const h = U / n / 3; m0 *= h; m1 *= h;
+  const beta = m1 - m0;                       // LSQ slope on u (var(u) = 1 under the e^{−u} weight)
+  return { a0: m0 - beta, rb: 2 * beta / (sigma * sigma) };
+}
+
+// qStep(st, { D, gamma, isat, dt }) — ONE abstract engine step on the register (linear exact law, then the SPM
+// projection; P untouched — the cap holds it). Mutates and returns st = { sigma, b, phi, P }.
+export function qStep(st, { D, gamma, isat, dt }) {
+  const ar = 1 / (st.sigma * st.sigma), ai = -st.b;
+  st.phi += -D * ar * dt;                     // Gouy (d arg A/dt = −D·Re α)
+  const dn = ar * ar + ai * ai;
+  let wr = ar / dn, wi = -ai / dn;            // w = 1/α
+  wi += D * dt;                               // the linear (ABCD-B) action on the complex beam parameter
+  const dn2 = wr * wr + wi * wi;
+  st.sigma = 1 / Math.sqrt(wr / dn2); st.b = wi / dn2;
+  if (gamma) { const { a0, rb } = qSpmRate(st.sigma, st.P, gamma, isat);
+    st.phi += a0 * dt; st.b += rb * dt; }
+  return st;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  GATE D — THE SPECTRAL REGISTER: the engine's OWN discrete linear step, DIAGONALIZED. stepEye is a torus
+//  convolution leapfrog, so the plane-wave grid k = 2π·j/G diagonalizes it EXACTLY, with the closed-form symbol
+//  λ(k) (kernelSymbol — complex when the kernel carries the dipole). Each substep is linear per mode:
+//    S1: R̂ −= (dt/4)·λ·Î   ·   S2: Î += (dt/2)·λ·R̂   ·   S3 = S1        (verbatim GLSL_STEP1/2/3, in k-space)
+//  ⇒ T linear steps = a per-mode 2×2 recurrence — NOT a continuum import: the register runs the engine's exact
+//  discrete propagator (its numerical dispersion included), so the ±T hologram legs (record/recall propagation)
+//  are register-resident EXACTLY; f32 is the only gap vs the GPU. The palindromic split makes −dt the exact
+//  inverse (why the engine's ±T round-trip is clean — now provable per mode). The clock's own low-pass (kKnee)
+//  becomes a COMPRESSION LAW: truncate modes |k| > kCut and the descriptor plate shrinks ~100× with a STATED error.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// _fft1d — in-place iterative radix-2 complex FFT (n a power of 2). f64-deterministic (pure Math.cos/sin).
+// NOTE (measured): a twiddle-TABLE variant with offset indexing benchmarked 2× SLOWER here than this
+// recurrence-on-subarrays form (V8 optimizes the small-typed-array tight loops) — keep this one.
+function _fft1d(re, im, n, inv) {
+  for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit;
+    if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+  for (let len = 2; len <= n; len <<= 1) { const ang = (inv ? 2 : -2) * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) { let cr = 1, ci = 0;
+      for (let j = 0; j < len / 2; j++) { const a = i + j, b = i + j + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr; } } }
+  if (inv) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+}
+
+// fft2d(re, im, G, inv) — in-place 2D FFT over a G×G row-major grid (G a power of 2). Column scratch pooled
+// per G (the hot path runs ~240 fft2d calls/s — per-call allocations are GC-pause fuel).
+const _fftCol = new Map();
+export function fft2d(re, im, G, inv = false) {
+  for (let y = 0; y < G; y++) { const off = y * G; _fft1d(re.subarray(off, off + G), im.subarray(off, off + G), G, inv); }
+  let c = _fftCol.get(G); if (!c) { c = { r: new Float64Array(G), i: new Float64Array(G) }; _fftCol.set(G, c); }
+  const tr = c.r, ti = c.i;
+  for (let x = 0; x < G; x++) { for (let y = 0; y < G; y++) { tr[y] = re[y * G + x]; ti[y] = im[y * G + x]; }
+    _fft1d(tr, ti, G, inv);
+    for (let y = 0; y < G; y++) { re[y * G + x] = tr[y]; im[y * G + x] = ti[y]; } }
+}
+
+// kernelLambdaGrid(radii, weights, offs, G) — the symbol λ(k) precomputed over the full G×G mode grid (row-major,
+// same k layout as kernelPropagateSpectral). The CACHE UNIT for hot-path use: key it on the kernel VERSION —
+// the fractal clock bumps the ring at SHARED steps, so a per-kernelVer lazy cache is identical on every peer.
+export function kernelLambdaGrid(radii, weights, offs, G) {
+  // THE FAST BUILD: λ over the whole mode grid = the DFT of the operator's spatial STENCIL. L̂ is a torus
+  // convolution with INTEGER offsets, so one G² stencil image + one FFT replaces G²·Σn_d symbol evaluations —
+  // ~100× cheaper. This was a live main-thread stall: the fractal clock bumps kernelVer fastest in a YOUNG world,
+  // and every per-kernelVer cache miss (vptWatch default-on, verbs) rebuilt the grid at 100–500ms — the
+  // "fresh leader lags, reloaded world smooth" signature. Values are EXACT (same sum, FFT-ordered; f64 ~1e-12 —
+  // regression-pinned against kernelSymbol). Non-integer offsets (synthetic/analysis kernels) fall back to the
+  // direct per-mode evaluation.
+  const N = G * G;
+  let intOk = true;
+  for (const o of (offs || [])) { if (!intOk) break; for (let i = 0; i < (o?.length || 0); i++) if (!Number.isInteger(o[i])) { intOk = false; break; } }
+  if (!intOk) {
+    const re = new Float64Array(N), im = new Float64Array(N);
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+      const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
+      const s = kernelSymbol(radii, weights, offs, kx, ky); re[j] = s.re; im[j] = s.im; }
+    return { re, im };
+  }
+  const sr = new Float64Array(N), si = new Float64Array(N);
+  const put = (dx, dy, c) => { sr[(((dy % G) + G) % G) * G + (((dx % G) + G) % G)] += c; };
+  put(1, 0, 4 / 6); put(-1, 0, 4 / 6); put(0, 1, 4 / 6); put(0, -1, 4 / 6);   // lap9 (verbatim GLSL_LAP_FUNC)
+  put(1, 1, 1 / 6); put(-1, -1, 1 / 6); put(1, -1, 1 / 6); put(-1, 1, 1 / 6);
+  put(0, 0, -20 / 6);
+  for (let d = 0; d < (radii?.length || 0); d++) { const o = offs?.[d] || []; const n = o.length >> 1; if (!n) continue;
+    const nu = 4 * (weights?.[d] ?? 0) / n;
+    for (let i = 0; i < n; i++) put(o[i * 2], o[i * 2 + 1], nu);
+    put(0, 0, -nu * n); }
+  fft2d(sr, si, G, false);                       // DFT gives Σ c_δ e^{−ik·δ} = conj(λ) (real stencil) → λ = (re, −im)
+  for (let j = 0; j < N; j++) si[j] = -si[j];
+  return { re: sr, im: si };
+}
+
+// kernelPropagateSpectral(field, radii, weights, offs, { T, dt, kCut, G, lam }) — run T of the ENGINE'S linear
+// steps on an interleaved complex field, entirely in the register (FFT → per-mode leapfrog recurrence → inverse
+// FFT). dt < 0 = the exact backward leg. kCut > 0 truncates modes |k| > kCut (the passband compression; kept/total
+// reported). `lam` = a kernelLambdaGrid result — skips the per-mode symbol evaluation (the hot-path cache; radii/
+// weights/offs may then be null). Returns { field, kept, total }. R̂/Î are the spectra of the REAL/IMAG fields
+// (two complex spectra) — exactly how the GLSL substeps couple them; λ complex ⇒ the dipole rides along.
+// `reuse: true` — the hot-path option (the register engine calls this ~60×/s): the four spectra and the output
+// come from a per-G scratch pool instead of fresh allocations (~6 × 128 KB of garbage per step otherwise — GC
+// pauses read as visual lag). RESULT VALUES are bit-identical to the alloc path (same ops, same order); the
+// caller must consume/copy the returned field before the NEXT reuse:true call (it is the pool's buffer).
+const _kpsPool = new Map();
+export function kernelPropagateSpectral(field, radii, weights, offs, { T = 1, dt = 1, kCut = 0, G = Math.round(Math.sqrt(field.length / 2)), lam = null, reuse = false } = {}) {
+  const N = G * G;
+  let Rr, Ri, Ir, Ii, outBuf = null;
+  if (reuse) { let p = _kpsPool.get(N);
+    if (!p) { p = { a: new Float64Array(N), b: new Float64Array(N), c: new Float64Array(N), d: new Float64Array(N), o: new Float64Array(2 * N) }; _kpsPool.set(N, p); }
+    ({ a: Rr, b: Ri, c: Ir, d: Ii, o: outBuf } = p); Ri.fill(0); Ii.fill(0); }
+  else { Rr = new Float64Array(N); Ri = new Float64Array(N); Ir = new Float64Array(N); Ii = new Float64Array(N); }
+  for (let j = 0; j < N; j++) { Rr[j] = field[j * 2]; Ir[j] = field[j * 2 + 1]; }
+  fft2d(Rr, Ri, G, false); fft2d(Ir, Ii, G, false);
+  let kept = 0;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+    const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
+    if (kCut > 0 && Math.hypot(kx, ky) > kCut) { Rr[j] = Ri[j] = Ir[j] = Ii[j] = 0; continue; }
+    kept++;
+    let lr, li;
+    if (lam) { lr = lam.re[j]; li = lam.im[j]; }
+    else { const s = kernelSymbol(radii, weights, offs, kx, ky); lr = s.re; li = s.im; }
+    const hr = (dt / 4) * lr, hi = (dt / 4) * li, fr = (dt / 2) * lr, fi = (dt / 2) * li;
+    // CLOSED-FORM M^T (the eigen-rotation micro-opt): the one-step map M = S1·S2·S1 has det 1 and
+    // m11 = m22 = 1 − hf, so M^T = U_{T−1}(x)·M − U_{T−2}(x)·I with x = tr M/2 = 1 − hf and U_n the
+    // 2nd-kind Chebyshev recurrence (complex-safe — the dipole's Im λ rides along). Identical map in exact
+    // arithmetic (f64 diffs ~1e-13); ~5× fewer flops in the mode loop than iterating the substeps.
+    const hfr = hr * fr - hi * fi, hfi = hr * fi + hi * fr;              // hf
+    const xr = 1 - hfr, xi = -hfi;                                       // x = m11 = m22
+    let u1r, u1i, u0r, u0i;                                              // U_{T−1}, U_{T−2}
+    if (T === 1) { u1r = 1; u1i = 0; u0r = 0; u0i = 0; }
+    else { u0r = 1; u0i = 0; u1r = 2 * xr; u1i = 2 * xi;
+      for (let s = 2; s < T; s++) { const nr = 2 * (xr * u1r - xi * u1i) - u0r, ni = 2 * (xr * u1i + xi * u1r) - u0i;
+        u0r = u1r; u0i = u1i; u1r = nr; u1i = ni; } }
+    const t2r = 2 - hfr, t2i = -hfi;                                     // 2 − hf
+    const m12r = -(hr * t2r - hi * t2i), m12i = -(hr * t2i + hi * t2r);  // m12 = −h·(2−hf)
+    const A11r = (u1r * xr - u1i * xi) - u0r, A11i = (u1r * xi + u1i * xr) - u0i;
+    const A12r = u1r * m12r - u1i * m12i, A12i = u1r * m12i + u1i * m12r;
+    const A21r = u1r * fr - u1i * fi, A21i = u1r * fi + u1i * fr;        // m21 = f · A22 = A11
+    const ar0 = Rr[j], ai0 = Ri[j], br0 = Ir[j], bi0 = Ii[j];
+    Rr[j] = (A11r * ar0 - A11i * ai0) + (A12r * br0 - A12i * bi0);
+    Ri[j] = (A11r * ai0 + A11i * ar0) + (A12r * bi0 + A12i * br0);
+    Ir[j] = (A21r * ar0 - A21i * ai0) + (A11r * br0 - A11i * bi0);
+    Ii[j] = (A21r * ai0 + A21i * ar0) + (A11r * bi0 + A11i * br0);
+  }
+  fft2d(Rr, Ri, G, true); fft2d(Ir, Ii, G, true);
+  const out = outBuf || new Float64Array(2 * N);
+  for (let j = 0; j < N; j++) { out[j * 2] = Rr[j]; out[j * 2 + 1] = Ir[j]; }   // the inverse's imag parts are ~0 (real component fields) — dropped
+  return { field: out, kept, total: N };
+}
+
+// ── THE REMAINING DUALITY HARVEST (Cartier/finite-Fourier, applied where the real-space path cannot follow) ──
+
+// spectralShift(field, dx, dy, G) — EXACT torus translation by ANY offset, fractional included (the shift theorem:
+// multiply by the character e^{−ik·Δ}). Unitary (Parseval-exact) at every offset — vs the bilinear resample's
+// measured ~18%/half-pixel loss (the orbit-mode finding). NOTE: rewiring movAtt to this CHANGES the pin target
+// (physics-affecting) — exported as the primitive for the oracle-checked experiment, not silently wired.
+export function spectralShift(field, dx, dy, G = Math.round(Math.sqrt(field.length / 2))) {
+  const N = G * G, fr = new Float64Array(N), fi = new Float64Array(N);
+  for (let j = 0; j < N; j++) { fr[j] = field[j * 2]; fi[j] = field[j * 2 + 1]; }
+  fft2d(fr, fi, G, false);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+    const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
+    const ph = -(kx * dx + ky * dy), c = Math.cos(ph), s = Math.sin(ph);
+    const r = fr[j] * c - fi[j] * s; fi[j] = fr[j] * s + fi[j] * c; fr[j] = r; }
+  fft2d(fr, fi, G, true);
+  const out = new Float64Array(2 * N);
+  for (let j = 0; j < N; j++) { out[j * 2] = fr[j]; out[j * 2 + 1] = fi[j]; }
+  return out;
+}
+
+// crossCorrScan(a, b, G) — SHIFT-INVARIANT overlap in one dual pass: g(δ) = Σ a*(x)·b(x+δ) for ALL N offsets at
+// once (ifft(conj(Â)·B̂), O(N·logN) vs O(N²) real-space). Returns { corr0 (zero-lag — the current recall score),
+// corrMax, dx, dy } with ampCorr normalization and signed torus offsets. The recall capability zero-lag cannot
+// have: content-addressing that FINDS a banked moment the state has since MOVED away from — and says where.
+export function crossCorrScan(a, b, G = Math.round(Math.sqrt(a.length / 2))) {
+  const N = G * G;
+  const ar = new Float64Array(N), ai = new Float64Array(N), br = new Float64Array(N), bi = new Float64Array(N);
+  let na = 0, nb = 0;
+  for (let j = 0; j < N; j++) { ar[j] = a[j * 2]; ai[j] = a[j * 2 + 1]; br[j] = b[j * 2]; bi[j] = b[j * 2 + 1];
+    na += a[j * 2] ** 2 + a[j * 2 + 1] ** 2; nb += b[j * 2] ** 2 + b[j * 2 + 1] ** 2; }
+  const nrm = Math.sqrt(na * nb) || 1;
+  fft2d(ar, ai, G, false); fft2d(br, bi, G, false);
+  for (let j = 0; j < N; j++) { const pr = ar[j] * br[j] + ai[j] * bi[j], pi = ar[j] * bi[j] - ai[j] * br[j]; ar[j] = pr; ai[j] = pi; }
+  fft2d(ar, ai, G, true);
+  const c0 = Math.hypot(ar[0], ai[0]) / nrm;
+  let best = 0, bv = -1;
+  for (let j = 0; j < N; j++) { const v = ar[j] * ar[j] + ai[j] * ai[j]; if (v > bv) { bv = v; best = j; } }
+  let dx = best % G, dy = (best / G) | 0; if (dx > G / 2) dx -= G; if (dy > G / 2) dy -= G;
+  return { corr0: c0, corrMax: Math.sqrt(bv) / nrm, dx, dy };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  DESCENT RUNG 1 — THE COVER LAW (local-to-global made first-class on ONE peer). Can a single peer carry the
+//  sharding structure for free? In THIS architecture, yes: the GLOBAL MODEL is already the register (tiny,
+//  replicated whole); the field is a WITNESS — so a cover of the field is view-tier structure with zero contract
+//  stakes. These functions make the cover explicit and PIN its two facts:
+//   • THE COCYCLE (tested bit-for-bit): for the LOCAL ops — the kernel leapfrog (finite support ≤ reach/substep)
+//     and pointwise SPM — stepping a P×P cover with halos of width 3·reach and GLUING ≡ stepping the whole torus,
+//     to the last bit (the per-cell term order is FIXED and shared between paths — bit-exactness is an ORDER
+//     property, not just a value property).
+//   • THE OBSTRUCTION: the energy cap is the one GLOBAL datum. It does not break sharding — it REDUCES (per-patch
+//     partial sums combine associatively) — but f64 addition is order-sensitive, so THE REDUCTION TREE IS PART OF
+//     THE CONTRACT: a fixed patch-ordered tree reproduces the global cap to ~1e-12 (not bitwise vs the single-pass
+//     sum); multi-peer sharding must ship the tree, not just the partials. Capping each patch by its OWN energy is
+//     WRONG (demonstrated in the tests) — the cocycle fails exactly at the global sector, as it must.
+//  Multi-peer region sharding later = assigning patches to peers + shipping halos; the gluing law is already
+//  pinned here, with the whole-field path as the resident oracle. (Čech language becomes literal at that point:
+//  halo agreement on overlaps is the cocycle condition; a nonzero residual localizes WHERE a non-local read leaked.)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// _kernTerms — the operator L̂ as an explicit FIXED-ORDER term list [dx, dy, coeff] (lap9 first, then rings,
+// then the center corrections). The order is load-bearing: both the whole-torus and the cover path accumulate
+// per cell in this exact order, which is what makes the cocycle test bit-for-bit.
+function _kernTerms(radii, weights, offs) {
+  const t = [];
+  const push = (dx, dy, c) => t.push([dx, dy, c]);
+  push(1, 0, 4 / 6); push(-1, 0, 4 / 6); push(0, 1, 4 / 6); push(0, -1, 4 / 6);
+  push(1, 1, 1 / 6); push(-1, -1, 1 / 6); push(1, -1, 1 / 6); push(-1, 1, 1 / 6);
+  push(0, 0, -20 / 6);
+  let reach = 1;
+  for (let d = 0; d < (radii?.length || 0); d++) { const o = offs?.[d] || []; const n = o.length >> 1; if (!n) continue;
+    const nu = 4 * (weights?.[d] ?? 0) / n;
+    for (let i = 0; i < n; i++) { push(o[i * 2], o[i * 2 + 1], nu);
+      reach = Math.max(reach, Math.abs(o[i * 2]), Math.abs(o[i * 2 + 1])); }
+    push(0, 0, -nu * n); }
+  return { terms: t, reach };
+}
+
+const _lapWith = (terms, get, x, y) => { let a = 0;
+  for (let i = 0; i < terms.length; i++) { const tm = terms[i]; a += tm[2] * get(x + tm[0], y + tm[1]); } return a; };
+
+// leapfrogStepX(field, radii, weights, offs, dt, G) — ONE whole-torus engine step in x-space (the reference the
+// cover is glued against). Same Strang split as the GPU (S1·S2·S1); fixed term order per cell (see _kernTerms).
+export function leapfrogStepX(field, radii, weights, offs, dt, G = Math.round(Math.sqrt(field.length / 2))) {
+  const { terms } = _kernTerms(radii, weights, offs), N = G * G;
+  const R = new Float64Array(N), I = new Float64Array(N);
+  for (let j = 0; j < N; j++) { R[j] = field[j * 2]; I[j] = field[j * 2 + 1]; }
+  const wrap = (arr) => (x, y) => arr[(((y % G) + G) % G) * G + (((x % G) + G) % G)];
+  const sub = (dst, src, s) => { const g = wrap(src), out = new Float64Array(dst);
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) out[y * G + x] = dst[y * G + x] + s * _lapWith(terms, g, x, y);
+    return out; };
+  const R1 = sub(R, I, -dt / 4), I1 = sub(I, R1, dt / 2), R2 = sub(R1, I1, -dt / 4);
+  const out = new Float64Array(2 * N);
+  for (let j = 0; j < N; j++) { out[j * 2] = R2[j]; out[j * 2 + 1] = I1[j]; }
+  return out;
+}
+
+// regionStepX(field, radii, weights, offs, dt, G, reg, {out}) — ONE engine step computed ONLY inside the region
+// reg = {x0,y0,x1,y1} (torus box), reading boundary data from the field's own outside and writing NOTHING there.
+// The Strang cascade needs shrinking margins (S1 over R+2·reach, S2 over R+reach, S3 over R), so values INSIDE R
+// are BIT-IDENTICAL to the whole-torus step for one step from the same field (the light-cone law as an
+// evaluation schedule; same _kernTerms order as leapfrogStepX/coverStep — the cocycle discipline). This is the
+// U1 shard executor: cost ∝ |R|, outside = the peer's declared boundary (frozen/witness tier). Scratch pooled.
+const _rsxPool = new Map();
+export function regionStepX(field, radii, weights, offs, dt, G, reg, { out = null } = {}) {
+  const { terms, reach } = _kernTerms(radii, weights, offs), N = G * G;
+  let p = _rsxPool.get(N);
+  if (!p) { p = { R: new Float64Array(N), I: new Float64Array(N), R1: new Float64Array(N), I1: new Float64Array(N), R2: new Float64Array(N) }; _rsxPool.set(N, p); }
+  const { R, I, R1, I1, R2 } = p;
+  for (let j = 0; j < N; j++) { R[j] = field[j * 2]; I[j] = field[j * 2 + 1]; }
+  const wrap = (arr) => (x, y) => arr[(((y % G) + G) % G) * G + (((x % G) + G) % G)];
+  // sub-update dst→outArr over reg expanded by m (torus box); OUTSIDE the box, outArr must equal dst wherever a
+  // LATER substep will read it — copy the next margin band's worth: simplest correct form copies dst fully once.
+  const subR = (outArr, dst, src, s, m) => { outArr.set(dst); const g = wrap(src);
+    for (let ey = reg.y0 - m; ey < reg.y1 + m; ey++) for (let ex = reg.x0 - m; ex < reg.x1 + m; ex++) {
+      const gx = ((ex % G) + G) % G, gy = ((ey % G) + G) % G;
+      outArr[gy * G + gx] = dst[gy * G + gx] + s * _lapWith(terms, g, gx, gy); } };
+  subR(R1, R, I, -dt / 4, 2 * reach);
+  subR(I1, I, R1, dt / 2, reach);
+  subR(R2, R1, I1, -dt / 4, 0);
+  const o = out || new Float64Array(2 * N);
+  o.set(field);
+  for (let ey = reg.y0; ey < reg.y1; ey++) for (let ex = reg.x0; ex < reg.x1; ex++) {
+    const gx = ((ex % G) + G) % G, gy = ((ey % G) + G) % G, j = gy * G + gx;
+    o[j * 2] = R2[j]; o[j * 2 + 1] = I1[j]; }
+  return o;
+}
+
+// coverStep(field, radii, weights, offs, dt, G, P) — the SAME step via an explicit P×P cover: each patch is
+// extracted with a halo of 3·reach (one full step = three substeps, each propagating ≤ reach), stepped LOCALLY
+// (no torus knowledge inside a patch), and the interiors GLUED. Bit-for-bit ≡ leapfrogStepX (the cocycle).
+export function coverStep(field, radii, weights, offs, dt, G, P = 2) {
+  const { terms, reach } = _kernTerms(radii, weights, offs);
+  const pw = G / P; if (pw !== (pw | 0)) throw new Error('coverStep: P must divide G');
+  const h = 3 * reach, s = pw + 2 * h, N = G * G;
+  const out = new Float64Array(2 * N);
+  for (let pj = 0; pj < P; pj++) for (let pi = 0; pi < P; pi++) {
+    const BR = new Float64Array(s * s), BI = new Float64Array(s * s);
+    for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+      const gx = (((pi * pw + x - h) % G) + G) % G, gy = (((pj * pw + y - h) % G) + G) % G;
+      BR[y * s + x] = field[(gy * G + gx) * 2]; BI[y * s + x] = field[(gy * G + gx) * 2 + 1]; }
+    // three LOCAL substeps: the valid region shrinks by `reach` per substep; the interior stays clean since 3·reach ≤ h.
+    const getB = (arr) => (x, y) => arr[Math.min(s - 1, Math.max(0, y)) * s + Math.min(s - 1, Math.max(0, x))];
+    const subB = (dst, src, sc, m) => { const g = getB(src), o2 = new Float64Array(dst);
+      for (let y = m; y < s - m; y++) for (let x = m; x < s - m; x++) o2[y * s + x] = dst[y * s + x] + sc * _lapWith(terms, g, x, y);
+      return o2; };
+    const R1 = subB(BR, BI, -dt / 4, reach), I1 = subB(BI, R1, dt / 2, 2 * reach), R2 = subB(R1, I1, -dt / 4, 3 * reach);
+    for (let y = 0; y < pw; y++) for (let x = 0; x < pw; x++) {
+      const j = ((pj * pw + y) * G + (pi * pw + x)) * 2, b = (y + h) * s + (x + h);
+      out[j] = R2[b]; out[j + 1] = I1[b]; } }
+  return out;
+}
+
+// capReduce(partials) — the global sector as a monoid: combine per-patch energy partials in a FIXED patch-ordered
+// tree (left fold). THE LAW: the tree is part of the contract — shards must ship (partial, patchIndex) and every
+// holder folds in the same order, or the cap scalar (hence every capped byte) forks at the f64 level.
+export function capReduce(partials) { let e = 0; for (let i = 0; i < partials.length; i++) e += partials[i]; return e; }
+
+// coverResidual — THE SPATIAL FORK-FINDER (the Čech instrument made operational): each patch computes its
+// interior EXTENDED by `ov` cells, so adjacent patches compute the overlap bands REDUNDANTLY; the residual is
+// the max disagreement over all overlaps (+ where). For honest LOCAL ops the residual is EXACTLY 0 (the cocycle,
+// bit-for-bit); any NON-LOCAL read leaking into the step lights up localized at its entry point — the descent
+// analog of solH, except it answers WHERE, not just WHETHER. `taint: {x, y, amp}` injects a deliberate halo
+// perturbation into the ONE patch owning that cell (not its neighbors) — the calibration fault: the residual
+// must appear within the taint's light cone (≤ 3·reach).
+export function coverResidual(field, radii, weights, offs, dt, G, P = 2, { ov = 0, taint = null } = {}) {
+  const { terms, reach } = _kernTerms(radii, weights, offs);
+  const pw = G / P; if (pw !== (pw | 0)) throw new Error('coverResidual: P must divide G');
+  const o = ov || reach, h = 3 * reach + o, s = pw + 2 * h;
+  // each patch's EXTENDED interior: [h−o, h+pw+o) in buffer coords — neighbors overlap by 2o cells
+  const ext = new Array(P * P);
+  for (let pj = 0; pj < P; pj++) for (let pi = 0; pi < P; pi++) {
+    const BR = new Float64Array(s * s), BI = new Float64Array(s * s);
+    for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+      const gx = (((pi * pw + x - h) % G) + G) % G, gy = (((pj * pw + y - h) % G) + G) % G;
+      BR[y * s + x] = field[(gy * G + gx) * 2]; BI[y * s + x] = field[(gy * G + gx) * 2 + 1]; }
+    if (taint) { // inject into the OWNING patch's buffer only (owner = the patch whose interior contains the cell)
+      const own = (((taint.x / pw) | 0) === pi && ((taint.y / pw) | 0) === pj);
+      if (own) { const bx = taint.x - pi * pw + h, by = taint.y - pj * pw + h;
+        BR[by * s + bx] += (taint.amp ?? 1e-3); } }
+    const getB = (arr) => (x, y) => arr[Math.min(s - 1, Math.max(0, y)) * s + Math.min(s - 1, Math.max(0, x))];
+    const subB = (dst, src, sc, m) => { const g = getB(src), o2 = new Float64Array(dst);
+      for (let y = m; y < s - m; y++) for (let x = m; x < s - m; x++) o2[y * s + x] = dst[y * s + x] + sc * _lapWith(terms, g, x, y);
+      return o2; };
+    const R1 = subB(BR, BI, -dt / 4, reach), I1 = subB(BI, R1, dt / 2, 2 * reach), R2 = subB(R1, I1, -dt / 4, 3 * reach);
+    ext[pj * P + pi] = { R: R2, I: I1, pi, pj }; }
+  // compare every REDUNDANTLY computed global cell across the patches that computed it
+  let rmax = 0, at = null; const val = new Map();
+  for (const e of ext) for (let y = h - o; y < h + pw + o; y++) for (let x = h - o; x < h + pw + o; x++) {
+    const gx = (((e.pi * pw + x - h) % G) + G) % G, gy = (((e.pj * pw + y - h) % G) + G) % G, key = gy * G + gx;
+    const vr = e.R[y * s + x], vi = e.I[y * s + x], prev = val.get(key);
+    if (prev) { const d = Math.max(Math.abs(vr - prev[0]), Math.abs(vi - prev[1]));
+      if (d > rmax) { rmax = d; at = [gx, gy]; } }
+    else val.set(key, [vr, vi]); }
+  return { rmax, at, reach, ov: o };
+}
+
+// qFixedPoint({ Dof, gamma, isat, P, lo, hi }) — the b=0 balance: root of F(σ) = D̄(σ)/σ⁴ + ḃ_NL(σ). Returns
+// { sigma, stable, Omega, period } or { sigma: null, regime } when no root exists in range — regime 'collapse'
+// (F < 0: focusing wins at every scale — RUNAWAY) or 'spread' (F > 0: below the minimum soliton power).
+export function qFixedPoint({ Dof, gamma, isat, P, lo = 1.5, hi = 48 } = {}) {
+  const D = (s) => (typeof Dof === 'function' ? Dof(s) : Dof);
+  const F = (s) => D(s) / (s * s * s * s) + qSpmRate(s, P, gamma, isat).rb;
+  let a = lo, b = hi, Fa = F(a), Fb = F(b);
+  if (Fa * Fb > 0) return { sigma: null, regime: Fa < 0 ? 'collapse' : 'spread', Fa, Fb };
+  for (let i = 0; i < 80; i++) { const m = (a + b) / 2, Fm = F(m); if (Fa * Fm <= 0) { b = m; Fb = Fm; } else { a = m; Fa = Fm; } }
+  const s = (a + b) / 2, h = s * 1e-4, Fp = (F(s + h) - F(s - h)) / (2 * h);
+  const stable = Fp < 0, Om = stable ? Math.sqrt(Math.max(0, -D(s) * s * Fp)) : 0;
+  return { sigma: s, stable, Omega: Om, period: Om > 0 ? 2 * Math.PI / Om : Infinity };
+}
+
+// ── GATE F: THE ERMAKOV–LEWIS / sl(2,ℝ) CASIMIR ─────────────────────────────────────────────────────────
+// Gate E measured the algebra's structure equation (V̈ = 4·D·H, Ḣ = 0). The triple (V, V̇, H) then carries a
+// CASIMIR — the invariant of the quadratic sector:  I = V̈·V − ½V̇²,  dI/dt = V̇(V̈ − V̈) ≡ 0.
+// It is the register's first genuinely CONSERVED observable beyond H itself, and it is PREDICTIVE: the
+// parabola's turning point is fixed by t=0 data alone —  t* = −V̇₀/V̈,  V_min = I/V̈  — the register calls a
+// GPU focal event (the waist) before the field gets there. On the lattice the honest curvature is the
+// EXACT-SYMBOL rate (virialRateX below): under LINEAR evolution v_g(k) is a per-mode constant of motion, so
+// Var(x)(t) = Var(x₀) + 2Cov·t + Var(v_g)·t² is an EXACT parabola for ANY dispersion — no quadratic band
+// assumed. Nonlinearity adds the pressure term (cubic: conserved with H ⇒ I still exact; saturable: the
+// K-breaking — I's drift MEASURES it, same shape as gate E's ledger).
+
+// secondMoment(field, G) → { V, P, cx, cy }: V = Σ r²|ψ|² about the intensity centroid (the virial ledger's V).
+export function secondMoment(field, G = Math.round(Math.sqrt(field.length / 2))) {
+  const N = G * G; let P = 0, cx = 0, cy = 0;
+  for (let j = 0; j < N; j++) { const a2 = field[j * 2] ** 2 + field[j * 2 + 1] ** 2; P += a2; cx += (j % G) * a2; cy += ((j / G) | 0) * a2; }
+  cx /= P || 1; cy /= P || 1; let V = 0;
+  for (let j = 0; j < N; j++) { const a2 = field[j * 2] ** 2 + field[j * 2 + 1] ** 2, dx = (j % G) - cx, dy = ((j / G) | 0) - cy; V += (dx * dx + dy * dy) * a2; }
+  return { V, P, cx, cy };
+}
+
+// virialRateX(field, radii, weights, offs, G, { gamma, isat, Dq }) → V̈ from the EXACT lattice symbol (the
+// σ=24 lesson made law): linear part 2·P·Var(v_g) with the ANALYTIC group velocity off the operator's stencil —
+// v_g(k) = −½∇λ = ½Σ c_δ·δ·sin(k·δ) (no grid finite-difference: a centered-diff v_g biases V̈ ~1.7% at G=64,
+// and the Casimir INTEGRATES that bias — measured before this was made analytic); nonlinear pressure part
+// −4·D̄·Σp, p(ρ) = ρ·f(ρ) − F(ρ) (cubic limit: −2γD̄Σρ² — the classic term). gamma=0 ⇒ pure linear.
+// `spec` option: { w (|ψ̂|² per mode, FFT order), P, sp } — the FIELD-side content, precomputed. With it the call
+// is FFT-FREE: a kernel RE-KEY changes only the stencil, so a register holding the spectrum re-keys V̈ by a pure
+// stencil re-sum (the sl(2)-tier hot path — the envelope's spectrum is compile-time register content).
+export function virialRateX(field, radii, weights, offs, G = Math.round(Math.sqrt((field ? field.length : 0) / 2)) || 0, { gamma = 0, isat = Infinity, Dq = 0, spec = null } = {}) {
+  if (spec) G = G || Math.round(Math.sqrt(spec.w.length));
+  const N = G * G;
+  let wSpec;
+  if (spec) wSpec = spec.w;
+  else { const pr = new Float64Array(N), pi = new Float64Array(N);
+    for (let j = 0; j < N; j++) { pr[j] = field[j * 2]; pi[j] = field[j * 2 + 1]; }
+    fft2d(pr, pi, G, false);
+    wSpec = new Float64Array(N); for (let j = 0; j < N; j++) wSpec[j] = pr[j] * pr[j] + pi[j] * pi[j]; }
+  // the operator's stencil (verbatim the kernelLambdaGrid terms: lap9 + rings) as a term list for the analytic ∇λ
+  const terms = [[1, 0, 4 / 6], [-1, 0, 4 / 6], [0, 1, 4 / 6], [0, -1, 4 / 6], [1, 1, 1 / 6], [-1, -1, 1 / 6], [1, -1, 1 / 6], [-1, 1, 1 / 6]];
+  for (let d = 0; d < (radii?.length || 0); d++) { const o = offs?.[d] || []; const n = o.length >> 1; if (!n) continue;
+    const nu = 4 * (weights?.[d] ?? 0) / n;
+    for (let i = 0; i < n; i++) terms.push([o[i * 2], o[i * 2 + 1], nu]); }   // center terms carry δ=0 → zero ∇, omitted
+  let sw = 0, svx = 0, svy = 0, sv2 = 0;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+    const w = wSpec[j]; if (!w) continue;
+    const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
+    let vx = 0, vy = 0;
+    for (let t = 0; t < terms.length; t++) { const s = terms[t][2] * Math.sin(kx * terms[t][0] + ky * terms[t][1]); vx += 0.5 * terms[t][0] * s; vy += 0.5 * terms[t][1] * s; }
+    sw += w; svx += w * vx; svy += w * vy; sv2 += w * (vx * vx + vy * vy); }
+  let P;
+  if (spec) P = spec.P;
+  else { P = 0; for (let j = 0; j < N; j++) P += field[j * 2] ** 2 + field[j * 2 + 1] ** 2; }
+  const vlin = sw > 0 ? 2 * P * (sv2 / sw - ((svx / sw) ** 2 + (svy / sw) ** 2)) : 0;
+  if (!gamma) return vlin;
+  let sp;
+  if (spec && spec.sp != null) sp = spec.sp;
+  else { sp = 0; for (let j = 0; j < N; j++) { const I = field[j * 2] ** 2 + field[j * 2 + 1] ** 2;
+    const fI = gamma * I / (1 + (isat === Infinity ? 0 : I / isat)), FI = (isat === Infinity || isat > 1e9) ? gamma * I * I / 2 : gamma * isat * (I - isat * Math.log(1 + I / isat));
+    sp += I * fI - FI; } }
+  return vlin - 4 * Dq * sp;
+}
+// virialSpec(field, G, { gamma, isat }) → the `spec` bundle for virialRateX: { w, P, sp } — one FFT, once, at
+// the compile door; every later re-key is stencil-only.
+export function virialSpec(field, G = Math.round(Math.sqrt(field.length / 2)), { gamma = 0, isat = Infinity } = {}) {
+  const N = G * G, pr = new Float64Array(N), pi = new Float64Array(N);
+  for (let j = 0; j < N; j++) { pr[j] = field[j * 2]; pi[j] = field[j * 2 + 1]; }
+  fft2d(pr, pi, G, false);
+  const w = new Float64Array(N); for (let j = 0; j < N; j++) w[j] = pr[j] * pr[j] + pi[j] * pi[j];
+  let P = 0, sp = 0;
+  for (let j = 0; j < N; j++) { const I = field[j * 2] ** 2 + field[j * 2 + 1] ** 2; P += I;
+    if (gamma) { const fI = gamma * I / (1 + (isat === Infinity ? 0 : I / isat)), FI = (isat === Infinity || isat > 1e9) ? gamma * I * I / 2 : gamma * isat * (I - isat * Math.log(1 + I / isat));
+      sp += I * fI - FI; } }
+  return { w, P, sp };
+}
+
+// slCasimir(vdd, V, Vd) — the invariant itself. Conserved exactly wherever V̈ is the true constant curvature;
+// its drift is the measured sl(2)-breaking (lattice band + saturation), the gate F ledger number.
+export function slCasimir(vdd, V, Vd) { return vdd * V - 0.5 * Vd * Vd; }
+
+// secondMomentTorus(field, G) → { V, P, cx, cy }: the TORUS-AWARE second moment. The naive centroid fails on a
+// wrapped/halo-laden state (a core straddling the boundary or a full-field halo pulls Σx·I toward G/2 — live
+// symptom: "lock 0.92 yet lag 64px", self-contradictory). Centroid = the FIRST-HARMONIC phase per axis
+// (cx = (G/2π)·arg Σ I·e^{i2πx/G} — exact on the torus, wrap-immune); V uses wrapped signed distances.
+export function secondMomentTorus(field, G = Math.round(Math.sqrt(field.length / 2))) {
+  const N = G * G, w = 2 * Math.PI / G; let P = 0, ax = 0, bx = 0, ay = 0, by = 0;
+  for (let j = 0; j < N; j++) { const I = field[j * 2] ** 2 + field[j * 2 + 1] ** 2; if (!I) continue;
+    P += I; const x = j % G, y = (j / G) | 0;
+    ax += I * Math.cos(w * x); bx += I * Math.sin(w * x); ay += I * Math.cos(w * y); by += I * Math.sin(w * y); }
+  const cx = ((Math.atan2(bx, ax) / w) + G) % G, cy = ((Math.atan2(by, ay) / w) + G) % G;
+  // m = the circular RESULTANT LENGTH (min over axes): the localization gauge. m→1 = a compact state (centroid
+  // meaningful); m→0 = the state fills the torus (a "centroid"/lag there is noise — the observable must refuse
+  // itself). Live lesson: an extended hologram object gave lag≈60px at lock 0.92 — not tracking failure, m≈0.
+  const m = P > 0 ? Math.min(Math.hypot(ax, bx), Math.hypot(ay, by)) / P : 0;
+  let V = 0;
+  for (let j = 0; j < N; j++) { const I = field[j * 2] ** 2 + field[j * 2 + 1] ** 2; if (!I) continue;
+    let dx = ((j % G) - cx + G) % G; if (dx > G / 2) dx -= G;
+    let dy = (((j / G) | 0) - cy + G) % G; if (dy > G / 2) dy -= G;
+    V += (dx * dx + dy * dy) * I; }
+  return { V, P, cx, cy, m };
+}
