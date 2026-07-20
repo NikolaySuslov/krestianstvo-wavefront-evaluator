@@ -191,6 +191,16 @@ function makeMediumU1Renderer(core) {
     // no field exchange). Tunable to find where the lock is tight without over-pinning (the original capped ~0.45).
     // LOCAL/peer-independent by default (a render-quality dial, not replicated) — but see mu1.pin() to sync it.
     let _pinBeta = _TRANSPORT_BETA;
+    // LINEAR modes (replicated, eH-affecting): 0 = full nonlinear medium · 1 = FREE linear (SPM+cap+pin off →
+    // the gate-D field disperses; nonlinearity-makes-the-soliton proof) · 2 = linear SHARP TRAP (the "sharp eye
+    // trap"): pin ON (a LINEAR injection lock to the sharp attractor A) balanced by a LINEAR damping ψ←(1−γ)ψ
+    // instead of the nonlinear cap — a driven-damped LINEAR oscillator whose fixed point sits AT A, so the
+    // symbol is held SHARP with ZERO nonlinearity (linear holography, not self-focusing).
+    let _linearMode = 0;
+    // the linear-trap damping DERIVED from β so the fixed point sits AT A (unit gain): steady state of
+    // ψ←(1−leak)(ψ+βA) is ψ*≈βA(1−leak)/leak; ψ*≈A ⇒ leak≈β/(1+β). Under-damping (the old fixed 0.02) let the
+    // pin over-accumulate → a dim broad blob indistinguishable from the dispersing free field (user-caught).
+    const _linLeak = () => { const b = 0.15 * (_lensOp[0].beta || 1); return Math.max(0.02, Math.min(0.5, b / (1 + b))); };
     // THE MEASURED WEAR CONSTANTS (2026-07-18, wearTest/wearGo — Law 7 quantified): betaStar = the capture
     // threshold (the Casimir-flow İ zero-crossing; independently matches the GR-probe locking threshold ≈0.1).
     // Past β* transport cost is ~LINEAR in speed (the ride: ×2.5 cost for ×3 vpx at β=0.6); below β* the walk
@@ -238,9 +248,10 @@ function makeMediumU1Renderer(core) {
       //    hologram lens; W is merely the one the drive acts on). The mirror queue survives only as the legacy
       //    path for a mirror-without-engine state (shouldn't occur post-v7, but honesty over deadcode-pruning).
       if ((e.mode === 'record' || e.mode === 'recvia' || e.mode === 'store' || e.mode === 'recall' || e.mode === 'recallx') && W.desc) {
-        const mv = { mode: e.mode === 'recvia' ? 'record' : e.mode, amp: e.amp || 0, k, si,
+        const mv = { mode: e.mode === 'recvia' ? 'record' : e.mode, amp: e.amp || 0, k, si, scale: e.scale || 'all',
           dop: { ..._lensOp[0] }, gx: W.leash.state.gx, gy: W.leash.state.gy, bw: _tauK ? (_tauK.beatsOf('W') ?? 0) : 0 };
-        if (W.descBase) { if (mv.mode === 'store') _storeFrom(mv, W.descBase);
+        if (W.descBase) { if (_turboOn && _gpu) { _tbAdvanceAll(k); _tbSyncSlot(0); }   // advance the texture to the verb's stamped step, then read W's bytes back (CPU-mode semantics: the verb sees descBase at k)
+          if (mv.mode === 'store') _storeFrom(mv, W.descBase);
           else if (mv.mode === 'recall' || mv.mode === 'recallx') _recallFrom(mv, W.descBase);
           else _recordFrom(mv, W.descBase);
           return; }
@@ -289,12 +300,13 @@ function makeMediumU1Renderer(core) {
       //    and hand it to the medium. The PDE resumes FROM the descriptor state: if the abstraction was faithful the
       //    soliton simply CONTINUES and lock→A recovers ≈1. That resumption is the oracle measurement, per no-tricks.
       if (e.mode === 'wabs') {
+        if (_turboOn && _gpu && !e.amp) { _tbAdvanceAll(k); _tbSyncAll(); }   // materialize reads descBase → advance+sync every living texture to k first (CPU semantics)
         if (e.amp) {
           for (let i2 = 0; i2 < _sb.slots.length; i2++) { const s2 = _sb.slots[i2]; if (!s2.born || s2.desc) continue;
             let env = (i2 === 0 && _gpu) ? _gpu.readEyePsi() : (s2.field ? Float64Array.from(s2.field) : null);
             if (!env) continue;
             env = Float64Array.from(Float32Array.from(env));   // f32-lattice at capture: the envelope is DYNAMICAL now — a joiner (f32 wire) must hold the leader's exact bytes
-            s2.descBase = env; s2.descPhi0 = lensU1.angle(_lensOp[i2]);
+            s2.descBase = env; s2._texDirty = true; s2.descPhi0 = lensU1.angle(_lensOp[i2]);
             if (i2 === 0) { s2.descHold = Float64Array.from(env); s2.descPosCap = [s2.leash.state.gx, s2.leash.state.gy];
               let eC = 0; for (let j = 0; j < env.length; j++) eC += env[j] * env[j]; s2.descE0 = eC || 1; }   // the REGISTER ENGINE's cap level (the state's own energy at close) + capture pose
             s2.descPos = [s2.leash.state.gx, s2.leash.state.gy]; s2.descObj = _lensObj; s2.descBar = Math.floor(k / 21); s2.descCapBar = Math.floor(k / 21);   // capture stamp (telemetry: declaration age in defTest; descBar stays the aging cursor)
@@ -347,6 +359,11 @@ function makeMediumU1Renderer(core) {
           _K.edge[a][b] = kap; _K.edge[b][a] = kap;
           console.log(`[MU1-EDGE] ${SLOTN[a]}⇄${SLOTN[b]} κ=${kap.toFixed(2)} @step=${k} — XY coupling on the REGISTER phases (κ>0 align, κ<0 anti-align; watch [KUR])`); }
         return; }
+      else if (e.mode === 'linonly') { _linearMode = Math.max(0, Math.min(2, e.amp | 0));
+        console.log(`[MU1] linear mode=${_linearMode} @step=${k} — ${_linearMode === 0 ? 'FULL nonlinear medium (SPM + cap + pin)' : _linearMode === 1 ? 'FREE LINEAR (SPM+cap+pin OFF): only gate-D linear propagation → the field DISPERSES (nonlinearity-makes-the-soliton proof)' : 'LINEAR SHARP TRAP: pin ON (linear injection lock to the sharp attractor A) + linear damping ψ←(1−' + _linLeak().toFixed(2) + ')ψ (derived from β for unit gain) instead of the nonlinear cap → the symbol held SHARP by PURELY LINEAR means (a driven-damped oscillator whose fixed point sits at A — linear holography, not self-focusing)'} · REPLICATED (eH-affecting)`); }
+      else if (e.mode === 'turbo') { if (_turboOn && !e.amp && _gpu) _tbSyncAll();   // turning OFF: read back every living texture so the CPU engine resumes from current bytes
+        _turboOn = !!e.amp; _tbCur = -1;
+        console.log(`[MU1] ⚡turbo ${_turboOn ? 'ON — the GPU executes the U1 ENGINE STEP (same five operators, same f32 grain, batched per Q block; array-in/array-out — no field-mode semantics). REPLICATED: every peer switches executor at this shared step. Caveat, declared: GPU f32 pipelines round differently across VENDORS — cross-device eH needs the CPU executor (universal); turbo trades that for ~10× speed.' : 'OFF — the universal CPU f64 executor resumes'} @step=${k}`); }
       else if (e.mode === 'coevo') { _coevoOn = !!e.amp; console.log(`[MU1] ⟲coevo ${_coevoOn ? 'ON' : 'OFF'} @step=${_E.solSteps} — the Einstein loop (matter throttles its own transport)`); }
       else if (e.mode === 'unpin') { _unpinned = !!e.amp; for (const o of _lensOp) o.gain = 1;   // re-pin resets gain to the U(1) slice; unpin lets it live
         console.log(`[MU1] ${_unpinned ? 'UNPIN → lensC1 (gain FREE: the coevo gate reads TRUE field energy — honest matter back-reaction, momentum channel open; regH may fork)' : 'PIN → lensU1 (gain≡1: the coevo gate reads the descriptor-predicted lag — replay-safe)'} @step=${_E.solSteps}`); } };
@@ -389,11 +406,30 @@ function makeMediumU1Renderer(core) {
     const _descPose = (si) => { const s = _sb.slots[si]; if (!s || !s.desc) return null;
       const fs = (_E.monClock - _stepClk.c0) * STEPS_PER_PHASE / (_stepClk.rate || 1);
       // frame-lock: frac=0 → the 𝔸 pose quantizes to the last shared bar (the register film becomes peer-identical
-      // exactly, not just up to each peer's monClock sampling moment)
-      const frac = _frameLock ? 0 : Math.max(0, Math.min(1, (fs - (s.descBar | 0) * 21) / 21));
+      // exactly, not just up to each peer's monClock sampling moment). The interpolation WINDOW must match the
+      // display-refresh cadence: bar (21) in CPU mode, Q (7) under turbo (descDisp + descPos both re-anchor at Q)
+      // — else frac (0→1 over a bar) and the Q-anchored descPos disagree → the residual mis-scales.
+      const _turboLive = _turboOn && (s.descLive || si === 0);
+      const frac = _frameLock ? 0 : _turboLive
+        ? Math.max(0, Math.min(1, (fs - Math.floor(fs / Q) * Q) / Q))   // turbo: Q-block window (descDisp+descPos re-anchor at Q)
+        : Math.max(0, Math.min(1, (fs - (s.descBar | 0) * 21) / 21));   // CPU: the original bar window (descBar anchor, untouched)
       const dphi = lensU1.wrap(lensU1.angle(_lensOp[si]) - (s.descPhi0 || 0) + (_lensOp[si].omega || 0) * frac);
+      // ox/oy = the sub-DISPLAY-tick pose interpolation: the displayed envelope (descDisp) refreshes at a
+      // coarse cadence (bar in CPU / Q in turbo), and this offset carries the position between refreshes so
+      // the soliton glides smoothly. descPos is re-anchored to the leash at the SAME cadence descDisp refreshes
+      // → ox is only the residual since the last refresh (small, never a full-bar jump). THE JITTER (turbo,
+      // cat1100) was descPos updating at BAR cadence while descDisp refreshed at Q — ox grew over a bar then
+      // snapped; fixed by the Q-cadence descPos re-anchor in the drive loop (they now refresh together).
       const L = s.leash.state; let ox = L.gx - (s.descPos?.[0] ?? 0), oy = L.gy - (s.descPos?.[1] ?? 0);
-      if (L.go) { const dx = L.tx - L.gx, dy = L.ty - L.gy, d = Math.hypot(dx, dy);
+      // THE LEASH-LEAN (anticipation toward the target) — a render translation of the WHOLE envelope toward
+      // L.tx. It belongs ONLY to a STATIC descriptor slot (recalla: the field can't move itself, so the render
+      // MUST translate it to show transport). For a LIVE-engine slot the field carries its OWN transport (the
+      // pin drags the letter through a stationary medium — halo/wake stay put), so this lean would DOUBLE-
+      // translate: it micro-moves the whole field (letter + halo + background) at shift start on top of the
+      // real physics — the "whole field moves" artifact (user-caught). Gate it out for live slots; the field's
+      // own motion is the only motion (no-tricks: don't move what the medium isn't moving).
+      const _live = s.descLive || (si === 0 && s.desc);
+      if (L.go && !_live) { const dx = L.tx - L.gx, dy = L.ty - L.gy, d = Math.hypot(dx, dy);
         if (d > 1e-9) { const st = Math.min(1, d) * frac; ox += (dx / d) * st; oy += (dy / d) * st; } }
       return { dphi, ox, oy }; };
     const _descProject = (si) => { const s = _sb.slots[si]; if (!s || !s.desc) return null;
@@ -440,6 +476,19 @@ function makeMediumU1Renderer(core) {
     // look) · 'amp' / '∠φ' force one colormap on BOTH paths. Both are honest renders of the same ψ — amplitude hides
     // global phase (real physics: intensity can't see it), phase shows the motion. No replicated state.
     let _colorMode = 'auto';
+    // FIELD-VIEW cycle (LOCAL display dial — peer-local, not in eH; changes nothing physical): 'full' = ψ (the
+    // whole field, default) · 'residual' = ψ − A (the MEDIUM'S OWN response: the dressing/halo/wake/SPM texture
+    // with the injected symbol subtracted — "the field itself, minus the symbol") · 'bare' = A (the injected
+    // attractor alone, no dressing — the clean skeleton). All exact, honest: A and ψ are real state components.
+    let _fieldView = 'full'; const _FVIEWS = ['full', 'residual', 'bare'];
+    const _attForSlot = (si) => { const s = _sb.slots[si];
+      if (si === 0) return _regAttC || (W.movAtt ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : null);   // W's live attractor
+      return s?.descAtt || null; };   // a living slot's plate attractor
+    const _fieldViewApply = (si, f) => { if (_fieldView === 'full' || !f) return f;
+      const a = _attForSlot(si); if (!a || a.length !== f.length) return f;
+      const out = new Float64Array(f.length);
+      if (_fieldView === 'bare') { for (let j = 0; j < f.length; j++) out[j] = a[j]; return out; }   // bare = A alone
+      for (let j = 0; j < f.length; j++) out[j] = f[j] - a[j]; return out; };   // residual = ψ − A (the medium's own contribution)
     const _ampFor = (isDesc) => _colorMode === 'auto' ? true : _colorMode === 'amp';   // auto = AMP in BOTH modes (user: the register view must default to the physical look; ∠φ stays one toggle away)
     const _drawField = (cell, f) => { if (!f || !_gpu || !_gpuCanvas) { cell.ctx.clearRect(0, 0, RW, RH); return; }
       const saved = _gpu.readEyePsi();                         // preserve the shared eye buffer
@@ -495,7 +544,21 @@ function makeMediumU1Renderer(core) {
     const _lambda = () => { const rc = _E.ringCache; if (!rc?.r?.length) return null;
       if (_lamCache.ver !== _E.kernelVer) _lamCache = { ver: _E.kernelVer, lam: kernelLambdaGrid(rc.r, rc.w, rc.o, GRID) };
       return _lamCache.lam; };
-    const _specLeg = (f, T, dt) => { const lam = _lambda(); if (!lam || !f) return null;
+    // ── SCALE-SELECTIVE λ (the tier-decomposition theorem cashed): the propagator is EXACTLY additive over the
+    //    ring scale-tiers (λ_merged = Σ_d λ_tier − (n−1)·lap9, f64-pinned). So a λ built from a RADIUS BAND of
+    //    the rings propagates ONLY that scale's structure — coarse (large radius = the smooth skeleton) or fine
+    //    (small radius = the speckle detail). Exact by the theorem, not an approximation. The band λ = lap9 +
+    //    only the in-band rings' contribution. Cached per (kernelVer, band). rMid splits at the geometric mean.
+    let _lamScaleCache = { key: '' };
+    const _rMid = () => { const rc = _E.ringCache; if (!rc?.r?.length) return 0; const r = rc.r; return Math.sqrt(Math.max(...r) * Math.min(...r)); };
+    const _lambdaScale = (band) => { const rc = _E.ringCache; if (!rc?.r?.length) return null; if (band === 'all') return _lambda();
+      const key = `${_E.kernelVer}:${band}`; if (_lamScaleCache.key === key) return _lamScaleCache.lam;
+      const mid = _rMid(); const keep = [], kw = [], ko = [];
+      for (let d = 0; d < rc.r.length; d++) { const inBand = band === 'coarse' ? rc.r[d] >= mid : rc.r[d] < mid;
+        if (inBand) { keep.push(rc.r[d]); kw.push(rc.w[d]); ko.push(rc.o[d]); } }
+      const lam = kernelLambdaGrid(keep, kw, ko, GRID);   // lap9 + only the in-band rings (kernelLambdaGrid always includes lap9)
+      _lamScaleCache = { key, lam }; return lam; };
+    const _specLeg = (f, T, dt, band) => { const lam = band && band !== 'all' ? _lambdaScale(band) : _lambda(); if (!lam || !f) return null;
       return kernelPropagateSpectral(f, null, null, null, { T, dt, G: GRID, lam }).field; };
     // the BAR-EXACT declaration of W (register state only — no render frac): the boundary source for a REGIONAL
     // witness and the seam-glue reference (same math as the mirror seed / materialize).
@@ -513,17 +576,97 @@ function makeMediumU1Renderer(core) {
     //    bytes are identical to the allocating path — only the garbage is gone (~6 × 128 KB/step before).
     const _regStep1 = (s, att, bfac) => { const lamS = _lambda(); if (!lamS || !s.descBase || !s.descE0) return;
       const psi = s.descBase;
-      if (att) { const b = 0.15 * (bfac || 1); for (let j = 0; j < psi.length; j++) psi[j] += b * att[j]; }
+      // PIN (linear injection lock): ON in the full medium AND in the linear SHARP TRAP (mode 2 — the pin IS the
+      // linear trap); OFF only in FREE-linear (mode 1) to show the dispersing free field.
+      if (att && _linearMode !== 1) { const b = 0.15 * (bfac || 1); for (let j = 0; j < psi.length; j++) psi[j] += b * att[j]; }
       const ev = kernelPropagateSpectral(psi, null, null, null, { T: 1, dt: DT, G: GRID, lam: lamS, reuse: true }).field;
       const nb = (s._eng && s._eng !== psi && s._eng.length === ev.length) ? s._eng : new Float64Array(ev.length);
-      for (let j = 0; j < N_CELLS; j++) { const re = ev[j * 2], im = ev[j * 2 + 1], I2 = re * re + im * im;
+      if (_linearMode) { const damp = _linearMode === 2 ? (1 - _linLeak()) : 1;   // mode 2: LINEAR damping balances the pin (driven-damped oscillator → sharp fixed point at A); mode 1: none (free dispersal)
+        for (let j = 0; j < ev.length; j++) nb[j] = ev[j] * damp; }
+      else for (let j = 0; j < N_CELLS; j++) { const re = ev[j * 2], im = ev[j * 2 + 1], I2 = re * re + im * im;   // nonlinear SPM (full medium)
         const th = _SOL_GAMMA * I2 / (1 + I2 / _SOL_ISAT) * DT, c = Math.cos(th), sn = Math.sin(th);
         nb[j * 2] = re * c - im * sn; nb[j * 2 + 1] = re * sn + im * c; }
       let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];
-      const sc = Math.sqrt(s.descE0 / (e2 || 1)); if (sc < 1) for (let j = 0; j < nb.length; j++) nb[j] *= sc;
+      // the CAP (nonlinear energy renormalization) runs ONLY in the full medium; the linear modes use their own
+      // linear energy handling (mode 1: none, conserves; mode 2: the linear leak above balances the pin).
+      const sc = Math.sqrt(s.descE0 / (e2 || 1)); if (!_linearMode && e2 > 1e-9) for (let j = 0; j < nb.length; j++) nb[j] *= sc;
       for (let j = 0; j < nb.length; j++) nb[j] = Math.fround(nb[j]);
       s._engE = e2;   // pre-cap energy (pure fn of shared k) — the UNPINNED coevo gate's field reading in ⌀PDE
       s._eng = psi; s.descBase = nb; };
+    // ── ⚡TURBO v3 — BAR-CHUNK advance with a global cursor (the profile's verdict on v2: per-Q readbacks =
+    //    3 stalls/bar/slot, 78% of frame in readEyePsi). One readback per BAR per living slot; between
+    //    advances descBase lawfully LAGS solSteps by <1 bar, and every reader syncs on demand at its own
+    //    stamped step: bar boundaries (before the XY/film reads), field-verbs (advance to k — the CPU
+    //    semantics exactly), snapshots (advance to solSteps), swap-frames (frame-end sync: _kernApplied resets
+    //    per frame, so a lag across a swap frame would lose the pre-swap ring). All sync points are pure fns
+    //    of stamped shared steps → deterministic. Ring reconstruction per slot as before.
+    // ── ⚡TURBO v4 — RESIDENT-TEXTURE advance (no per-bar readback). Each living slot keeps its state in a GPU
+    //    texture (selectEyeSlot); the executor advances it in place. descBase (CPU) stays the CANONICAL state —
+    //    the texture is only a between-sync CACHE of it — but is refreshed by readback ONLY when a consumer
+    //    needs bytes: _tbSyncSlot(i)/_tbSyncAll() at bar hashes, verbs, snapshots. Between syncs descBase is
+    //    STALE and _tbTexStep[i] > the descBase's step; sl._texDirty marks it. THE HONESTY INVARIANT (preserves
+    //    the U1 shift from the old texture-as-state medium): the texture is authoritative only between sync
+    //    points, each a pure fn of shared steps; at every step a determinism reader observes, descBase is
+    //    synced first → the CPU register is never stale where the contract reads it. mu1.pure() still counts GPU
+    //    steps; the register still forks or doesn't.
+    const _tbTexStep = [-1, -1, -1, -1];   // the shared step each slot's TEXTURE holds (−1 = not resident)
+    const _tbLive = (i) => { const sl = _sb.slots[i]; return sl.desc && sl.descBase && sl.descE0 && (i === 0 || sl.descLive); };
+    // ── CROSS-SLOT ATTRACTOR COUPLING (real, physical — the U1 register form of the old shared-substrate
+    //    "β mixes slots"). Slot i's pin target = its own att + Σ_j κ_ij · (slot j's FIELD): the soliton is
+    //    pulled toward a coupled neighbor's shape, so it physically DEFORMS toward it (V observing W → V's
+    //    letter bleeds toward W's). Driven by the SAME edge κ as the Kuramoto phase law (consistent: an edge
+    //    means "these slots interact"), so it rides regH via _K.edge — deterministic, byte-replicated. κ>0
+    //    attracts (blend), κ<0 repels (anti-blend). Returns a fresh composite att, or the bare att if uncoupled.
+    const _coupledAtt = (i, baseAtt, snap) => { if (!_K.edge || !baseAtt) return baseAtt;
+      let any = false; for (let jc = 0; jc < 4; jc++) if (jc !== i && _K.edge[i][jc]) any = true;
+      if (!any) return baseAtt;
+      const out = Float64Array.from(baseAtt);
+      for (let jc = 0; jc < 4; jc++) { const kk = _K.edge[i][jc]; if (!kk || jc === i) continue;
+        const sj = _sb.slots[jc]; if (!sj.desc || (jc > 0 && !sj.descLive)) continue;
+        const fj = snap ? snap[jc] : sj.descBase; if (!fj) continue;   // snap = the same-step frozen field (turbo); descBase (CPU, per-step current) otherwise
+        for (let n2 = 0; n2 < out.length; n2++) out[n2] += kk * fj[n2]; }
+      return out; };
+    // upload descBase → the slot's resident texture (only when the CPU side was mutated externally: a verb, a
+    // fresh recall, or first prime); after this the texture and descBase agree at _tbCur.
+    const _tbPrime = (i) => { const sl = _sb.slots[i]; _gpu.selectEyeSlot(i);
+      _gpu.setEyePsi(sl.descBase); _gpu.commitEyeSlot(i); _gpu.markEyeSlotPrimed(i); _tbTexStep[i] = _tbCur; sl._texDirty = false; };
+    // sync one slot's descBase FROM its texture (readback) — the only place a per-bar readback can happen, and
+    // only when a consumer calls it. Idempotent: no-op if descBase already current at the texture's step.
+    const _tbSyncSlot = (i) => { const sl = _sb.slots[i]; if (!_tbLive(i) || _tbTexStep[i] < 0) return;
+      if (sl._texStepSynced === _tbTexStep[i]) return;
+      _gpu.selectEyeSlot(i); sl.descBase = _gpu.readEyePsi();
+      let eT = 0; for (let j = 0; j < sl.descBase.length; j++) eT += sl.descBase[j] * sl.descBase[j]; sl._engE = eT;
+      sl._texStepSynced = _tbTexStep[i]; };
+    const _tbSyncAll = () => { for (let i = 0; i < 4; i++) _tbSyncSlot(i); };
+    // advance every living slot's RESIDENT texture from _tbCur to upTo — in place, no readback (except the ring
+    // swap's carry, unavoidable). descBase is NOT touched here; consumers sync on demand.
+    const _tbAdvanceAll = (upTo, skipSlot = -1) => { if (!_gpu || _tbCur < 0 || _tbCur >= upTo) return;
+      const cur = _tbCur;
+      // COUPLING SNAPSHOT (determinism): if any edge is set, freeze every coupled slot's field AT cur BEFORE
+      // advancing any slot — else a slot advanced earlier in the loop would be read at upTo by a later slot
+      // (order-dependent, physically inconsistent). All slots share _tbCur here, so one sync-all + copy gives a
+      // consistent same-step snapshot; the coupling reads THIS, not the live (mid-advance) descBase.
+      let _coupSnap = null;
+      if (_K.edge) { let anyEdge = false; for (let a2 = 0; a2 < 4; a2++) for (let b2 = 0; b2 < 4; b2++) if (_K.edge[a2][b2]) anyEdge = true;
+        if (anyEdge) { _tbSyncAll(); _coupSnap = _sb.slots.map((s2) => (s2.descBase ? Float64Array.from(s2.descBase) : null)); } }
+      for (let si4 = 0; si4 < 4; si4++) { if (si4 === skipSlot || !_tbLive(si4)) continue; const sl = _sb.slots[si4];   // skipSlot: W when it's CPU-sharded (stepped by regionStepX outside this loop)
+        // if descBase was mutated externally since the texture last held it, re-prime; else the texture is live
+        if (_tbTexStep[si4] < 0 || sl._texDirty) _tbPrime(si4);
+        else _gpu.selectEyeSlot(si4);
+        let ring = _tbFrameRing; for (const ks of _kernApplied) if (ks.atStep <= cur && ks.r?.length) ring = ks;
+        if (ring && ring.r?.length && _tbFrameRingCur !== ring) { _gpu.setRings(ring.r, ring.w, ring.o); _tbFrameRingCur = ring; }
+        const att4 = _coupledAtt(si4, si4 === 0 ? _regAttC : sl.descAtt, _coupSnap); if (att4) _gpu.setObjField(att4);
+        const b4 = 0.15 * (_lensOp[si4].beta || 1);
+        for (let kk2 = cur; kk2 < upTo; kk2++) {
+          for (const ks of _kernApplied) if (ks.atStep === kk2 && ks.r?.length && _tbFrameRingCur !== ks) { const qv = _gpu.readEyePsi(); _gpu.setRings(ks.r, ks.w, ks.o); _gpu.setEyePsi(qv); _tbFrameRingCur = ks; if (att4) _gpu.setObjField(att4); }
+          if (att4 && _linearMode !== 1) _gpu.applyEyeSuperpose(b4);   // pin ON in full + linear TRAP (mode 2); OFF only in free-linear (mode 1)
+          _gpu.stepEyeN(1, DT);   // the LINEAR spectral step (gate D) always runs
+          if (!_linearMode) { _gpu.applyEyeNlSpm(-_SOL_GAMMA, _SOL_ISAT, DT); (_gpu.applyEyeEnergyCapNS || _gpu.applyEyeEnergyCap).call(_gpu, sl.descE0); }   // nonlinear SPM+cap: full medium only
+          else if (_linearMode === 2 && _gpu.applyEyeScale) _gpu.applyEyeScale(1 - _linLeak());   // linear SHARP TRAP: LINEAR damping balances the pin (driven-damped → sharp fixed point)
+          _tbSteps++; }
+        _gpu.commitEyeSlot(si4); _tbTexStep[si4] = upTo; }
+      _gpu.selectEyeSlot(null);
+      _tbCur = upTo; };
     // ── THE U1 SHARD EXECUTOR (rung 2 rewired to the register engine — the old path lived in the mirror
     //    loop and died with it): with mu1.region set and NO mirror running, W's engine step computes ONLY the
     //    region (regionStepX: bit-identical inside R by the light-cone margins, cost ∝ |R|), the outside stays
@@ -533,8 +676,19 @@ function makeMediumU1Renderer(core) {
     //    the ONE GLOBAL datum (summed over the whole field), the scale touches only R (the outside is never
     //    renormalized — the GPU-shard scissor discipline, inherited).
     let _viewAllOn = false, _viewAllCache = { bar: -1, f: null };   // Σ VIEW: linear superposition of the slots' declarations — a labeled VIEW (slots do not interact); per-bar cached CPU composite
-    let _shardRef = null, _shardLogBar = -1, _kurLogBar = -1, _shardActive = false, _shardEconKv = -9999, _shardEconOk = false, _shardEconInfo = null, _shardWarned = false;
-    const _regStepRegion = (s, att, bfac, reg) => { const rc = _E.ringCache; if (!rc?.r?.length || !s.descBase || !s.descE0) return;
+    let _turboOn = false, _turboArmed = true, _tbCur = -1, _tbSteps = 0, _tbLogBar = -1;   // _turboArmed: fire the GPU executor once at boot; disarmed by any explicit toggle or a join (adopt the world's state)
+    let _tbFrameRing = null, _tbFrameRingCur = null, _regAttC = null;   // turbo frame context (ring-at-frame-start; the shared pin target)   // ⚡turbo: the GPU as EXECUTOR of the register-engine step (replicated dial; _tbRingStep = atStep of the ring currently on the GPU)
+    let _shardRef = null, _shardLogBar = -1, _kurLogBar = -1, _shardActive = false, _shardEconKv = -9999, _shardEconOk = false, _shardEconInfo = null, _shardWarned = false, _shardXspace = false, _shardDemoRing = null;
+    const _shardRing = () => _shardDemoRing || _E.ringCache;   // the demo sandbox overrides the shared kernel with a small ring (peer-local; eH forks by design)
+    // freeze W.descBase's OUTSIDE-region to the declared boundary (_shardRef), for DISPLAY/OWNERSHIP only —
+    // W's TEXTURE keeps the true whole-torus field. HONEST CONSEQUENCE: on the spectral engine the interior is
+    // COMPUTED EXACTLY (it read the true field as its boundary, not the declaration), so declaration-only
+    // sharding is an ownership/display convention with an EXACT interior (seam-glue ≈ 1, no real approximation).
+    // The genuine boundary approximation lives only in the x-space shard (small kernels, frozen texture too).
+    const _shardFreezeOutside = () => { if (!_mirRegion || !_shardRef || !W.descBase) return; const reg = _mirRegion;
+      for (let y = 0; y < GRID; y++) for (let x = 0; x < GRID; x++) { if (x >= reg.x0 && x < reg.x1 && y >= reg.y0 && y < reg.y1) continue;
+        const j = (y * GRID + x) * 2; W.descBase[j] = _shardRef[j]; W.descBase[j + 1] = _shardRef[j + 1]; } };
+    const _regStepRegion = (s, att, bfac, reg) => { const rc = _shardRing(); if (!rc?.r?.length || !s.descBase || !s.descE0) return;
       const psi = s.descBase;
       if (att) { const b = 0.15 * (bfac || 1);
         for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; psi[j] += b * att[j]; psi[j + 1] += b * att[j + 1]; } }
@@ -546,9 +700,10 @@ function makeMediumU1Renderer(core) {
         nb[j] = re * c - im * sn; nb[j + 1] = re * sn + im * c; }
       let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];
       const sc = Math.sqrt(s.descE0 / (e2 || 1));
-      if (sc < 1) for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] *= sc; nb[j + 1] *= sc; }
+      if (e2 > 1e-9) for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] *= sc; nb[j + 1] *= sc; }   // both directions (the true engine cap), inside R only (scissor discipline)
       for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] = Math.fround(nb[j]); nb[j + 1] = Math.fround(nb[j + 1]); }
-      s._eng = psi; s.descBase = nb; };
+      s._eng = psi; s.descBase = nb; s._texStepSynced = -1;   // sharded W is CPU-stepped → mark texture-desync (a later _tbSyncSlot re-reads correctly if unsharded); descDisp refreshed at display cadence by the caller
+    };
     // ── THE REGISTER-RESIDENT sl(2) TIER (the gate-F meta-circular rung): V and V̈ are INVARIANT under the
     //    anchors (translation + global phase), so they are pure functions of descBase + the stencil — REGISTER
     //    content. W.sl2 = {V, vdd, I, kv} is captured at every compile door (wabs/autoc), RE-KEYED lazily when
@@ -562,11 +717,11 @@ function makeMediumU1Renderer(core) {
       const sE = Math.min(48, Math.max(2, Math.sqrt(sm.V / (2 * (sm.P || 1)))));
       const Dq = packetD(rc.r, rc.w, rc.o, sE);
       const spec = virialSpec(env, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT });   // ONE FFT, at the door — the spectrum IS compile content
-      const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT, Dq, spec });
+      const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT, Dq, spec, lam: _lambda() });   // FD-on-λ v_g (≈1.7% bias, telemetry-grade — the analytic sum is ~190 sin-terms/mode on the live ring, 120ms/call; instruments keep the exact path)
       return { V: sm.V, vdd, I: vdd * sm.V, kv: _E.kernelVer, m: sm.m, spec, Dq }; };
     // RE-KEY = a pure stencil re-sum over the cached spectrum (FFT-free): V, m, spec are stencil-independent.
     const _sl2Rekey = (sl2) => { const rc = _E.ringCache; if (!rc?.r?.length || !sl2?.spec) return null;
-      const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT, Dq: sl2.Dq, spec: sl2.spec });
+      const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT, Dq: sl2.Dq, spec: sl2.spec, lam: _lambda() });   // FD-on-λ (the analytic sum was 120ms/re-key on the live ring — profiled)
       return { V: sl2.V, vdd, I: vdd * sl2.V, kv: _E.kernelVer, m: sl2.m, spec: sl2.spec, Dq: sl2.Dq }; };
     // ── THE LIVE GROUP LEDGER (the virial law WIRED TO THE MEDIUM): H and V of W's current field, from the
     //    engine's own operators (kinetic via the λ grid, potential via the closed-form saturable F). W is pinned
@@ -575,11 +730,12 @@ function makeMediumU1Renderer(core) {
     //    Peer-local telemetry (a pure fn of the shared field at a shared bar → identical on peers at equal bar).
     let _vptOn = true, _vptEvery = 4, _vptLogBar = -1, _vptLast = null, _vptPrev = null, _sl2KeyN = 0;   // ON BY DEFAULT at coarse cadence (every 4th bar ≈ 1.5s: one FFT — negligible); H is THE physical summary of the medium, so it rides the hdr too; _vptPrev = the last (solSteps, V, I) for the Casimir tier's V̇/İ
     const _vptRead = () => { const lam = _lambda(); if (!lam) return null;
-      // source: W's live field; in ⌀PDE (W.field null) fall back to the MIRROR — live physics locked to the register
-      // is exactly what H should be read from. Pure ⌀PDE without a mirror has no field: H of the DECLARATION is a
-      // constant of the compiled envelope (nothing integrates) — nothing live to watch; start a mirror.
-      const f = W.field || ((V.born && V.mirror) ? V.field : null); if (!f) return null;
-      const src = W.field ? 'W' : 'V-mirror';
+      // source (updated for the register engine, v7): W's live field in field mode; W.descBase in ⌀PDE (the
+      // register ENGINE steps it — it IS a live integrating field now, so H is genuinely defined, not a frozen
+      // declaration constant as the pre-v7 note claimed); a running MIRROR as a third option. H = the physical
+      // summary of whichever the register is actually evolving.
+      const f = W.field || (W.desc && W.descBase ? W.descBase : null) || ((V.born && V.mirror) ? V.field : null); if (!f) return null;
+      const src = W.field ? 'W' : (W.desc && W.descBase ? 'W-⌀reg' : 'V-mirror');
       const pr = new Float64Array(N_CELLS), pi = new Float64Array(N_CELLS);
       for (let j = 0; j < N_CELLS; j++) { pr[j] = f[j * 2]; pi[j] = f[j * 2 + 1]; }
       fft2d(pr, pi, GRID, false);
@@ -739,7 +895,7 @@ function makeMediumU1Renderer(core) {
       const scores = _plates.map((pl, i) => { let c, d = [0, 0];
         if (xshift) { const r = crossCorrScan(cue, pl.p, GRID); c = r.corrMax; d = [r.dx, r.dy]; } else c = _ampCorr(cue, pl.p);
         if (c > bc) { bc = c; best = i; bestD = d; } return +c.toFixed(3); });
-      const pl = _plates[best]; let lift = _specLeg(pl.p, _VIRT_T, -DT); if (!lift) return;
+      const pl = _plates[best]; let lift = _specLeg(pl.p, _VIRT_T, -DT, mv.scale); if (!lift) return;   // scale-selective lift: the ±T backward leg run with the coarse/fine tier-λ (exact by the tier-decomposition theorem)
       if (xshift && (bestD[0] || bestD[1])) lift = spectralShift(lift, -bestD[0], -bestD[1], GRID);
       // the moment is resurrected ALIVE into V (field mode's recall semantics, register-resident): a LIVING
       // 𝔸-slot — the register engine steps it, held toward its plate's regenerated attractor (the pin),
@@ -747,7 +903,7 @@ function makeMediumU1Renderer(core) {
       // thing at a time; every slot is the same TYPE, modes differ.
       const ti = (mv.si >= 1 && mv.si <= 3) ? mv.si : 1, V1 = _sb.slots[ti];   // slot-TARGETED living birth (default V)
       _lensOp[ti].phase = 0; _lensOp[ti].prec = 0; _lensOp[ti].omega = mv.dop.omega;
-      V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = 0;
+      V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = 0; V1._texDirty = true;   // fresh CPU bytes → turbo re-primes the texture on the next advance
       V1.descPos = pl.pos ? [pl.pos[0] - bestD[0], pl.pos[1] - bestD[1]] : [mv.gx, mv.gy]; V1.descObj = pl.obj || _lensObj; V1.descBar = Math.floor(mv.k / 21);
       V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(mv.k / 21); V1.descHold = null;
       let eL = 0; for (let j = 0; j < V1.descBase.length; j++) eL += V1.descBase[j] * V1.descBase[j]; V1.descE0 = eL || 1;
@@ -757,7 +913,7 @@ function makeMediumU1Renderer(core) {
       V1.field = null; V1.att = null; V1.hold = false; V1.mirror = false; V1.born = true;
       V1.leash.release(); V1.leash.state.gx = V1.descPos[0]; V1.leash.state.gy = V1.descPos[1];
       const dDesc = (pl.bw != null) ? lensU1.wrap(lensU1.angle(mv.dop) - lensU1.angle(pl.dop)) : null;
-      console.log(`[MU1-RECALL${xshift ? 'X' : ''}] (⌀register-sourced) cue⊗bank${xshift ? ' (SHIFT-INVARIANT)' : ''}=[${scores.join(', ')}] → plate ${best + 1} (stored atStep=${pl.k})${xshift ? ((bestD[0] || bestD[1]) ? ` · δ=(${bestD[0]},${bestD[1]}) → lift RELOCATED to the cue's position` : ' · δ=(0,0) — no relocation needed') : ''} → ${SLOTN[ti]} born LIVING (the register engine steps it; held toward its plate attractor; mu1.descGo(x,y,'${SLOTN[ti]}') to walk it)${dDesc != null ? ` · descriptor aging Δ∠=${dDesc.toFixed(3)} rad over Δτ_W=${(mv.bw - pl.bw) | 0} beats` : ''} · view:${SLOTN[ti]}`); };
+      console.log(`[MU1-RECALL${xshift ? 'X' : ''}] (⌀register-sourced) cue⊗bank${xshift ? ' (SHIFT-INVARIANT)' : ''}=[${scores.join(', ')}] → plate ${best + 1} (stored atStep=${pl.k})${(mv.scale && mv.scale !== 'all') ? ` · SCALE=${mv.scale} (${mv.scale === 'coarse' ? 'smooth skeleton — large-radius tiers only' : 'speckle detail — small-radius tiers only'}, exact by the tier theorem; rMid=${_rMid().toFixed(1)})` : ''}${xshift ? ((bestD[0] || bestD[1]) ? ` · δ=(${bestD[0]},${bestD[1]}) → lift RELOCATED to the cue's position` : ' · δ=(0,0) — no relocation needed') : ''} → ${SLOTN[ti]} born LIVING (the register engine steps it; held toward its plate attractor; mu1.descGo(x,y,'${SLOTN[ti]}') to walk it)${dDesc != null ? ` · descriptor aging Δ∠=${dDesc.toFixed(3)} rad over Δτ_W=${(mv.bw - pl.bw) | 0} beats` : ''} · view:${SLOTN[ti]}`); };
 
     // ── S7: JOIN SNAPSHOT (the medium.js idiom, user-preferred: snapshot AT JOIN, not a periodic checkpoint). The
     //    platform asks a live peer for a state snapshot via world.ps.app._snapHook, ships it OFF the render path, and
@@ -782,7 +938,9 @@ function makeMediumU1Renderer(core) {
     const _plateAtt = (dop, pos, obj) => { try { const base = _psiBaseOf(obj || _lensObj); if (!base) return null;
       return _xattOn ? _xattBuild(dop, pos?.[0] ?? 0, pos?.[1] ?? 0, base)
                      : lensC1.apply({ ...dop, mode: 'metric', tx: pos?.[0] ?? 0, ty: pos?.[1] ?? 0 }, base, GRID); } catch (e) { return null; } };
-    const _takeSnap = () => { const eng = _E.saveEngine({ stepClkC0: _stepClk.c0, torbE0: W.e0, transPx: W.leash.state.gx, transPy: W.leash.state.gy });
+    const _takeSnap = () => {
+      if (_turboOn && _gpu) { _tbAdvanceAll(_E.solSteps); _tbSyncAll(); }   // turbo: advance every living texture to solSteps AND read back BEFORE any field is captured (a mid-bar lag on the wire would fork the joiner)
+      const eng = _E.saveEngine({ stepClkC0: _stepClk.c0, torbE0: W.e0, transPx: W.leash.state.gx, transPy: W.leash.state.gy });
       return {
       eng: { ...eng, psiLensed: eng.psiLensed ? _b64f(eng.psiLensed) : null },   // WIRE: f32-base64 (the app owns this boundary, per G3; decoded before restoreEngine)
       stepClk: { rate: _stepClk.rate, ratePrev: _stepClk.ratePrev },
@@ -794,6 +952,8 @@ function makeMediumU1Renderer(core) {
       plates: _plates.map((pl) => ({ p: _b64f(pl.p), dop: { ...pl.dop }, pos: pl.pos ? [...pl.pos] : null, obj: pl.obj || null, w0: pl.w0 ? _b64f(pl.w0) : null, bw: pl.bw, k: pl.k })),   // a NOT shipped (regenerated: _plateAtt)
       descSlots: _sb.slots.map((s) => s.desc ? { pos: s.descPos ? [...s.descPos] : null, obj: s.descObj || null, bar: s.descBar | 0, base: s.descBase ? _b64f(s.descBase) : null, hold: s.descHold ? _b64f(s.descHold) : null, posCap: s.descPosCap ? [...s.descPosCap] : null, capBar: s.descCapBar ?? null, e0: s.descE0 ?? null, live: s.descLive ? 1 : 0, attg: s.descAttG ? { dop: { ...s.descAttG.dop }, obj: s.descAttG.obj || null } : null, phi0: s.descPhi0 || 0 } : null),   // 𝔸-slot state (desc mode + coords + ω-time cursor + the dressed base/birth angle) — a joiner must resume the identical precession AND reconstruction
       tauK: _tauK ? _tauK.save() : null,
+      turboOn: _turboOn ? 1 : 0,   // (the pre-capture sync ran at the top of _takeSnap — descSlots above already hold the synced bytes)
+      linearMode: _linearMode | 0,
       shiftSeen: _siShift.saveCursor(), regSeen: _siReg.saveCursor(),   // the shift + register-verb cursors (+ pending stamped entries ride tauK.save via the 'shift'/'reg' queues — a mid-slide joiner applies them at their startSteps)
       lastTgt: [_lastTgtX, _lastTgtY], driveMode: _driveMode, autoCompN: _autoCompN, tempoDiv: _tempoDiv, xatt: _xattOn,
       // THE IFS KERNEL THE LEADER WAS STEPPING THROUGH AT THE SNAPSHOT STEP — version-matched to the shipped field. The
@@ -833,6 +993,8 @@ function makeMediumU1Renderer(core) {
         sl.descLive = !!d?.live; sl.descAttG = d?.attg ? { dop: { ...d.attg.dop }, obj: d.attg.obj || null } : null;
         sl.descAtt = (sl.descLive && sl.descAttG && sl.descPos) ? _plateAtt(sl.descAttG.dop, sl.descPos, sl.descAttG.obj) : null; }   // a living slot's pin target REGENERATED (pure register fn — identical bytes; the att itself never rides the wire)
       if (_tauK && s.tauK) { _tauK.restore(s.tauK); _siShift.reattach(); _siReg.reattach(); }   // restore replaces the queue RECORDS → re-attach BOTH handles (they closed over the old records); pending mid-slide shifts + register verbs now drain at their stamped startSteps
+      _turboOn = !!s.turboOn; _turboArmed = false; _tbCur = -1;   // adopt the world's executor (replicated dial); never auto-fire the boot-turbo on a joiner
+      _linearMode = Math.max(0, Math.min(2, s.linearMode | 0));   // adopt the world's linear mode
       _siShift.restoreCursor(s.shiftSeen | 0); _siReg.restoreCursor(s.regSeen | 0);
       _lastTgtX = s.lastTgt?.[0] ?? NaN; _lastTgtY = s.lastTgt?.[1] ?? NaN; if (typeof s.driveMode === 'string') _driveMode = s.driveMode;
       _autoCompN = s.autoCompN | 0; _tempoDiv = Math.max(1, s.tempoDiv | 0); _autoClose = false; _xattOn = !!s.xatt;   // adopt the world's mode + replicated dials
@@ -888,6 +1050,11 @@ function makeMediumU1Renderer(core) {
     const _VIEWS = ['raw', 'lens', 'desc'], _VIEWLBL = { raw: 'view:raw', lens: 'view:∠lens', desc: 'view:𝔸desc' };
     const _lvBtn = mkBtn('view:raw', false, () => { _dials.view = _VIEWS[(_VIEWS.indexOf(_dials.view) + 1) % _VIEWS.length];
       _lvBtn.textContent = _VIEWLBL[_dials.view]; _lvBtn._on = _dials.view !== 'raw'; }); bar1.appendChild(_lvBtn);
+    // FIELD-VIEW cycle (LOCAL): full ψ → residual (ψ−A, the medium's own dressing alone) → bare (A, the injected
+    // symbol alone). A display decomposition of the state into its injected + medium-produced parts. Peer-local.
+    const _FVLBL = { full: 'ψ:full', residual: 'ψ−A:medium', bare: 'A:symbol' };
+    const _fvBtn = mkBtn('ψ:full', false, () => { _fieldView = _FVIEWS[(_FVIEWS.indexOf(_fieldView) + 1) % _FVIEWS.length];
+      _fvBtn.textContent = _FVLBL[_fieldView]; _fvBtn._on = _fieldView !== 'full'; }); bar1.appendChild(_fvBtn);
     // color cycle (LOCAL): auto (field→amp, 𝔸→∠φ) → amp → ∠φ — force one colormap on both render paths.
     const _COLORS = ['auto', 'amp', '∠φ'];
     const _colBtn = mkBtn('color:auto', false, () => { _colorMode = _COLORS[(_COLORS.indexOf(_colorMode) + 1) % _COLORS.length];
@@ -917,6 +1084,11 @@ function makeMediumU1Renderer(core) {
     bar1.appendChild(_coevoBtn);
     const _unpinBtn = mkBtn('unpin', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'unpin', amp: _unpinned ? 0 : 1 }));   // U(1)⇄ℂ*: pinned = descriptor-predicted lag (replay-safe) · unpinned = TRUE field energy (v7: works in ⌀PDE — the register engine IS the field)
     bar1.appendChild(_unpinBtn);
+    const _turboBtn = mkBtn('gpu', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'turbo', amp: _turboOn ? 0 : 1 }));   // executor toggle: 'gpu' = turbo (GPU executes the U1 engine step) · 'cpu' = the universal CPU executor (label reflects state)
+    bar1.appendChild(_turboBtn);
+    const _LIN_LABELS = ['nonlin', 'lin:free', 'lin:trap'];   // the linear-mode cycle: full · free-linear (disperses) · sharp linear trap
+    const _linBtn = mkBtn('nonlin', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'linonly', amp: (_linearMode + 1) % 3 }));   // cycle: full nonlinear → free linear (dispersing) → linear SHARP TRAP (symbol held by linear injection lock + linear damping)
+    bar1.appendChild(_linBtn);
 
     // ── THE REGISTER STRIP (bar2) — per-slot observer controls: which slot to target, its pin β (refAmp), its att
     //    phase write (attPhase ±), and the global ω (lensTau) precession dial. Every control is a REPLICATED verb. ──
@@ -955,6 +1127,53 @@ function makeMediumU1Renderer(core) {
     ]);
     if (typeof window !== 'undefined') {
       window.mu1 = {
+        // poseCheck() — THE HONESTY TEST for the shift render. It measures WHERE THE FIELD ACTUALLY IS (the
+        // intensity centroid of descBase, torus-aware) vs descPos (the render anchor) vs the leash. If the
+        // field carries the position, centroid ≈ leash and the render offset ox = leash − descPos should equal
+        // centroid − descPos (i.e. the render draws the field at its TRUE place, no fake displacement). A large
+        // ox with centroid already AT descPos would be a trick (double-count); ox ≈ centroid−descPos is honest
+        // interpolation of a coarsely-refreshed film. Run while dragging shiftX.
+        poseCheck: (slot = 'W') => { const si = SLOTN.indexOf(slot), s = _sb.slots[si];
+          if (!s?.desc || !s.descBase) return '[POSE] slot not a live descriptor'; if (_turboOn && _gpu) _tbSyncSlot(si);
+          const sm = secondMomentTorus(s.descBase, GRID), L = s.leash.state;
+          const dpx = s.descPos?.[0] ?? 0, dpy = s.descPos?.[1] ?? 0;
+          // the field's DISPLAYED position = its centroid + the render offset ox (that's what the eye sees).
+          // descPos is a LEASH coordinate (can be negative / off-grid); the centroid is a GRID coordinate. The
+          // soliton is injected at GRID/2 + descPos-relative, so the field's leash-frame position is
+          // centroid − GRID/2. Compare THAT to the leash (both wrapped consistently onto the torus).
+          const wrap = (a) => { let d = ((a % GRID) + GRID) % GRID; if (d > GRID / 2) d -= GRID; return d; };
+          const fieldLx = wrap(sm.cx - GRID / 2), fieldLy = wrap(sm.cy - GRID / 2);   // field position in leash frame
+          const oxR = L.gx - dpx, oyR = L.gy - dpy;                                    // what _descPose adds
+          const shown = [wrap(fieldLx + oxR), wrap(fieldLy + oyR)];                    // where the eye sees it
+          const err = Math.hypot(wrap(shown[0] - L.gx), wrap(shown[1] - L.gy));        // displayed vs leash target
+          const fieldLag = Math.hypot(wrap(fieldLx - L.gx), wrap(fieldLy - L.gy));     // the field's own lag behind the leash
+          console.log(`[POSE] ${slot} · field(leash-frame)=(${fieldLx.toFixed(1)},${fieldLy.toFixed(1)}) · leash=(${L.gx.toFixed(1)},${L.gy.toFixed(1)}) · descPos=(${dpx.toFixed(1)},${dpy.toFixed(1)}) · m=${sm.m.toFixed(2)}${sm.m < 0.25 ? ' ⚠delocalized' : ''}`);
+          console.log(`[POSE] render ox=(${oxR.toFixed(2)},${oyR.toFixed(2)}) → shown=(${shown[0].toFixed(1)},${shown[1].toFixed(1)}) · field lag behind leash=${fieldLag.toFixed(2)}px · shown-vs-field=${Math.hypot(oxR, oyR).toFixed(2)}px`);
+          console.log(`[POSE] → ${Math.hypot(oxR, oyR) < 0.5 ? '✓ HONEST: ox≈0 — the render draws descBase IN PLACE; the motion you see IS the field moving (the pin transport). No fake displacement.' : (Math.abs(Math.hypot(oxR, oyR) - fieldLag) < 1.5 ? '✓ HONEST: ox interpolates a stale film frame toward where the field HAS moved (ox ≈ the field\'s real displacement since the last refresh)' : '✗ SUSPECT: ox displaces beyond the field\'s real position — showing the soliton where it is HEADING, not where it IS (the pin-lag over-reach)')}`);
+          return { fieldLeashFrame: [fieldLx, fieldLy], leash: [L.gx, L.gy], descPos: [dpx, dpy], ox: [oxR, oyR], shown, fieldLag, m: sm.m }; },
+        // poseSettle(slot, bars) — is the field lag a STABLE fixed point (honest pin equilibrium) or a growing
+        // DRIFT (would compound across shifts)? Samples fieldLag at bar cadence while the leash is parked. A
+        // flat series = the injection lock's honest static offset (a driven oscillator settles behind its
+        // forcing — real physics, shown faithfully). A rising series = accumulating drift (a real problem).
+        poseSettle: (slot = 'W', nBars = 12) => { const si = SLOTN.indexOf(slot), s = _sb.slots[si];
+          if (!s?.desc) return '[SETTLE] not a live slot'; const L = s.leash.state;
+          if (L.go && (Math.abs(L.tx - L.gx) > 0.1 || Math.abs(L.ty - L.gy) > 0.1)) console.log('[SETTLE] ⚠ leash still moving — let the shift STOP first for a clean settle read');
+          let n = 0; const wrap = (a) => { let d = ((a % GRID) + GRID) % GRID; if (d > GRID / 2) d -= GRID; return d; };
+          const series = []; const tick = () => { if (n >= nBars) {
+              // judge the TREND of the STEADY portion (back half), not endpoint−start: the first samples are the
+              // settling transient, so comparing them to the last falsely reads a rise (the bug this fixes). A
+              // least-squares slope over the back half near zero = stable fixed point (breathing jitter aside).
+              const h = series.slice(Math.floor(series.length / 2)); const nn = h.length;
+              let st = 0, sy = 0, stt = 0, sty = 0; for (let i = 0; i < nn; i++) { st += i; sy += h[i]; stt += i * i; sty += i * h[i]; }
+              const slope = (nn * sty - st * sy) / (nn * stt - st * st || 1);   // px per bar over the steady window
+              const mean = sy / nn, amp = Math.max(...h) - Math.min(...h);
+              console.log(`[SETTLE] ${slot} · fieldLag over ${nBars} bars: [${series.map((v) => v.toFixed(2)).join(', ')}]`);
+              console.log(`[SETTLE] steady window: mean=${mean.toFixed(2)}px · slope=${slope.toFixed(3)}px/bar · jitter=±${(amp / 2).toFixed(2)}px → ${Math.abs(slope) < 0.05 ? '✓ STABLE fixed point (the pin\'s honest static offset — a driven lock settles behind its target; the ±jitter is the soliton\'s own breathing, σ-wander normal-not-broken; ox=0 shows it faithfully — NO trick, NO drift)' : slope > 0.05 ? '✗ GROWING drift (compounds across shifts; raise β / leash gain to tighten the lock — a physics fix, the render stays honest)' : '↓ still RELAXING toward the target'}`); return; }
+            if (_turboOn && _gpu) _tbSyncSlot(si);
+            const sm = secondMomentTorus(s.descBase, GRID);
+            series.push(Math.hypot(wrap(wrap(sm.cx - GRID / 2) - L.gx), wrap(wrap(sm.cy - GRID / 2) - L.gy))); n++;
+            setTimeout(tick, 21 * DT * 1000 / 3); };   // ~1 bar of wall time (rough; the series shape is what matters)
+          tick(); return `[SETTLE] sampling fieldLag for ${nBars} bars — keep the leash parked…`; },
         lensOps: () => { const o = _lensOp.map((l, i) => ({ slot: SLOTN[i], ...l, angle: +lensU1.angle(l).toFixed(4) }));
           console.log(`[LENSOPS] ${o.map((l) => `${l.slot}:{∠${l.angle} β=${l.beta} ω=${l.omega} g=${(l.gain ?? 1).toFixed(2)}}`).join(' · ')} step=${_E.solSteps}`); return o; },
         regPhase: () => ({ step: _E.solSteps, regH: _regH(), lock: +_E.lockNow.toFixed(3), born: _sb.slots.map((s) => s.born ? s.name : null).filter(Boolean),
@@ -968,7 +1187,11 @@ function makeMediumU1Renderer(core) {
         // S6 dual-layer holography verbs (replicated via mediumVirt → applied at the shared drain step):
         rec: (phi = 0) => injectEvent?.({ type: 'mediumVirt', mode: phi ? 'recvia' : 'record', amp: +phi }),
         store: () => injectEvent?.({ type: 'mediumVirt', mode: 'store' }),
-        recall: () => injectEvent?.({ type: 'mediumVirt', mode: 'recall' }),
+        // recall(scale?) — zero-lag recall, optionally SCALE-SELECTIVE: 'coarse' lifts only the large-radius
+        // (smooth skeleton) tiers, 'fine' only the small-radius (speckle detail), 'all' (default) the whole
+        // moment. Exact by the tier-decomposition theorem (λ_merged = Σ λ_tier − (n−1)·lap9), not an
+        // approximation — the ±T lift leg runs with the banded λ. Replicated (V's field is in eH).
+        recall: (scale) => injectEvent?.({ type: 'mediumVirt', mode: 'recall', scale: (scale === 'coarse' || scale === 'fine') ? scale : 'all' }),
         recalla: () => injectEvent?.({ type: 'mediumVirt', mode: 'recalla' }),   // 𝔸-recall (descriptor-only; compare its [RECALL-𝔸] against recall's [RECALL-∠])
         mirror: () => injectEvent?.({ type: 'mediumVirt', mode: 'mirror' }),   // toggle the live PDE mirror (V injection-locked to the register's attractor; works in field AND ⌀PDE modes)
         // lagTrace(on) — the JOIN-LAG BISECTOR (see _lagTick): run on BOTH peers, baseline 10s, join, read the flag:
@@ -982,11 +1205,22 @@ function makeMediumU1Renderer(core) {
         // exactAtt(on) — the exact spectral attractor (replicated physics toggle; see _xattOn). recallx() — the
         // shift-aware recall verb (finds + relocates a moved moment; works field-mode and mirror-sourced in ⌀PDE).
         exactAtt: (on = true) => injectEvent?.({ type: 'mediumVirt', mode: 'xatt', amp: on ? 1 : 0 }),
-        recallx: () => injectEvent?.({ type: 'mediumVirt', mode: 'recallx' }),
+        recallx: (scale) => injectEvent?.({ type: 'mediumVirt', mode: 'recallx', scale: (scale === 'coarse' || scale === 'fine') ? scale : 'all' }),
         // region(spec) — THE TWO-BROWSER SHARD (descent rung 2, live): this tab's mirror integrates physics ONLY
         // in its region; outside = the register's declaration (locally computed → the reflector is UNTOUCHED — no
         // peer exchange, ordinary replicated inputs only). PEER-LOCAL view dial: tab 1 mu1.region('left'), tab 2
         // mu1.region('right') → one world, GPU per tab ≈ halved, seams declaration-anchored (watch seam-glue in
+        // shardDemo(on) — a peer-local SANDBOX to see the GENUINE local-to-global shard live. The production
+        // fractal kernel is too big-ring for x-space regional stepping (declaration-only there = ownership,
+        // exact interior, no real gluing). This overrides THIS PEER's kernel with a SMALL ring (reach 3) so
+        // regionStepX actually shards COMPUTE (cost ∝ |R|), the outside is a FROZEN declared boundary the
+        // interior reads, and the seam genuinely DIVERGES — the real Čech gluing, measurable (seam-glue < 1).
+        // ⚠ eH will NOT match a non-demo peer (this is a local physics sandbox, by design). Turn off to rejoin
+        // the shared kernel. Then: mu1.shardDemo(true); mu1.region('left') — watch [SHARD] seam-glue drop.
+        shardDemo: (on = true) => { if (!on) { _shardDemoRing = null; return '[SHARD-DEMO] OFF — rejoining the shared fractal kernel (eH matches peers again next kernel bump)'; }
+          const ringO = [3, 0, 2, 2, 0, 3, -2, 2, -3, 0, -2, -2, 0, -3, 2, -2];   // reach 3, 8 terms — passes the x-space economy gate
+          _shardDemoRing = { r: [3], w: [0.4], o: [ringO] };
+          return '[SHARD-DEMO] ON — this peer\'s kernel forced to a SMALL ring (reach 3) so mu1.region() runs the GENUINE x-space shard (cost ∝ |R|, frozen boundary, diverging seam = real Čech gluing). ⚠ eH will NOT match non-demo peers (local physics sandbox). Now: mu1.region(\'left\'). shardDemo(false) to rejoin.'; },
         // the [MIRROR] log). Specs: 'left'|'right'|'top'|'bottom'|'all' or (x0, y0, x1, y1). Needs ⌀PDE + mirror.
         region: (spec = 'all', y0, x1, y1) => { const G2 = GRID / 2;
           if (spec === 'all' || spec == null) { _mirRegion = null; _mirRegionName = ''; _shardRef = null; return '[REGION] full field (no shard — the whole-torus register engine resumes)'; }
@@ -998,12 +1232,19 @@ function makeMediumU1Renderer(core) {
           // the declared-boundary snapshot (the seam-glue reference, peer-local witness data)
           _shardRef = (W.desc && W.descBase) ? Float64Array.from(W.descBase) : null;
           const viaMirror = V.born && V.mirror;
-          return `[REGION] shard=${_mirRegionName} · ${viaMirror ? 'MIRROR path (the GPU witness integrates only R; outside = the 𝔸 declaration)' : W.desc ? 'REGISTER-ENGINE path (regionStepX: bit-exact inside R, cost ∝ |R|; outside = the declared boundary, frozen) — eH becomes SHARD-SCOPED on this peer (regH stays the shared contract); watch [SHARD] seam-glue' : 'waiting: needs ⌀PDE'} · peer-local (each tab picks its own)`; },
+          return `[REGION] shard=${_mirRegionName} · ${viaMirror ? 'MIRROR path (the GPU witness integrates only R; outside = the 𝔸 declaration)' : W.desc ? 'LIVE shard: this peer OWNS only R (outside = frozen declared boundary; two-browser split tab1 left + tab2 right = one world, reflector untouched). Interior deep-exact, SEAM approximate (~3·reach/step inward, held near-exact by the pin + seam-glue meter — NOT whole-region exactness). On this LIVE fractal kernel the shard is DECLARATION-ONLY: whole spectral step + outside frozen → regional OWNERSHIP but GLOBAL FLOPs (spectral engines can\'t shard compute; only small-reach kernels get x-space cost∝|R|). eH SHARD-SCOPED (regH = shared contract)' : 'waiting: needs ⌀PDE'} · peer-local`; },
         // coverTest() — DESCENT RUNG 1.5, live: run the cover law on the REAL current field. (1) cocycle: a 2×2
         // cover + glue vs the whole-torus step — must be BIT-FOR-BIT; (2) the spatial fork-finder: clean overlaps
         // ≡ 0, then a deliberately tainted halo cell must light up localized. Peer-local meter (~100ms CPU), no
         // state touched. A pass here means the live medium is SHARDABLE as-is: assigning these patches to peers
         // + shipping halos is wire engineering, not physics.
+        // linear(mode) — 0/false = full nonlinear · 1/'free' = free linear (disperses) · 2/'trap' = linear
+        // SHARP TRAP (symbol held sharp by the LINEAR injection lock + linear damping, zero nonlinearity).
+        linear: (mode = 2) => { const m2 = mode === 'trap' ? 2 : mode === 'free' ? 1 : mode === true ? 1 : mode === false ? 0 : Math.max(0, Math.min(2, mode | 0));
+          injectEvent?.({ type: 'mediumVirt', mode: 'linonly', amp: m2 });
+          return `[LINEAR] mode=${m2} — ${m2 === 0 ? 'full nonlinear medium' : m2 === 1 ? 'FREE linear (disperses — nonlinearity-makes-the-soliton proof)' : 'LINEAR SHARP TRAP: the symbol held by a linear injection lock + linear damping, ZERO nonlinearity (linear holography). Replicated (eH-affecting).'}`; },
+        turbo: (on = true) => { injectEvent?.({ type: 'mediumVirt', mode: 'turbo', amp: on ? 1 : 0 });
+          return `[TURBO] → ${on ? 'ON' : 'OFF'} injected (REPLICATED executor dial — every peer switches at the shared step; same map, same f32 grain, GPU-batched per Q block; cross-vendor GPUs may round differently — the CPU executor stays the universal-determinism path)`; },
         viewAll: (on = true) => { _viewAllOn = !!on; _viewAllCache = { bar: -1, f: null };
           return `[ΣVIEW] ${on ? 'ON — the canvas shows the LINEAR SUPERPOSITION of every born slot declaration (a labeled VIEW: slots do not interact through it; per-bar film cadence). All living worldlines at once — W + recalled memories.' : 'OFF — single-slot view restored'}`; },
         coverTest: () => { const rc = _E.ringCache; if (!rc?.r?.length) return '[COVER] no kernel';
@@ -1093,7 +1334,7 @@ function makeMediumU1Renderer(core) {
           return '[BANKSCAN] done'; },
         // autoClose(on) — the boot-default arm: ON (default) = a fresh leader closes the register after dressing;
         // OFF (call it early, e.g. from the console right after load) = classic physics stays the default.
-        autoClose: (on = true) => { _autoClose = !!on; return `[MU1-BOOT] auto-close ${on ? 'ARMED' : 'OFF (classic physics default)'}`; },
+        autoClose: (on = true) => { _autoClose = !!on; if (!on) _turboArmed = false; return `[MU1-BOOT] auto-close ${on ? 'ARMED' : 'OFF (classic physics default; GPU-executor auto-arm also disabled)'}`; },
         autoTempo: (on = true) => { _autoTempoOn = !!on; return `[TEMPO-AUTO] governor ${on ? 'ON (raise ≤4s after a sustained deficit; probe back after ~25s headroom)' : 'OFF (manual mu1.tempo only)'}`; },
         // autoCompile(N) — CONTINUOUS COMPILATION (⌀PDE + mirror): every N shared bars the mirror re-compiles W's
         // envelope → the canvas always shows the REGISTER projection while the declaration tracks living physics
@@ -1111,6 +1352,16 @@ function makeMediumU1Renderer(core) {
         // AND order are pure functions of shared time on every peer. The mirror under subtickView = the identical
         // physics film on every same-GPU peer, byte-for-byte, nothing exchanged, nothing verified.
         subtickView: (on = true) => window.mu1.frameLock(on, Q),
+        // fieldView(mode) — LOCAL display decomposition of the state: 'full' = ψ (default) · 'residual' = ψ−A
+        // (the MEDIUM'S OWN response: dressing/halo/wake with the injected symbol subtracted) · 'bare' = A (the
+        // injected symbol alone, no dressing). Exact & honest — A and ψ are real components; peer-local view.
+        fieldView: (mode = 'residual') => { _fieldView = _FVIEWS.includes(mode) ? mode : 'residual';
+          const a = _attForSlot(_viewSlot), f = _sb.slots[_viewSlot]?.descDisp || _sb.slots[_viewSlot]?.descBase || _sb.slots[_viewSlot]?.field;
+          let diag = '';
+          if (a && f && a.length === f.length) { let dA = 0, dF = 0, dR = 0; for (let j = 0; j < f.length; j++) { dA += a[j] * a[j]; dF += f[j] * f[j]; dR += (f[j] - a[j]) ** 2; }
+            diag = ` · |A|²=${dA.toFixed(1)} |ψ|²=${dF.toFixed(1)} |ψ−A|²=${dR.toFixed(1)} (residual ${dR > 0.01 * dF ? 'HAS content ✓' : '≈0 — ψ≈A, nothing to see (raise β / let it dress)'})`; }
+          else diag = ` · ⚠ A=${a ? 'ok' : 'NULL'} ψ=${f ? 'ok' : 'NULL'}${a && f ? ` len ${a.length}≠${f.length}` : ''} — subtraction can't run`;
+          return `[FIELD-VIEW] ${_fieldView} — ${_fieldView === 'full' ? 'the whole field ψ' : _fieldView === 'residual' ? 'ψ − A: ONLY the medium\'s own dressing (halo/wake/SPM; symbol subtracted)' : 'A: the injected symbol alone'} · local display (not in eH)${diag}`; },
         descGo: (x = 0, y = 0, slot = 'V') => injectEvent?.({ type: 'mediumVirt', mode: 'descgo', src: slot, gx: +x, gy: +y }),   // 𝔸-transport: chase (x,y) with the descriptor leash — the recalled hologram MOVES, 0 grid steps
         descK: (kx = 0.3, ky = 0, slot = 'V') => injectEvent?.({ type: 'mediumVirt', mode: 'lensset', src: slot, kx: +kx, ky: +ky }),   // the linOp momentum tilt (rad/cell): with ω≠0 the 𝔸-slot's phase fronts FLOW — the travelling wave, pure register
         // ⌀PDE — the meta-circular closure: abstract(true) compiles EVERY born slot (W included) to envelope+descriptor
@@ -1411,6 +1662,39 @@ function makeMediumU1Renderer(core) {
         vpt: () => { const r = _vptRead(); if (!r) return '[VPT] no field to read — in pure ⌀PDE nothing integrates (H of the declaration is a constant of the compiled envelope); start a mirror for live H';
           console.log(`[VPT] src=${r.src} · H=${r.H.toExponential(3)} (kin ${r.hk.toExponential(3)} + nl ${r.hn.toExponential(3)}) · V=${r.V.toExponential(3)} · E=${r.E.toFixed(1)} → ${r.H < 0 ? '⚠ H<0: would COLLAPSE if freed (the pin+cap are holding it — the VPT call, live)' : 'H>0: would spread if freed'}${r.I != null ? ` · CASIMIR I=${r.I.toExponential(3)}${r.Idot != null ? ` İ=${r.Idot.toExponential(2)}` : ''}${r.tFoc != null ? ` · freed: focus in ${Math.round(r.tFoc / DT)} steps (waist V=${r.vMinP.toExponential(2)})` : r.tCol != null ? ` · freed: V→0 in ${Math.round(r.tCol / DT)} steps` : ''} (V̇ from the last vpt reading — two reads ≥1 bar apart make the forecast)` : ' (first reading — call again next bar for the Casimir tier: V̇ needs two shared-bar samples)'}`); return r; },
         vptWatch: (on = true, every = 4) => { _vptOn = !!on; _vptEvery = Math.max(1, every | 0); return `[VPT] watch ${on ? `ON — H + regime every ${_vptEvery} bars (src: W's field, or the MIRROR in ⌀PDE${(!W.field && !(V.born && V.mirror)) ? ' — NO FIELD YET: pure ⌀PDE has nothing integrating; press mirror for live H' : ''})` : 'OFF'}`; },
+        // charges() — THE REGISTER'S CHARGE SHEET: every certified symmetry-sector charge each slot carries,
+        // one line per slot, organized by GATE (doc §4). Not a new computation — it ASSEMBLES what the register
+        // already holds (∠/ω from the U(1) descriptor, pose from translation, V/V̈/I from the sl(2) tier, H the
+        // regime) into the one honest summary the register-experiment was built around. Conserved charges (I,
+        // H under free flight) flagged. Peer-local read (pure fn of register state). The group-theory ledger,
+        // live: this is what a worldline IS — a point carrying the charges of the symmetries the gates certified.
+        charges: (slot) => { const rows = []; const targets = slot ? [SLOTN.indexOf(String(slot))] : [0, 1, 2, 3];
+          for (const si of targets) { if (si < 0) continue; const s = _sb.slots[si]; if (!(s.born || si === 0)) continue;
+            const op = _lensOp[si], live = s.desc && (si === 0 || s.descLive);
+            const sl2 = si === 0 ? W.sl2 : null;   // the sl(2) tier is W-resident (the driven worldline); other slots carry the U(1)+translation charges
+            const row = { slot: SLOTN[si], mode: si === 0 ? (W.desc ? '⌀register' : 'field') : s.desc ? (s.descLive ? 'living' : s.mirror ? 'mirror' : 'parked') : '—',
+              // U(1) sector (gate: phase register): ∠ the phase charge, ω its precession rate, β the pin stiffness
+              U1: { angle: +lensU1.wrap(lensU1.angle(op)).toFixed(3), omega: +(op.omega || 0).toFixed(3), beta: +(op.beta ?? 1).toFixed(2) },
+              // translation sector (gate B: exact-symbol transport): the leash pose = the position charge
+              translation: [+s.leash.state.gx.toFixed(2), +s.leash.state.gy.toFixed(2)],
+              // worldline proper time (§7.5): the slot's own τ-beat count
+              tau: _tauK ? (_tauK.beatsOf(SLOTN[si]) ?? 0) : 0 };
+            // sl(2,ℝ) sector (gates E/F) — W only (the living driven worldline carries the dynamical charges)
+            if (sl2) row.sl2 = { V: +sl2.V.toExponential(3), Vdd: +sl2.vdd.toExponential(3), I: +sl2.I.toExponential(3), m: +sl2.m.toFixed(2) };
+            rows.push(row); }
+          const _hr = _vptRead(); const H = _hr ? _hr.H : (_vptLast ? _vptLast.H : null);   // compute H fresh (the register engine's live field), not just the 4-bar-cached watch value
+          console.log('[CHARGES] the register\'s certified symmetry charges (doc §4) — what each worldline carries:');
+          for (const r of rows) console.log(`  ${r.slot} (${r.mode}): U(1) ∠${r.U1.angle} ω${r.U1.omega} β${r.U1.beta} · pos(${r.translation[0]},${r.translation[1]}) · τ=${r.tau}${r.sl2 ? ` · sl(2) V=${r.sl2.V} V̈=${r.sl2.Vdd} I=${r.sl2.I}(Casimir, conserved on free flight) m=${r.sl2.m}` : ''}`);
+          if (H != null) { const vdd = rows[0]?.sl2?.Vdd;
+            // H and V̈ are DIFFERENT charges: H = total energy (kinetic + saturable potential); V̈ = the second
+            // moment's curvature. The simple "H<0⇒collapse" rule holds ONLY in the pure quadratic sector (where
+            // V̈=4DH); a saturable/pin-held state leaves that sector, so H and V̈ can DISAGREE — H>0 (energetically
+            // would spread) while V̈<0 (width would initially contract) is a real, non-contradictory state. Report
+            // each honestly; flag when they part ways rather than let the sheet imply one fate.
+            const agree = vdd == null || (H < 0) === (vdd < 0);
+            console.log(`  H=${H.toExponential(3)} (total energy = kinetic + saturable potential; conserved on free flight)${vdd != null ? ` · V̈=${(+vdd).toExponential(2)} (2nd-moment curvature)${agree ? ` — AGREE: ${H < 0 ? 'both say collapse-if-freed' : 'both say spread-if-freed'}` : ' — ⚠ DISAGREE: H and V̈ part ways (state is OUTSIDE the quadratic sector where V̈=4DH — energy vs width give different fates; both honest, neither is "the" answer)'}` : ''}); regH=${_regH()} (the whole determinism contract)`); }
+          console.log('  sectors: U(1) phase (write-fidelity≈1) · translation (gate B ≤0.2%) · sl(2,ℝ)/Casimir (gate F, waist to 0.1%) — each a MEASURED gate, not a decree');
+          return { charges: rows, H, regH: _regH() }; },
         // sl2() — the REGISTER-RESIDENT sl(2) charges (⌀PDE): what the register asserts about V/V̈/I with zero
         // field reads, vs the witness if a mirror is running. The meta-circular claim made inspectable.
         sl2: () => { if (!W.desc) return '[SL2] field mode — the witness IS the state; the register tier lives in ⌀PDE';
@@ -1548,8 +1832,12 @@ function makeMediumU1Renderer(core) {
         edge: (a = 'W', b = 'V', kap = 0.2) => { const ia = SLOTN.indexOf(String(a)), ib = SLOTN.indexOf(String(b));
           if (ia < 0 || ib < 0 || ia === ib) return '[EDGE] usage: mu1.edge("W","V",±κ) — slots W/V/P1/P2, κ∈[−0.5,0.5]; κ<0 = anti-align (frustration)';
           injectEvent?.({ type: 'mediumVirt', mode: 'edge', gx: ia, gy: ib, leak: +kap });
-          return `[EDGE] ${SLOTN[ia]}⇄${SLOTN[ib]} κ=${(+kap).toFixed(2)} injected (replicated; the XY law runs per shared bar on the REGISTER phases — watch [KUR]). K₃ frustration: edge(W,V,−.2); edge(W,P1,−.2); edge(V,P1,−.2)`; },
+          return `[EDGE] ${SLOTN[ia]}⇄${SLOTN[ib]} κ=${(+kap).toFixed(2)} injected — TWO real couplings on this edge: (1) the XY/Kuramoto law on the register PHASES ([KUR]) AND (2) cross-slot ATTRACTOR MIXING (each slot's pin blends κ·the other's FIELD → the solitons visually DEFORM toward each other, κ>0 attract/blend, κ<0 repel — the U1 form of the old medium's β-mixing). K₃ frustration: edge(W,V,−.2); edge(W,P1,−.2); edge(V,P1,−.2)`; },
         edges: () => { if (!_K.edge) return '[EDGE] none set (mu1.edge(a,b,κ))'; _K.edge.forEach((r, i) => console.log(`  ${SLOTN[i]}: [${r.map((v) => v.toFixed(2)).join(', ')}]`)); return _K.edge; },
+        // mix(a,b,amount) — the discoverable alias for the ATTRACTOR-COUPLING half of an edge: slot a's & b's
+        // solitons pull toward each other's shape (amount>0 blend, <0 repel). Same replicated edge verb, named
+        // for the visual result (the old medium's slot-mixing, U1-honest: the fields genuinely interact, in regH).
+        mix: (a = 'W', b = 'V', amount = 0.3) => window.mu1.edge(a, b, amount),
         coevo: (on = true) => { injectEvent?.({ type: 'mediumVirt', mode: 'coevo', amp: on ? 1 : 0 }); return `[COEVO] Einstein loop → ${on ? 'ON' : 'OFF'} (replicated: lands at the shared step on every peer — it gates gx/gy, which is in regH)`; },
         // unpin(on) — THE GOVERNANCE SWITCH (lensU1 ⇄ lensC1). PINNED (default): the coevo gate reads the DESCRIPTOR-
         // predicted lag → pure leash arithmetic → in regH → byte-deterministic. UNPINNED: the gate reads the TRUE FIELD
@@ -1596,10 +1884,13 @@ function makeMediumU1Renderer(core) {
       // a TIGHT lock (→1) means each peer's field ≈ A ≈ every other peer's field — the images converge WITHOUT any field
       // exchange (a local injection-lock to a shared reference, like independent PLLs to a broadcast clock). fieldH = the
       // raw ψ digest (informational; it never goes byte-identical on GPUs — the lock is the honest convergence measure).
-      hdr.textContent = `medium-u1 (SLOT-CENTRIC) · ${n.cachedRadii?.length ? 'RUNNING' : 'waiting…'} · drive:${_driveMode}${W.desc ? ' · ⌀PDE ABSTRACT (register closed — 0 grid steps/frame)' : ''}${_tempoDiv > 1 ? ` · tempo÷${_tempoDiv}` : ''} · β ${_pinBeta.toFixed(2)} · lock→A ${W.desc ? '≡1 (W IS the descriptor)' : _E.lockNow.toFixed(2)} · ${_coevoOn ? `⟲coevo g ${_coevoG.toFixed(2)}${_unpinned ? ' [ℂ* unpinned: TRUE field energy]' : ' [U(1) pinned: predicted lag]'}` : '⟲coevo OFF (open-loop)'} · step ${_E.solSteps} · regH ${_regH()} (MUST match) · ${W.desc ? 'solH — (no field)' : _regTraceOn ? `solH@${_solHStep} ${_solH} (field @ shared boundary — compare peers here)` : 'solH — (unverified: W as its own mirror)'}${_vptLast ? ` · H ${_vptLast.H.toExponential(2)}${_vptLast.H < 0 ? ' ⚠pin-held' : ''}` : ''}`;
+      hdr.textContent = `medium-u1 (SLOT-CENTRIC) · ${n.cachedRadii?.length ? 'RUNNING' : 'waiting…'} · drive:${_driveMode}${W.desc ? ' · ⌀PDE ABSTRACT (register closed — 0 grid steps/frame)' : ''}${_tempoDiv > 1 ? ` · tempo÷${_tempoDiv}` : ''}${_turboOn ? ' · ⚡turbo(GPU executor)' : ''}${_linearMode === 1 ? ' · ⊘nonlinear (FREE linear — dispersing)' : _linearMode === 2 ? ' · ▣linear TRAP (symbol held by linear lock)' : ''} · β ${_pinBeta.toFixed(2)} · lock→A ${W.desc ? '≡1 (W IS the descriptor)' : _E.lockNow.toFixed(2)} · ${_coevoOn ? `⟲coevo g ${_coevoG.toFixed(2)}${_unpinned ? ' [ℂ* unpinned: TRUE field energy]' : ' [U(1) pinned: predicted lag]'}` : '⟲coevo OFF (open-loop)'} · step ${_E.solSteps} · regH ${_regH()} (MUST match) · ${W.desc ? 'solH — (no field)' : _regTraceOn ? `solH@${_solHStep} ${_solH} (field @ shared boundary — compare peers here)` : 'solH — (unverified: W as its own mirror)'}${_vptLast ? ` · H ${_vptLast.H.toExponential(2)}${_vptLast.H < 0 ? ' ⚠pin-held' : ''}` : ''}`;
       if (_absBtn._on !== !!W.desc) { _absBtn._on = !!W.desc; _absBtn.textContent = W.desc ? '⌀PDE:ON' : '⌀PDE'; _absBtn._repaint(); }   // reflect the replicated state (position mirrors state)
       const _modeNow = W.desc ? 'mode:⌀register' : 'mode:physics';
       _coevoBtn._on = _coevoOn; _coevoBtn.style.opacity = _coevoOn ? 1 : 0.6; _unpinBtn._on = _unpinned; _unpinBtn.style.opacity = _unpinned ? 1 : 0.6;
+      { const _ll = _LIN_LABELS[_linearMode]; if (_linBtn.textContent !== _ll) { _linBtn.textContent = _ll; _linBtn._repaint?.(); } _linBtn._on = _linearMode > 0; _linBtn.style.opacity = _linearMode ? 1 : 0.6; }
+      _turboBtn._on = _turboOn; _turboBtn.style.opacity = _turboOn ? 1 : 0.6;
+      { const _exl = _turboOn ? 'gpu' : 'cpu'; if (_turboBtn.textContent !== _exl) { _turboBtn.textContent = _exl; _turboBtn._repaint?.(); } }   // executor label reflects the replicated state
       if (_modeBtn.textContent !== _modeNow) { _modeBtn.textContent = _modeNow; _modeBtn._on = !!W.desc; _modeBtn._repaint(); }
       if (_xattBtn._on !== _xattOn) { _xattBtn._on = _xattOn; _xattBtn.textContent = _xattOn ? 'x𝔸tt:ON' : 'x𝔸tt'; _xattBtn._repaint(); }
       if (!n.cachedRadii?.length) return;
@@ -1640,9 +1931,11 @@ function makeMediumU1Renderer(core) {
       // The verb log is normally the replicated array; when a peer has only the latest fields (no log yet), synthesize a
       // one-entry log so the FIRST verb still stamps. _siReg's seq cursor guards against double-staging on re-read.
       const _vlog = (Array.isArray(n.medVirtLog) && n.medVirtLog.length) ? n.medVirtLog
-        : ((n.medVirtSeq | 0) > _siReg.seen ? [{ seq: n.medVirtSeq | 0, time: n.medVirtTime ?? 0, mode: n.medVirtMode || 'record', amp: (typeof n.medVirtAmp === 'number') ? n.medVirtAmp : 0, src: n.medVirtSrc || 'W', gx: n.medVirtGx ?? 0, gy: n.medVirtGy ?? 0, leak: n.medVirtLeak ?? 0 }] : []);
+        : ((n.medVirtSeq | 0) > _siReg.seen ? [{ seq: n.medVirtSeq | 0, time: n.medVirtTime ?? 0, mode: n.medVirtMode || 'record', amp: (typeof n.medVirtAmp === 'number') ? n.medVirtAmp : 0, src: n.medVirtSrc || 'W', gx: n.medVirtGx ?? 0, gy: n.medVirtGy ?? 0, leak: n.medVirtLeak ?? 0, scale: n.medVirtScale || 'all' }] : []);
       _siReg.pull(_vlog, (e) => ({ mode: e.mode, src: e.src || 'W', amp: (typeof e.amp === 'number') ? e.amp : 0, gx: (typeof e.gx === 'number') ? e.gx : 0, gy: (typeof e.gy === 'number') ? e.gy : 0,
-        kx: (typeof e.kx === 'number') ? e.kx : undefined, ky: (typeof e.ky === 'number') ? e.ky : undefined }));   // gx/gy ride for descgo (the 𝔸-slot leash target); kx/ky for lensset (the linOp momentum tilt)
+        kx: (typeof e.kx === 'number') ? e.kx : undefined, ky: (typeof e.ky === 'number') ? e.ky : undefined,
+        leak: (typeof e.leak === 'number') ? e.leak : 0,
+        scale: (e.scale === 'coarse' || e.scale === 'fine') ? e.scale : 'all' }));   // gx/gy ride for descgo; kx/ky for lensset; leak = edge κ; scale = the recall band (coarse/fine/all — tier-selective ±T leg). Every hop of the pipe must carry it (the dead-edge-bug lesson)
 
       // GRACE (first-load fix): on a fresh page the world clock's n.time can arrive in a settling burst right as the
       // GPU becomes ready — anchoring c0 mid-burst leaves a backlog. Hold a few ready-frames so monClock is stable
@@ -1680,7 +1973,7 @@ function makeMediumU1Renderer(core) {
         if (_autoClose) { const att0 = W.movAtt(W.leash.state.gx, W.leash.state.gy);
           if (att0) { const b0 = Float64Array.from(Float32Array.from(att0));
             let eS = 0; for (let j = 0; j < b0.length; j++) eS += b0[j] * b0[j];
-            W.desc = true; W.descBase = b0; W.descDisp = Float64Array.from(b0); W.descE0 = eS || 1; W.e0 = eS || 1;
+            W.desc = true; W.descBase = b0; W.descDisp = Float64Array.from(b0); W.descE0 = eS || 1; W.e0 = eS || 1; W._texDirty = true;
             W.descPhi0 = lensU1.angle(_lensOp[0]); W.descPos = [W.leash.state.gx, W.leash.state.gy];
             W.descPosCap = [...W.descPos]; W.descBar = 0; W.descCapBar = 0; W.descObj = _lensObj;
             W.born = true; _solSeeded = true; _autoClose = false; regBorn = true;
@@ -1766,8 +2059,9 @@ function makeMediumU1Renderer(core) {
         //    dressing are the ORIGINAL field's, because this IS the field, register-resident. Four refusals
         //    (v1 dissolution → v2 fixed point → v4 shimmer → v6 silence) taught the lesson the arc already
         //    knew: the only faithful model of the medium is the medium.
-        let regAtt = (W.descBase && W.movAtt) ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : null;
-        for (let i = 0; i < todo; i++) { const k = _base + i;
+        _tbFrameRing = _E.ringCache; _tbFrameRingCur = null;   // turbo frame context (ring BEFORE this frame's swaps)
+        _regAttC = (W.descBase && W.movAtt) ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : null;
+        for (let i = 0; i < todo; i++) { const k = _base + i; let _cpuSnap = null;
           while (_pendKern.length && k >= _pendKern[0].startStep) { const pk = _pendKern.shift(); _E.kernelVer = pk.ver; _E.ringCache = { r: pk.r, w: pk.w, o: pk.o };
             _kernApplied.push({ atStep: k, r: pk.r, w: pk.w, o: pk.o }); }   // version BOOKKEEPING (the register engine reads the ring via the λ-grid cache) + the schedule for a live MIRROR
           _siShift.drain(k, (e) => { if (_driveMode === 'transport') { if (!W.leash.state.go) W.virtGo(e.toX, e.toY); else W.setTarget(e.toX, e.toY); } });
@@ -1777,23 +2071,91 @@ function makeMediumU1Renderer(core) {
           // moment resurrected ALIVE — field mode's recall semantics, register-resident). Per-step f32 grain
           // (the join-fork fix: snapshots land MID-BAR and the wire is f32 — identical bytes at EVERY step;
           // also the ORIGINAL engine's own grain: the GPU field was f32 per step).
-          if (W.descBase && W.descE0) { const shardR = (_mirRegion && !(_sb.slots[1].born && _sb.slots[1].mirror)) ? _mirRegion : null;
-            // SHARD ECONOMY GUARD (live-caught freeze): the x-space regional step costs ~terms·|R+2reach| per
-            // substep — for the fractal clock's LIVE rings (~184 points, reach ≈ 24) that is ~10× the WHOLE
-            // spectral step (whose FFT cost ignores ring size; that asymmetry is why the engine is spectral).
-            // Regional execution is a genuine win only for small-reach kernels; otherwise the whole-torus
-            // engine keeps running and the shard remains INSTRUMENTATION (seam meter; eH stays whole-scoped).
-            let econ = false;
-            if (shardR) { const rc2 = _E.ringCache;
-              if (_shardEconKv !== _E.kernelVer) { let reach = 1, nt = 9;
-                if (rc2?.o) for (const o of rc2.o) { nt += o.length >> 1; for (let i2 = 0; i2 < o.length; i2++) { const a2 = Math.abs(o[i2]); if (a2 > reach) reach = a2; } }
-                _shardEconKv = _E.kernelVer; _shardEconOk = reach <= 6 && nt <= 48; _shardEconInfo = { reach, nt }; }
-              econ = _shardEconOk;
-              if (!econ && !_shardWarned) { _shardWarned = true;
-                console.log(`[REGION] ⚠ the live kernel ring (${_shardEconInfo.nt} stencil terms, reach ${_shardEconInfo.reach}) makes the regional x-space step ~10× DEARER than the whole spectral step (FFT cost ignores ring size — why the engine is spectral). Running the WHOLE-torus engine; the shard stays as instrumentation (seam meter). Regional compute pays off on small-reach kernels — or on the GPU turbo executor (per-pixel stencil, cost genuinely ∝ |R|).`); } }
-            _shardActive = !!(shardR && econ);
-            if (_shardActive) _regStepRegion(W, regAtt, _lensOp[0].beta || 1, shardR); else _regStep1(W, regAtt, _lensOp[0].beta || 1); }
-          for (let li = 1; li <= 3; li++) { const VL = _sb.slots[li]; if (VL.desc && VL.descLive && VL.descBase && VL.descE0) _regStep1(VL, VL.descAtt, _lensOp[li].beta || 1); }
+          // ── SHARDED W (rung 2, LIVE — turbo or CPU): with a region set and no mirror, W advances ONLY inside
+          //    R via the bit-exact CPU regionStepX (light-cone margin cascade; outside = the declared boundary,
+          //    frozen). This runs REGARDLESS of executor: the point of two-browser sharding is that each browser
+          //    computes only its HALF (the combined system handles a world one GPU couldn't) — NOT per-machine
+          //    speed, so the old "regional is 10× dearer than the whole spectral step" economy gate does not
+          //    apply here (it compared one peer's regional cost to one peer's WHOLE cost; sharding's win is
+          //    across peers). Honest by the light-cone law (interior bit-exact) + eH shard-scoped. When sharded,
+          //    W does NOT use the turbo texture path (regionStepX is CPU, bit-exact-pinned); we step it here and
+          //    skip W in the turbo advance. Non-W living slots keep the turbo path.
+          // SHARD MODE: is the kernel small-reach enough that the x-space regionStepX (cost ∝ ring-points·|R+
+          // margin|) BEATS the whole spectral step (cost FFT-fixed, ring-size-blind)? For the LIVE fractal
+          // kernel (~184 points, reach ~24) it does NOT — regionStepX per step froze the browser. On such a
+          // kernel the honest shard is DECLARATION-ONLY: run the whole-torus SPECTRAL engine (cheap), then keep
+          // only R and re-freeze the outside to the declared boundary (post-step). The region's deep interior
+          // is the EXACT engine step (identical to whole-torus); the outside is the declared boundary; the seam
+          // is the real approximation (seam-glue meter). Compute is global on a spectral engine — the WORLD
+          // PARTITION is regional, not the FLOP count; that asymmetry (why the engine is spectral) is the honest
+          // limit. Small-reach kernels use the x-space regionStepX (genuine cost ∝ |R|).
+          const _wSharded = _mirRegion && !(_sb.slots[1].born && _sb.slots[1].mirror) && W.desc && W.descBase && W.descE0;
+          _shardActive = !!_wSharded;
+          if (_wSharded) { const rc2 = _shardRing(); const econKey = _E.kernelVer * 2 + (_shardDemoRing ? 1 : 0);
+            if (_shardEconKv !== econKey) { let reach = 1, nt = 9;
+              if (rc2?.o) for (const o of rc2.o) { nt += o.length >> 1; for (let i2 = 0; i2 < o.length; i2++) { const a2 = Math.abs(o[i2]); if (a2 > reach) reach = a2; } }
+              _shardEconKv = econKey; _shardEconOk = reach <= 6 && nt <= 48; _shardEconInfo = { reach, nt };
+              if (!_shardEconOk && !_shardWarned) { _shardWarned = true; console.log(`[REGION] kernel reach ${reach}, ${nt} terms → x-space regionStepX would be ~10× the spectral step (froze). DECLARATION-ONLY shard: whole spectral engine + region kept, outside frozen to the boundary. Deep interior exact; seam approximate (watch seam-glue). World partition is regional; per-machine FLOPs stay global (spectral engines don't shard compute — the honest limit). mu1.shardDemo(true) forces a small kernel to see the GENUINE x-space shard.`); }
+              else if (_shardEconOk && _shardDemoRing) console.log(`[REGION] SHARD-DEMO active: reach ${reach}, ${nt} terms → GENUINE x-space shard (cost ∝ |R|, frozen boundary, diverging seam). ⚠ eH forked (local sandbox).`); }
+            _shardXspace = _shardEconOk; }
+          else _shardXspace = false;
+          // x-space regional step (small kernels only): step W ONLY inside R, skip it in the turbo advance below.
+          if (_shardXspace) { if (_turboOn && _gpu) _tbSyncSlot(0);
+            let _cs = null; if (_K.edge) { let ae = false; for (let a2 = 0; a2 < 4; a2++) for (let b2 = 0; b2 < 4; b2++) if (_K.edge[a2][b2]) ae = true; if (ae) _cs = _sb.slots.map((s2) => (s2.descBase ? Float64Array.from(s2.descBase) : null)); }
+            _regStepRegion(W, _coupledAtt(0, _regAttC, _cs), _lensOp[0].beta || 1, _mirRegion);
+            if (_turboOn && _gpu) { W._texDirty = true; _tbTexStep[0] = k + 1; } }
+          if (_turboOn && _gpu) { if (_tbCur < 0) _tbCur = k;
+            // SMOOTH LIVE DISPLAY: advance + refresh the DISPLAYED slot's film at Q cadence (3×/bar), the rest
+            // only at bars. The soliton's SHAPE (breathing, wander) changes per step — a bar-locked envelope
+            // reads as ~3fps choppy regardless of executor; resident textures made the one displayed-slot
+            // readback cheap, so we can afford 3×/bar for it. Non-displayed slots stay bar-cadence.
+            if (((k + 1) % Q) === 0) { _tbAdvanceAll(k + 1, _shardXspace ? 0 : -1);   // skip W only when x-space-sharded (stepped by regionStepX); declaration-only shard steps W whole-torus here
+              if (!_frameLock) { const vs = _viewSlot; if (_tbLive(vs)) { _tbSyncSlot(vs);
+                // declaration-only-sharded W: the whole-torus texture evolved the OUTSIDE too — freeze it back to
+                // the declared boundary at EVERY display refresh (not just at bars), else the outside jitters
+                // (evolve at Q, snap at bar). This peer owns only R; outside is the static declaration.
+                if (vs === 0 && _wSharded && !_shardXspace) _shardFreezeOutside();
+                const sv = _sb.slots[vs]; if (sv.descBase) sv.descDisp = Float64Array.from(sv.descBase);
+                // SHIFT-JITTER FIX (turbo-only, cat1100): the LIVE field carries its own transport (the pin drags
+                // the soliton INSIDE descBase, synced here at Q). But _descPose ALSO adds a render offset
+                // ox=leash−descPos that grows mid-bar as the leash moves → the render shifts the already-moving
+                // field forward AGAIN (double-count), then descPos snaps at the bar → back-forward jitter. Since
+                // the film now refreshes at Q, re-anchor descPos to the leash at the SAME Q cadence → ox stays ≈0
+                // (the field's own motion IS the transport; pose keeps only the true sub-Q residual).
+                sv.descPos = [sv.leash.state.gx, sv.leash.state.gy]; } }
+            } }
+          else if (!_shardXspace && W.descBase && W.descE0) {
+            // CPU whole-torus W (not x-space-sharded — either unsharded, or a declaration-only shard which steps
+            // W whole then freezes the outside below). Coupling snapshot as before.
+            if (_K.edge) { let ae = false; for (let a2 = 0; a2 < 4; a2++) for (let b2 = 0; b2 < 4; b2++) if (_K.edge[a2][b2]) ae = true;
+              if (ae) _cpuSnap = _sb.slots.map((s2) => (s2.descBase ? Float64Array.from(s2.descBase) : null)); }
+            _regStep1(W, _coupledAtt(0, _regAttC, _cpuSnap), _lensOp[0].beta || 1); }
+          if (!_turboOn) for (let li = 1; li <= 3; li++) { const VL = _sb.slots[li]; if (VL.desc && VL.descLive && VL.descBase && VL.descE0) _regStep1(VL, _coupledAtt(li, VL.descAtt, _cpuSnap), _lensOp[li].beta || 1); }
+          // THE KURAMOTO/XY LAW, MEDIUM-DRIVEN (v2 — the pure-descriptor version settled at the exact splay and
+          // froze: a noiseless ODE parks at its equilibrium; the OLD medium's life came from the FIELDS kicking
+          // the phases). Applied at Q boundaries (the old cadence, 3×/bar): each slot's phase entering the XY
+          // sum is its MATTER phase — op∠ + arg⟨att,ψ⟩ (the measured lock offset) for living slots, the bare
+          // descriptor angle for parked ones. The living medium's churn (SPM, kernel bumps) now drives wander
+          // along the frustrated triangle's degenerate manifold — Law 2 ("dynamics, not states") restored,
+          // deterministically (descBase = shared bytes; every term a pure fn of shared k).
+          if (_K.edge && ((k + 1) % (_turboOn ? 21 : Q)) === 0) {   // turbo: bar cadence (descBase syncs at bars) with κ×3 = the Q-rate Euler equivalent
+            if (_turboOn && _gpu) for (let ie = 0; ie < 4; ie++) { let touched = false; for (let je = 0; je < 4; je++) if (_K.edge[ie][je]) touched = true; if (touched) _tbSyncSlot(ie); }   // the XY law reads matter phases → sync ONLY the edge-connected slots (the cost of running the register XY machine; zero when no edges)
+            const th = _lensOp.map((op, i2) => { const sl = _sb.slots[i2];
+              const att2 = i2 === 0 ? _regAttC : sl.descAtt;
+              if (sl.desc && sl.descBase && att2 && (i2 === 0 || sl.descLive)) {
+                let rr = 0, im2 = 0; const f2 = sl.descBase;
+                for (let j = 0; j < f2.length; j += 2) { rr += att2[j] * f2[j] + att2[j + 1] * f2[j + 1]; im2 += att2[j] * f2[j + 1] - att2[j + 1] * f2[j]; }
+                return lensU1.angle(op) + Math.atan2(im2, rr); }
+              return lensU1.angle(op); });
+            const dth = [0, 0, 0, 0]; let anyK = false;
+            for (let ia = 0; ia < 4; ia++) { if (ia !== 0 && !_sb.slots[ia].born) continue;
+              for (let ib = 0; ib < 4; ib++) { const kk = _K.edge[ia][ib]; if (!kk || (ib !== 0 && !_sb.slots[ib].born)) continue;
+                anyK = true; dth[ia] += (_turboOn ? 3 : 1) * kk * Math.sin(th[ib] - th[ia]); } }
+            if (anyK) { for (let ia = 0; ia < 4; ia++) if (dth[ia]) _lensOp[ia].phase = ((_lensOp[ia].phase + dth[ia]) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+              const barK = Math.floor((k + 1) / 21);
+              if ((barK % 4) === 0 && _kurLogBar !== barK && ((k + 1) % 21) === 0) { _kurLogBar = barK;
+                console.log(`[KUR] bar ${barK} · θ_matter=[${th.map((t) => lensU1.wrap(t).toFixed(2)).join(', ')}] · Δ(W,V)=${lensU1.wrap(th[0] - th[1]).toFixed(2)} Δ(W,P1)=${lensU1.wrap(th[0] - th[2]).toFixed(2)} Δ(V,P1)=${lensU1.wrap(th[1] - th[2]).toFixed(2)} — XY on MATTER phases (op∠ + measured lock offset). Splay Δ=±2.09 = the frustrated compromise (continuously degenerate); the absolute phases WANDER under the medium's churn — Law 2: dynamics, not states`); } }
+          }
           if (((k + 1) % 21) === 0) { const barA = Math.floor((k + 1) / 21);
             // W's aging: the IDENTICAL law as field mode (τ_W beat cursor + ω per bar) — the register cannot tell
             // which side of the abstraction it aged on. That indistinguishability IS the meta-circular closure.
@@ -1819,35 +2181,47 @@ function makeMediumU1Renderer(core) {
             // bar boundary for every LIVING slot: display buffer (the shared film — the canvas must never
             // show a peer-local mid-bar step), pose re-anchor (render keeps only the sub-bar frac), pin-target
             // refresh at the slot's OWN leash (descgo drags a living memory via the pin chase, like W).
+            // under turbo, descDisp (the display film) is needed ONLY for the slot the canvas shows (or all,
+            // in Σ-view) — sync just those, not every living slot (the resident-texture win). Non-displayed
+            // living slots keep advancing on the GPU untouched; their descBase syncs when a hash/verb needs it.
+            const _dispNeeds = (si2) => !_turboOn || _viewAllOn || si2 === _viewSlot;
             for (let si2 = 0; si2 < 4; si2++) { const s3 = _sb.slots[si2];
               if (!s3.desc || !s3.descBase || (si2 > 0 && !s3.descLive)) continue;
-              s3.descDisp = Float64Array.from(s3.descBase);
+              // x-space-sharded W is CPU-stepped (regionStepX) → descBase already current, don't sync the stale
+              // texture. Declaration-only W stepped whole-torus (texture) → sync it, then FREEZE the outside to
+              // the declared boundary (this peer owns only R).
+              if (_turboOn && _gpu && _dispNeeds(si2) && !(si2 === 0 && _shardXspace)) _tbSyncSlot(si2);
+              if (si2 === 0 && _wSharded && !_shardXspace) _shardFreezeOutside();
+              if (_dispNeeds(si2)) s3.descDisp = Float64Array.from(s3.descBase);
               s3.descPos = [s3.leash.state.gx, s3.leash.state.gy];
-              if (si2 === 0) { W.sl2 = null; regAtt = W.movAtt(W.leash.state.gx, W.leash.state.gy); }
+              if (si2 === 0) { if ((barA % 4) === 0) W.sl2 = null;   // sl2 refresh at the VPT cadence (a per-bar rebuild profiled at 120ms/bar with the analytic v_g — 31% of the frame)
+                _regAttC = W.movAtt(W.leash.state.gx, W.leash.state.gy); }
               else if (s3.descAttG) s3.descAtt = _plateAtt(s3.descAttG.dop, s3.descPos, s3.descAttG.obj); }
-            // THE KURAMOTO BAR LAW (the register XY machine, U1-native): dθ_i = Σ_j κ_ij·sin(θ_j − θ_i) per
-            // shared bar, applied to the descriptor phases of born slots — pure register arithmetic; phases AND
-            // the κ matrix are both in regH, so the whole XY dynamics is byte-replicated. κ>0 aligns, κ<0
-            // anti-aligns; a κ<0 triangle is FRUSTRATED (no static minimum — the dynamics is the answer, Law 2);
-            // MAXCUT reads off the sign pattern of the differences (Law 5: the answer is in DIFFERENCES).
-            if (_K.edge) { const th = _lensOp.map((op) => lensU1.angle(op)); const dth = [0, 0, 0, 0]; let anyK = false;
-              for (let ia = 0; ia < 4; ia++) { if (ia !== 0 && !_sb.slots[ia].born) continue;
-                for (let ib = 0; ib < 4; ib++) { const kk = _K.edge[ia][ib]; if (!kk || (ib !== 0 && !_sb.slots[ib].born)) continue;
-                  anyK = true; dth[ia] += kk * Math.sin(th[ib] - th[ia]); } }
-              if (anyK) { for (let ia = 0; ia < 4; ia++) if (dth[ia]) _lensOp[ia].phase = ((_lensOp[ia].phase + dth[ia]) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
-                if ((barA % 4) === 0 && _kurLogBar !== barA) { _kurLogBar = barA;
-                  const tN = _lensOp.map((op) => lensU1.wrap(lensU1.angle(op)));
-                  console.log(`[KUR] bar ${barA} · θ=[${tN.map((t) => t.toFixed(2)).join(', ')}] · Δ(W,V)=${lensU1.wrap(tN[0] - tN[1]).toFixed(2)} Δ(W,P1)=${lensU1.wrap(tN[0] - tN[2]).toFixed(2)} Δ(V,P1)=${lensU1.wrap(tN[1] - tN[2]).toFixed(2)} — the XY register machine (MAXCUT = the sign pattern of Δ; a frustrated κ<0 triangle never settles — watch it orbit)`); } } }
+            if (_turboOn && (barA % 8) === 0 && _tbLogBar !== barA) { _tbLogBar = barA;
+              console.log(`[TURBO] bar ${barA} · GPU executed ${_tbSteps} engine steps since the last report (CPU engine idle) — proof of engagement; mu1.pure() now counts these honestly`); _tbSteps = 0; }
             if (_mirRegion && !(_sb.slots[1].born && _sb.slots[1].mirror) && W.desc && W.descBase && _shardRef && _shardLogBar !== barA && (barA % 4) === 0) { _shardLogBar = barA;
               const reg = _mirRegion, BW = 16; let num = 0, ea = 0, eb = 0;
               for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) {
                 const depth = Math.min(x - reg.x0, reg.x1 - 1 - x, y - reg.y0, reg.y1 - 1 - y); if (depth >= BW) continue;
                 const j = (y * GRID + x) * 2;
                 num += W.descBase[j] * _shardRef[j] + W.descBase[j + 1] * _shardRef[j + 1]; ea += W.descBase[j] ** 2 + W.descBase[j + 1] ** 2; eb += _shardRef[j] ** 2 + _shardRef[j + 1] ** 2; }
-              console.log(`[SHARD] bar ${barA} · region[${_mirRegionName}] ${_shardActive ? 'on the REGISTER ENGINE (regional x-space, cost ∝ |R|)' : 'INSTRUMENTATION-ONLY (whole-torus spectral engine — see the economy note)'} · seam-glue=${(ea > 0 && eb > 0 ? Math.abs(num) / Math.sqrt(ea * eb) : 1).toFixed(3)} (live ${BW}px band vs the declared-boundary snapshot) (${(reg.x1 - reg.x0) * (reg.y1 - reg.y0)}/${N_CELLS} cells) · ${_shardActive ? 'eH shard-scoped' : 'eH whole-scoped'}; regH = the shared contract`); }
-            if (_regTraceOn && ((((k + 1) / Q) | 0) % _detEvery === 0)) console.log(`[DET-⌀] solStep=${k + 1} · regH=${_regH()} · eH=${W.descBase ? (_shardActive ? `⚠shard[${_mirRegionName}]:` : '') + _hashField(W.descBase) : '—'}${[1,2,3].map((li) => _sb.slots[li].descLive && _sb.slots[li].descBase ? ` · e${SLOTN[li]}=${_hashField(_sb.slots[li].descBase)}` : '').join('')} · bW=${_tauK ? (_tauK.beatsOf('W') ?? 0) : 0} kW=${_E.kwSteps} · kV=${_E.kernelVer} (register-only: regH + the living envelope hashes are the contract)`);
+              console.log(`[SHARD] bar ${barA} · region[${_mirRegionName}] ${_shardXspace ? `x-space regionStepX (cost ∝ |R| — shards COMPUTE; interior deep-exact, seam approximate) · seam-glue=${(ea > 0 && eb > 0 ? Math.abs(num) / Math.sqrt(ea * eb) : 1).toFixed(3)}` : 'DECLARATION-ONLY (whole spectral step; interior COMPUTED EXACTLY — the display outside is the declared boundary, ownership only; both peers compute the full field, spectral engines can\'t shard compute; seam-glue≈1 by construction)'} · ${(reg.x1 - reg.x0) * (reg.y1 - reg.y0)}/${N_CELLS} cells owned · ⚠eH shard-scoped (regH = the shared contract)`); }
+            // eH is emitted only when the envelope is SYNCED at this step: always in CPU mode; under turbo ONLY
+            // at bar boundaries (descBase lags mid-bar — a stale hash would be a false fork signal). regH (the
+            // whole shared contract) is always current — it does not depend on the field bytes.
+            const _eHsynced = !_turboOn || ((k + 1) % 21) === 0;
+            if (_regTraceOn && ((((k + 1) / Q) | 0) % _detEvery === 0)) {
+              if (_turboOn && _gpu && _eHsynced) _tbSyncAll();   // the hash needs bytes → sync every living slot (the determinism reader's own cost; only when _regTraceOn AND the DET cadence fires)
+              console.log(`[DET-⌀] solStep=${k + 1} · regH=${_regH()} · eH=${!_eHsynced ? '(turbo: syncs at bar)' : W.descBase ? (_shardActive ? `⚠shard[${_mirRegionName}]:` : '') + _hashField(W.descBase) : '—'}${_eHsynced ? [1,2,3].map((li) => _sb.slots[li].descLive && _sb.slots[li].descBase ? ` · e${SLOTN[li]}=${_hashField(_sb.slots[li].descBase)}` : '').join('') : ''} · bW=${_tauK ? (_tauK.beatsOf('W') ?? 0) : 0} kW=${_E.kwSteps} · kV=${_E.kernelVer} (register-only: regH + the living envelope hashes are the contract)`); }
           }
         }
+        if (_turboOn && _gpu && _kernApplied.length) _tbAdvanceAll(_base + todo);   // frame-end advance on SWAP frames (flushes the lag before _kernApplied resets — the pre-swap ring)
+        // W is synced at BAR boundaries only (in the descDisp block, when W is displayed — the common case).
+        // The post-loop readers of W.descBase — vpt/sl2 (peer-local TELEMETRY, bar cadence anyway) and the
+        // mirror seed (an occasional verb) — do NOT need sub-bar freshness, so NO per-frame readback here.
+        // This removes the last per-frame gl.readPixels stall (profiled: even 1/frame blocked the whole frame
+        // on GPU completion). If W is not the displayed slot AND a frame ends off a bar boundary, W.descBase
+        // lags <1 bar — telemetry-acceptable, and the hash path syncs explicitly when it needs bytes.
         _E.lockNow = 1;
       } else {
       // W-HOME DRIVE (the buffer home; the coevolve-chase). Seed once from the att, then self-sustain: each step
@@ -2033,7 +2407,7 @@ function makeMediumU1Renderer(core) {
             // that held solH. The declaration's staleness bound: ≤N bars, by construction.
             if (_autoCompN > 0 && W.desc && W.descBase && ((mk + 1) % 21) === 0 && (Math.floor((mk + 1) / 21) % _autoCompN) === 0) {
               let an = _attApplied[0]; for (const a of _attApplied) { if (a.atStep <= mk + 1) an = a; else break; }
-              W.descBase = Float64Array.from(q);
+              W.descBase = Float64Array.from(q); W._texDirty = true;
               W.descPhi0 = (an && typeof an.phi === 'number') ? an.phi : lensU1.angle(_lensOp[0]);
               W.descPos = [an ? an.gx : W.leash.state.gx, an ? an.gy : W.leash.state.gy];
               W.descCapBar = Math.floor((mk + 1) / 21);   // capture stamp (defTest's declaration-age readout)
@@ -2061,6 +2435,10 @@ function makeMediumU1Renderer(core) {
       // sl(2)-tier RE-KEY + lazy init: when the fractal clock moved kernelVer (or a joiner arrives without the
       // derived tier), recompute from descBase — a pure register fn, identical bytes on every peer whenever it
       // runs (the λ-grid-cache argument; timing is telemetry-only since sl2 is outside regH).
+      // under turbo, the sl2/vpt telemetry reads W.descBase — sync W lazily ONLY when they're about to run
+      // (both are throttled: sl2 on kernelVer change, vpt every _vptEvery bars). Rare → negligible vs a
+      // per-frame readback; keeps the telemetry honest (current W bytes) without stalling every frame.
+      if (_turboOn && _gpu && W.desc && ((!W.sl2 || W.sl2.kv !== _E.kernelVer) || (_vptOn && _vptLogBar !== _E.frameBar && (_E.frameBar % _vptEvery) === 0 && todo > 0))) _tbSyncSlot(0);
       if (W.desc && W.descBase && _E.ringCache?.r?.length && (!W.sl2 || W.sl2.kv !== _E.kernelVer)) {
         const old = W.sl2; W.sl2 = old ? (_sl2Rekey(old) || _mkSl2(W.descBase)) : _mkSl2(W.descBase);
         if (old && W.sl2 && (_sl2KeyN++ % 8) === 0) console.log(`[SL2] RE-KEY kv ${old.kv}→${W.sl2.kv}: V̈ ${old.vdd.toExponential(3)}→${W.sl2.vdd.toExponential(3)} ⇒ ΔI=${(W.sl2.I - old.I).toExponential(2)} (FFT-free stencil re-sum over the compiled spectrum · logging every 8th re-key)`); }
@@ -2103,7 +2481,7 @@ function makeMediumU1Renderer(core) {
       // fns of shared time on every peer (a slow display drops indices; it never invents or reorders frames). rAF
       // degrades to a polling loop; between boundaries the existing pixels ARE the correct frame (repaint = waste).
       let _skipPaint = false;
-      if (_frameLock) {
+      if (_frameLock && _fieldView === 'full') {   // field-view transforms (residual/bare) are live-computed → never skip-paint them
         const sig = _wViaMirror ? `WV:${_dispVk}:${_colorMode}:${_dials.view}`
           : (vsl && vsl.desc) ? `A${_viewSlot}:${vsl.descBar}:${lensU1.angle(_lensOp[_viewSlot]).toFixed(9)}:${vsl.leash.state.gx.toFixed(4)},${vsl.leash.state.gy.toFixed(4)}:${_colorMode}:${_dials.view}`
           : (_viewSlot === 1 && V.mirror) ? `V:${_dispVk}:${_colorMode}:${_dials.view}`
@@ -2122,9 +2500,13 @@ function makeMediumU1Renderer(core) {
             for (let j = 0; j < acc.length; j++) acc[j] += pf[j]; }
           _viewAllCache = { bar: nowBar, f: nSum ? acc : null }; }
         if (_viewAllCache.f) { _drawField(outCell, _viewAllCache.f); _drawn = true; } }
-      if (!_drawn && vsl && vsl.desc && !_wViaMirror) { _drawn = _drawDesc(outCell, _viewSlot); if (!_drawn) vfield = _descProject(_viewSlot); }
+      // FIELD-VIEW (residual/bare) forces the CPU field path (the GPU 𝔸 shader has no ψ−A): use the slot's live
+      // descBase (or descDisp) as ψ, then _fieldViewApply subtracts A / shows A. Only when a transform is active.
+      const _fvActive = _fieldView !== 'full' && vsl && (vsl.descBase || vsl.field);
+      if (_fvActive) { vfield = vsl.descDisp || vsl.descBase || vsl.field; _drawn = false; }
+      else if (!_drawn && vsl && vsl.desc && !_wViaMirror) { _drawn = _drawDesc(outCell, _viewSlot); if (!_drawn) vfield = _descProject(_viewSlot); }
       else if (_dials.view === 'desc') vfield = (_viewSlot === 0) ? att : (vsl ? vsl.att : null);
-      if (!_drawn) _drawField(outCell, _lensedView(_viewSlot, vfield));
+      if (!_drawn) _drawField(outCell, _lensedView(_viewSlot, _fieldViewApply(_viewSlot, vfield)));
       const vop = _lensOp[_viewSlot];
       outCell.setLabel(`ψ_${vnm}${(vsl && vsl.born) || _viewSlot === 0 ? '' : ' (unborn)'} · ∠${lensU1.wrap(lensU1.angle(vop)).toFixed(2)}${vop.beta !== 1 ? ` β${vop.beta}` : ''}${vop.omega ? ` ω${vop.omega}` : ''}${_wViaMirror ? ' · LIVE via MIRROR (the physics of the register; 𝔸 declaration on the view cycle)' : vsl && vsl.mirror ? ' · MIRROR: live PDE injection-locked to the register' : vsl && vsl.desc ? ' · 𝔸 PREDICTIVE slot (descriptor-only, 0 grid steps)' : _dials.view === 'lens' ? ' · ∠lens view' : _dials.view === 'desc' ? ' · 𝔸 DESCRIPTOR render (register prediction — not ψ)' : ''}${_viewSlot === 0 ? ` · transport lock ${_E.lockNow.toFixed(2)}` : ''}${_frameLock ? ` · film@k=${_viewSlot === 1 && V.mirror ? _dispVk : _dispWk} (shared index: identical k ⇒ identical pixels)` : ''}${_mirRegion && V.mirror ? ` · shard:${_mirRegionName} (outside R = the declaration)` : ''}${_viewAllOn && W.desc ? ' · Σ VIEW (linear superposition of the slot declarations — a VIEW; slots do not interact)' : ''}`);
       }
@@ -2147,6 +2529,12 @@ function makeMediumU1Renderer(core) {
         console.log(`[MU1-BOOT] seed planted (${_E.frameBar - _bootSeedBar} bar) → CLOSING the register — the REGISTER ENGINE dresses the symbol in-register (full physics, f64 CPU, zero GPU; watch the dressing live). Mirror = optional verifier · mode:physics = one press back · mu1.autoClose(false) keeps classic`);
         injectEvent?.({ type: 'mediumVirt', mode: 'wabs', amp: 1 });
       }
+      // GPU EXECUTOR ON BY DEFAULT: once the register is live on a FRESH leader (never fired yet, GPU ready),
+      // switch to turbo. Replicated → joiners adopt via the snapshot's turboOn; a peer that turned it off stays
+      // off (guarded by _turboArmed, disarmed on any explicit toggle). mu1.turbo(false) drops to CPU.
+      if (_turboArmed && !_turboOn && W.desc && _gpu && _solSeeded && todo > 0) { _turboArmed = false;
+        console.log('[MU1-BOOT] GPU executor ON by default (mu1.turbo(false) for the universal CPU executor)');
+        injectEvent?.({ type: 'mediumVirt', mode: 'turbo', amp: 1 }); }
     };
     root.addEventListener('mousemove', (e) => { const rect = root.getBoundingClientRect(); const ro = core._seloInfo ? core._seloInfo(world) : null;
       if (ro?.myId) sendCursorMove(world.id, ro.myId, (e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height); }, { passive: true });

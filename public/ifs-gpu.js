@@ -127,6 +127,13 @@ export class IFSGpu {
     [this._eyeA, this._fboEyeA] = this._makePsiTex();
     [this._eyeB, this._fboEyeB] = this._makePsiTex();
     this._eyeSrc = 'A';
+    // ── U1 TURBO: per-slot RESIDENT eye buffers (lazy). The register (CPU descBase) stays canonical — these are
+    //    a between-sync CACHE of it, swapped into the active eye slot by selectEyeSlot(id). Nothing here is
+    //    state the determinism contract reads; every observable step still refreshes descBase from the texture
+    //    (readback) on the app side. This is the SAME ping-pong the eye already uses, just one pair per slot so
+    //    the executor need not readback+re-upload between bars.
+    this._slotEye = {};   // id → { A, fA, B, fB, src }
+    this._slotDefault = { A: this._eyeA, fA: this._fboEyeA, B: this._eyeB, fB: this._fboEyeB };
     this._objEye = this._makeRGF32Tex();
     this._bindB  = this._makeRGF32Tex();   // §7.90 operand-B field for the pure-medium binding (ψA·ψB)
     // §7.91-fix DEDICATED bind ping-pong — the binding's field-mul + soliton round-trip run HERE, never on the eye
@@ -209,6 +216,7 @@ export class IFSGpu {
     this._progEyeSuperpose    = this._compileStep(GLSL_EYE_SUPERPOSE);      // coevolve: ψ_eye += β·obj (GPU)
     this._progEyeContract     = this._compileStep(GLSL_EYE_CONTRACT);       // full-authority hold: ψ ← (1−λ)ψ + λ·obj (contraction, GPU)
     this._progEyeScale        = this._compileStep(GLSL_EYE_SCALE);          // coevolve: ψ *= s (energy-cap scale, GPU)
+    this._progEyeCapScale     = this._compileStep(GLSL_EYE_CAP_SCALE);      // the NO-SYNC cap (reduce texture sampled in-shader — zero readback)
     this._progEnergyRows      = this._compileStep(GLSL_ENERGY_ROWS);        // coevolve: row-reduce Σ|ψ|² (energy)
     this._progDissip          = this._compileStep(GLSL_DISSIP);             // §7.82 driven-dissipative pass
     this._progAddForce        = this._compileStep(GLSL_ADD_FORCE);          // §7.82 GPU-resident clock forcing
@@ -274,6 +282,7 @@ export class IFSGpu {
       eyeSuperpose:    { psi: ul(this._progEyeSuperpose,'u_psi'), obj: ul(this._progEyeSuperpose,'u_obj'), beta: ul(this._progEyeSuperpose,'u_beta') },
       eyeContract:     { psi: ul(this._progEyeContract,'u_psi'), obj: ul(this._progEyeContract,'u_obj'), lambda: ul(this._progEyeContract,'u_lambda') },
       eyeScale:        { psi: ul(this._progEyeScale,'u_psi'), s: ul(this._progEyeScale,'u_s') },
+      eyeCapScale:     { psi: ul(this._progEyeCapScale,'u_psi'), e: ul(this._progEyeCapScale,'u_e'), target: ul(this._progEyeCapScale,'u_target') },
       energyRows:      { a: ul(this._progEnergyRows,'u_a'), G: ul(this._progEnergyRows,'u_G') },
       dissip:          { psi: ul(this._progDissip,'u_psi'), alpha: ul(this._progDissip,'u_alpha'), pump: ul(this._progDissip,'u_pump'), ptarget: ul(this._progDissip,'u_ptarget'), dt: ul(this._progDissip,'u_dt') },
       addForce:        { psi: ul(this._progAddForce,'u_psi'), amp: ul(this._progAddForce,'u_amp'), sig2: ul(this._progAddForce,'u_sig2'), G: ul(this._progAddForce,'u_G') },
@@ -1195,6 +1204,28 @@ export class IFSGpu {
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; this.setEyePsi(psi64);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; }
 
+  // ── U1 TURBO RESIDENT SLOTS ──────────────────────────────────────────────────────────────────────
+  // selectEyeSlot(id): make slot `id`'s resident ping-pong pair the ACTIVE eye buffer (lazy-create). id=null
+  // restores the default eye buffer. The register stays canonical: this only chooses WHICH GPU texture the
+  // eye ops read/write, so the executor can keep a slot resident across bars (no readback+re-upload). Parity
+  // (src) is remembered per slot — the step count between visits is a pure fn of shared steps, so it stays
+  // peer-deterministic.
+  selectEyeSlot(id) {
+    if (id == null) { this._eyeA = this._slotDefault.A; this._fboEyeA = this._slotDefault.fA;
+      this._eyeB = this._slotDefault.B; this._fboEyeB = this._slotDefault.fB; return; }
+    let s = this._slotEye[id];
+    if (!s) { const [A, fA] = this._makePsiTex(), [B, fB] = this._makePsiTex(); s = { A, fA, B, fB, src: 'A', primed: false }; this._slotEye[id] = s; }
+    this._eyeA = s.A; this._fboEyeA = s.fA; this._eyeB = s.B; this._fboEyeB = s.fB; this._eyeSrc = s.src;
+    return s;
+  }
+  // remember the active parity back onto a slot (call after advancing a selected slot)
+  commitEyeSlot(id) { const s = this._slotEye[id]; if (s) s.src = this._eyeSrc; }
+  // has this slot been primed with an upload since creation? (the app uploads descBase once, then keeps resident)
+  eyeSlotPrimed(id) { const s = this._slotEye[id]; return !!(s && s.primed); }
+  markEyeSlotPrimed(id) { const s = this._slotEye[id]; if (s) s.primed = true; }
+  dropEyeSlot(id) { const s = this._slotEye[id]; if (!s) return; const gl = this._gl;
+    gl.deleteTexture(s.A); gl.deleteTexture(s.B); gl.deleteFramebuffer(s.fA); gl.deleteFramebuffer(s.fB); delete this._slotEye[id]; }
+
   // ── DESCRIPTOR PROJECTION (the ℂ* register's VIEW tier — medium-u1 𝔸-slots) ──────────────────────
   // setDescBase uploads a recorded complex envelope ONCE (per recall); renderDescField then evaluates the
   // linOp primitive content·e^{i(φ + k·(x−c))}, sampled at x−off (torus bilinear), as FINAL PIXEL ARITHMETIC
@@ -1588,6 +1619,51 @@ export class IFSGpu {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src2);
     gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
     this._scE();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // applyEyeScale(s) — ψ ← s·ψ, a plain LINEAR scalar multiply (no reduce, no readback). Used by the linear
+  // SHARP TRAP: a fixed linear damping s=(1−leak) that balances the pin's injection at a sharp fixed point.
+  applyEyeScale(s) {
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyeScale;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    this._scB();
+    gl.useProgram(this._progEyeScale);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.s, s);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._scE();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // applyEyeEnergyCapNS(targetE) — the NO-SYNC cap: identical physics to applyEyeEnergyCap (reduce → full
+  // normalization √(target/E), both directions) with the scale pass SAMPLING the 1×1 reduce texture instead of
+  // reading it back — zero pipeline stalls. The turbo executor's cap (profiled: per-step readPixels was 57% of
+  // the frame). The sync version stays for callers that want the E value CPU-side.
+  applyEyeEnergyCapNS(targetE) {
+    const gl = this._gl, G = this._G;
+    this.opCycleInit();
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const ur = this._u.energyRows;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progEnergyRows); gl.uniform1i(ur.a, 0); gl.uniform1i(ur.G, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._opColFinish('A');
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyeCapScale;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    this._scB();
+    gl.useProgram(this._progEyeCapScale);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.e, 1); gl.uniform1f(u.target, targetE);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._opSclA);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._scE();
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
@@ -3659,6 +3735,19 @@ void main() {
 }`;
 
 // EYE SCALE — ψ *= s, a uniform real scale (the energy-cap, given the precomputed factor s=sqrt(E0/E)). Pairs with the GPU energy sum (opDot machinery).
+// the NO-SYNC energy-cap scale: reads the 1×1 reduce result AS A TEXTURE and computes s = √(target/E)
+// in-shader — no readPixels, no pipeline stall (the profiled 57%-of-frame readback under turbo). Semantics
+// identical to the sync path: full normalization, both directions.
+const GLSL_EYE_CAP_SCALE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_e;
+uniform float u_target;
+out vec4 fragColor;
+void main() { float E = texelFetch(u_e, ivec2(0,0), 0).x;
+  float s = (E > 1e-9 && u_target > 0.0) ? sqrt(u_target / E) : 1.0;
+  ivec2 c = ivec2(gl_FragCoord.xy); fragColor = vec4(texelFetch(u_psi, c, 0).xy * s, 0.0, 1.0); }`;
+
 const GLSL_EYE_SCALE = /* glsl */`#version 300 es
 precision highp float;
 uniform sampler2D u_psi;

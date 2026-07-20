@@ -879,10 +879,12 @@ export function leapfrogStepX(field, radii, weights, offs, dt, G = Math.round(Ma
 
 // regionStepX(field, radii, weights, offs, dt, G, reg, {out}) — ONE engine step computed ONLY inside the region
 // reg = {x0,y0,x1,y1} (torus box), reading boundary data from the field's own outside and writing NOTHING there.
-// The Strang cascade needs shrinking margins (S1 over R+2·reach, S2 over R+reach, S3 over R), so values INSIDE R
-// are BIT-IDENTICAL to the whole-torus step for one step from the same field (the light-cone law as an
-// evaluation schedule; same _kernTerms order as leapfrogStepX/coverStep — the cocycle discipline). This is the
-// U1 shard executor: cost ∝ |R|, outside = the peer's declared boundary (frozen/witness tier). Scratch pooled.
+// The Strang cascade uses shrinking margins (S1 over R+2·reach, S2 over R+reach, S3 over R): with a CORRECT
+// outside (the field's own), values inside R match the whole-torus step for ONE step. ⚠ HONEST BOUND for the
+// ITERATED shard (test-pinned): each of the 3 substeps propagates by the stencil reach, so a FROZEN/declared
+// boundary corrupts ~3·reach INWARD PER STEP — after N steps only the interior beyond N·(3·reach) stays
+// bit-exact vs a true whole-torus run; the seam DIVERGES (a real declared-boundary approximation, not a
+// whole-region exactness claim). same _kernTerms order (the cocycle discipline). cost ∝ |R|; scratch pooled.
 const _rsxPool = new Map();
 export function regionStepX(field, radii, weights, offs, dt, G, reg, { out = null } = {}) {
   const { terms, reach } = _kernTerms(radii, weights, offs), N = G * G;
@@ -906,6 +908,36 @@ export function regionStepX(field, radii, weights, offs, dt, G, reg, { out = nul
     const gx = ((ex % G) + G) % G, gy = ((ey % G) + G) % G, j = gy * G + gx;
     o[j * 2] = R2[j]; o[j * 2 + 1] = I1[j]; }
   return o;
+}
+
+// ── MULTISCALE SHARD (§9.1): the IFS kernel is a MULTIRESOLUTION decomposition — the world builds it in
+//    scale TIERS (cachedRadiiByTier). THE LOAD-BEARING THEOREM (test-pinned, exact to f64): the operator's
+//    SYMBOL is LINEAR in the ring set, so L̂_merged = Σ_d L̂_tier − (nTiers−1)·lap9 (each tier carries its own
+//    lap9). Hence the LINEAR propagation decomposes by tier — this is the presheaf's global section in the
+//    SCALE direction (an EXACT gluing, not a measured-small defect). Nonlinearity (SPM/cap) does NOT decompose;
+//    it is applied once on the full field. ⚠ THE DOWNSAMPLING OPTIMIZATION WAS REFUTED BY TEST (doc §9.1): a
+//    single ring of radius r has symbol cos(k·r), BROADBAND for large r (an r=16 ring is significant to |k|>π),
+//    so coarse tiers are NOT band-separated and cannot be stepped on coarse grids (~90–100% error). Radius ≠
+//    frequency for rings; gate A's low-pass is the AGGREGATE transport coefficient, not individual coarse rings.
+//    So the exact scale-gluing is a real STRUCTURAL result but yields NO compute win via multigrid — kept as the
+//    proven decomposition (tierSymbolSum/tierLambdaGrid); the multigrid compute-shard route is CLOSED.
+export function tierSymbolSum(radiiByTier, weightsByTier, offsByTier, kx, ky) {
+  // Σ_d λ_tier(k) − (nTiers−1)·lap9(k) — the merged symbol reconstructed from the tiers (the exact scale-gluing).
+  const nT = radiiByTier.length; let re = 0, im = 0;
+  for (let d = 0; d < nT; d++) { const s = kernelSymbol(radiiByTier[d], weightsByTier[d], offsByTier[d], kx, ky); re += s.re; im += s.im; }
+  const lap = kernelSymbol([], [], [], kx, ky); re -= (nT - 1) * lap.re; im -= (nT - 1) * lap.im;
+  return { re, im };
+}
+// tierPropagate(field, radiiByTier, weightsByTier, offsByTier, {T,dt,G,lam}) — propagate the LINEAR operator by
+// the tier decomposition: build the merged λ-grid AS the tier-sum (exact) and run the standard spectral step.
+// This is the reference form (still one FFT); the per-tier DOWNSAMPLED steppers optimize it. Reconstructs the
+// whole linear step to the f64 floor when the tiers partition the merged kernel's rings.
+export function tierLambdaGrid(radiiByTier, weightsByTier, offsByTier, G) {
+  const N = G * G, re = new Float64Array(N), im = new Float64Array(N);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+    const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
+    const s = tierSymbolSum(radiiByTier, weightsByTier, offsByTier, kx, ky); re[j] = s.re; im[j] = s.im; }
+  return { re, im };
 }
 
 // coverStep(field, radii, weights, offs, dt, G, P) — the SAME step via an explicit P×P cover: each patch is
@@ -1019,7 +1051,7 @@ export function secondMoment(field, G = Math.round(Math.sqrt(field.length / 2)))
 // `spec` option: { w (|ψ̂|² per mode, FFT order), P, sp } — the FIELD-side content, precomputed. With it the call
 // is FFT-FREE: a kernel RE-KEY changes only the stencil, so a register holding the spectrum re-keys V̈ by a pure
 // stencil re-sum (the sl(2)-tier hot path — the envelope's spectrum is compile-time register content).
-export function virialRateX(field, radii, weights, offs, G = Math.round(Math.sqrt((field ? field.length : 0) / 2)) || 0, { gamma = 0, isat = Infinity, Dq = 0, spec = null } = {}) {
+export function virialRateX(field, radii, weights, offs, G = Math.round(Math.sqrt((field ? field.length : 0) / 2)) || 0, { gamma = 0, isat = Infinity, Dq = 0, spec = null, lam = null } = {}) {
   if (spec) G = G || Math.round(Math.sqrt(spec.w.length));
   const N = G * G;
   let wSpec;
@@ -1028,18 +1060,32 @@ export function virialRateX(field, radii, weights, offs, G = Math.round(Math.sqr
     for (let j = 0; j < N; j++) { pr[j] = field[j * 2]; pi[j] = field[j * 2 + 1]; }
     fft2d(pr, pi, G, false);
     wSpec = new Float64Array(N); for (let j = 0; j < N; j++) wSpec[j] = pr[j] * pr[j] + pi[j] * pi[j]; }
+  let sw = 0, svx = 0, svy = 0, sv2 = 0;
+  if (lam) {
+    // FD-on-λ v_g (the TELEMETRY path): centered difference on the cached λ-grid — O(N), no per-term trig.
+    // Bias ≈1.7% at G=64 vs the analytic sum (measured, gate F) — fine for live tiers; instruments that need
+    // the exact curvature pass the stencil instead. (The analytic sum costs ~terms·N sin's — 120 ms/call on
+    // the live fractal ring's ~190 terms, profiled at 31% of the frame when run per bar.)
+    const dk = 2 * Math.PI / G;
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
+      const w = wSpec[j]; if (!w) continue;
+      const xp = y * G + ((x + 1) % G), xm = y * G + ((x + G - 1) % G);
+      const yp = ((y + 1) % G) * G + x, ym = ((y + G - 1) % G) * G + x;
+      const vx = -0.5 * (lam.re[xp] - lam.re[xm]) / (2 * dk), vy = -0.5 * (lam.re[yp] - lam.re[ym]) / (2 * dk);
+      sw += w; svx += w * vx; svy += w * vy; sv2 += w * (vx * vx + vy * vy); }
+  } else {
   // the operator's stencil (verbatim the kernelLambdaGrid terms: lap9 + rings) as a term list for the analytic ∇λ
   const terms = [[1, 0, 4 / 6], [-1, 0, 4 / 6], [0, 1, 4 / 6], [0, -1, 4 / 6], [1, 1, 1 / 6], [-1, -1, 1 / 6], [1, -1, 1 / 6], [-1, 1, 1 / 6]];
   for (let d = 0; d < (radii?.length || 0); d++) { const o = offs?.[d] || []; const n = o.length >> 1; if (!n) continue;
     const nu = 4 * (weights?.[d] ?? 0) / n;
     for (let i = 0; i < n; i++) terms.push([o[i * 2], o[i * 2 + 1], nu]); }   // center terms carry δ=0 → zero ∇, omitted
-  let sw = 0, svx = 0, svy = 0, sv2 = 0;
   for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
     const w = wSpec[j]; if (!w) continue;
     const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
     let vx = 0, vy = 0;
     for (let t = 0; t < terms.length; t++) { const s = terms[t][2] * Math.sin(kx * terms[t][0] + ky * terms[t][1]); vx += 0.5 * terms[t][0] * s; vy += 0.5 * terms[t][1] * s; }
     sw += w; svx += w * vx; svy += w * vy; sv2 += w * (vx * vx + vy * vy); }
+  }
   let P;
   if (spec) P = spec.P;
   else { P = 0; for (let j = 0; j < N; j++) P += field[j * 2] ** 2 + field[j * 2 + 1] ** 2; }
