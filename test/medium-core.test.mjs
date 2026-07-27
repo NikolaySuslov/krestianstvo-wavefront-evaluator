@@ -2,7 +2,7 @@
 // Run: node test/medium-core.test.mjs. The bank must be a faithful re-housing of medium.js's
 // descriptor store: stable ops reference, identity reset, lossless snapshot round-trip, exact
 // legacy-key mapping, and sanitization that degrades to identity components (never NaN).
-import { secondMomentTorus, virialSpec, regionStepX, leapfrogStepX, coverStep, capReduce, coverResidual, spectralShift, crossCorrScan, makeObserverBank, normalizeVirtEvent, applySettingsVerb, applyVirtVerb, makeStepClock, makeCouplingStore, muxClocks, makeRippleClock, makeIFSClock, makeSelfHost, makeStampedInput, hashField, hashNums, opNums, ampCorr, phaseCorr, syncClockRate, kernelSymbol, kernelABCD, packetD, qSpmRate, qStep, qFixedPoint, fft2d, kernelPropagateSpectral, kernelLambdaGrid, secondMoment, virialRateX, slCasimir } from '../public/medium-core.js';
+import { secondMomentTorus, virialSpec, regionStepX, leapfrogStepX, coverStep, capReduce, coverResidual, spectralShift, crossCorrScan, makeObserverBank, normalizeVirtEvent, applySettingsVerb, applyVirtVerb, makeStepClock, makeCouplingStore, kuramotoStep, makeRegisterReadout, regHash, muxClocks, makeRippleClock, makeIFSClock, makeSelfHost, makeStampedInput, hashField, hashNums, opNums, ampCorr, phaseCorr, syncClockRate, kernelSymbol, kernelABCD, packetD, qSpmRate, qStep, qFixedPoint, fft2d, kernelPropagateSpectral, kernelLambdaGrid, secondMoment, virialRateX, slCasimir, tierSymbolSum, tierLambdaGrid, makeRegisterEngine } from '../public/medium-core.js';
 import { lensU1 as L } from '../public/soliton-algebra.js';
 
 let ok = true; const chk = (n, c) => { if (!c) { ok = false; console.log(`FAIL ${n}`); } else console.log(`  ok  ${n}`); };
@@ -143,6 +143,98 @@ const near = (a, b, t = 1e-12) => Math.abs(a - b) < t;
   chk('coupling: frozen source is immune to later field mutation', K.src[1][0] === 3);
   chk('coupling: zeroing the last edge collapses the matrix to null (+ cursor invalidated)', (K.setEdge(0, 1, 0), K.edge === null && K.capPh === -1));
   chk('coupling: reset clears everything', (K.setEdge(0, 2, 0.1), K.capture([new Float64Array(2)], 1, 0), K.reset(), K.edge === null && K.capPh === -1 && K.src.every((s) => s === null)));
+}
+
+// ── the KURAMOTO / XY PHASE LAW (kuramotoStep) — extracted from medium-u1's register XY machine ──
+{
+  // no edge → zero increments, any=false (the no-op guarantee)
+  const r0 = kuramotoStep([0, 1, 2, 3], null);
+  chk('kuramoto: no edge → all dθ=0, any=false', r0.dth.every((d) => d === 0) && r0.any === false);
+
+  // two aligned-coupled slots: κ>0 pulls them TOGETHER (dθ_i has the sign that reduces |θ_j−θ_i|)
+  const edge2 = [[0, 0.5, 0, 0], [0.5, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+  const r1 = kuramotoStep([0, 1, 0, 0], edge2);
+  chk('kuramoto: κ>0 aligns — slot 0 nudged toward slot 1 (+) and slot 1 toward slot 0 (−)', r1.dth[0] > 0 && r1.dth[1] < 0 && near(r1.dth[0], 0.5 * Math.sin(1), 1e-12) && r1.any);
+  // anti-align: κ<0 pushes them APART
+  const r1n = kuramotoStep([0, 0.2, 0, 0], [[0, -0.5, 0, 0], [-0.5, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]);
+  chk('kuramoto: κ<0 anti-aligns — the increment has the opposite sign', r1n.dth[0] < 0 && r1n.dth[1] > 0);
+
+  // gain multiplier (medium-u1's turbo κ×3 = the Q-rate Euler equivalent)
+  const rg = kuramotoStep([0, 1, 0, 0], edge2, { gain: 3 });
+  chk('kuramoto: gain scales every increment (turbo κ×3)', near(rg.dth[0], 3 * 0.5 * Math.sin(1), 1e-12));
+
+  // self-coupling on the diagonal is ignored (a slot never couples to itself)
+  const rs = kuramotoStep([0.5, 0, 0, 0], [[9, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]);
+  chk('kuramoto: diagonal (self) κ ignored → dθ=0', rs.dth[0] === 0 && rs.any === false);
+
+  // born-gating: index 0 is ALWAYS live; an unborn slot participates as NEITHER source nor sink
+  const edgeB = [[0, 0.5, 0.5, 0], [0.5, 0, 0, 0], [0.5, 0, 0, 0], [0, 0, 0, 0]];
+  const rb = kuramotoStep([0, 1, 1, 0], edgeB, { born: [true, true, false, false] });   // slot 2 unborn
+  chk('kuramoto: unborn slot is skipped as SINK (its dθ stays 0)', rb.dth[2] === 0);
+  chk('kuramoto: unborn slot is skipped as SOURCE (slot 0 only feels slot 1, not 2)', near(rb.dth[0], 0.5 * Math.sin(1), 1e-12));
+  chk('kuramoto: index 0 is always live even if born[0] is false', kuramotoStep([0, 1, 0, 0], edge2, { born: [false, true, false, false] }).dth[0] !== 0);
+
+  // THE K₃ FRUSTRATION (the [KUR] headline): three all-negative edges → the ±2π/3 splay is a FIXED POINT (dθ≈0)
+  const kf = -0.2, edgeK3 = [[0, kf, kf, 0], [kf, 0, kf, 0], [kf, kf, 0, 0], [0, 0, 0, 0]];
+  const splay = [0, 2 * Math.PI / 3, 4 * Math.PI / 3, 0];
+  const rk3 = kuramotoStep(splay, edgeK3, { born: [true, true, true, false] });
+  chk('kuramoto: the K₃ ±2π/3 splay is a FIXED POINT (frustrated equilibrium — dθ≈0)', rk3.dth.slice(0, 3).every((d) => Math.abs(d) < 1e-12));
+}
+
+// ── the ATTRACTOR FIELD-MIXING gate (coupledAtt + ctx.fieldMix) — the edge's SECOND coupling layer, toggleable ──
+{
+  const G = 8, N = G * G;
+  const mk = (v) => { const f = new Float64Array(N * 2); for (let i = 0; i < N * 2; i += 2) f[i] = v; return f; };
+  const edge = [[0, 0.5, 0, 0], [0.5, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];   // slot 0 ⇄ slot 1, κ=0.5
+  const slots = [{ desc: true, descBase: mk(2), descLive: true }, { desc: true, descBase: mk(3), descLive: true }, { desc: false }, { desc: false }];
+  let fieldMix = true;
+  const reg = makeRegisterEngine({ GRID: G, DT: 0.12, N_CELLS: N, gamma: 20, isat: 1,
+    ringCache: () => null, kernelVer: () => 0, lensOp: () => ({}), slots: () => slots, edge: () => edge,
+    linearMode: () => 0, linLeak: () => 0, shardRing: () => null, wSlot: () => slots[0], fieldMix: () => fieldMix });
+  const base = mk(1);
+  fieldMix = true;  const on = reg.coupledAtt(0, base, null);   // 1 + 0.5·3 = 2.5 (slot 0's att bleeds toward slot 1's field)
+  chk('coupledAtt: fieldMix ON → the att mixes in the coupled neighbor (1 + κ·field = 2.5)', near(on[0], 2.5, 1e-12));
+  fieldMix = false; const off = reg.coupledAtt(0, base, null);   // bare att — the edge still couples PHASE (kuramoto), just not the shape
+  chk('coupledAtt: fieldMix OFF → bare att returned even WITH a live edge (edge couples phase only, shapes pure)', off === base && off[0] === 1);
+  // no edge → bare att regardless of the gate (the no-op guarantee is unchanged)
+  const noEdge = makeRegisterEngine({ GRID: G, DT: 0.12, N_CELLS: N, gamma: 20, isat: 1,
+    ringCache: () => null, kernelVer: () => 0, lensOp: () => ({}), slots: () => slots, edge: () => null,
+    linearMode: () => 0, linLeak: () => 0, shardRing: () => null, wSlot: () => slots[0], fieldMix: () => true });
+  chk('coupledAtt: no edge → bare att (unchanged no-op, gate irrelevant)', noEdge.coupledAtt(0, base, null) === base);
+}
+
+// ── the REGISTER READOUT (makeRegisterReadout) — the shared regPhase telemetry shape ──
+{
+  const fakeTau = { beatsOf: (nm) => ({ W: 7, V: 3 }[nm] ?? 0), tauOf: (nm) => ({ W: 7.25, V: 3.1 }[nm] ?? 0), hash: () => 'deadbeef' };
+  const regs = [{ ...L.id(), phase: 0.5, omega: 0.1, beta: 1.2 }, { ...L.id(), phase: 1.3 }, L.id(), L.id()];
+  const born = [true, true, false, false];
+  const rout = makeRegisterReadout({ tauK: fakeTau, names: ['W', 'V', 'P1', 'P2'], op: (i) => regs[i], born: (i) => born[i], step: () => 42 });
+  const p = rout.phase({ wH: 'abc12345' });
+  chk('readout: FULL register introspection — step/kH + universal per-slot ∠/ω/β/beats/τ + born + the app extra',
+    p.step === 42 && p.kH === 'deadbeef' && p.wH === 'abc12345'
+    && p.angle[0] === 0.5 && p.omega[0] === 0.1 && p.beta[0] === 1.2 && p.beats[0] === 7 && p.tau[0] === 7.25
+    && JSON.stringify(p.born) === JSON.stringify(['W', 'V']));
+  chk('readout: slots() is the rich per-slot register table', (() => { const s = rout.slots(); return s.length === 4 && s[0].name === 'W' && s[0].angle === 0.5 && s[0].omega === 0.1 && s[0].beta === 1.2 && s[0].born === true && s[2].born === false; })());
+  chk('readout: no op/born getters → angle 0, all born (a phase-only app with no register still works)', (() => { const r = makeRegisterReadout({ tauK: null, names: ['W'], step: 1 }).phase(); return r.angle[0] === 0 && r.beta[0] === 1 && r.beats[0] === 0 && r.kH === null && JSON.stringify(r.born) === JSON.stringify(['W']); })());
+}
+
+// ── the REGISTER DETERMINISM HASH (regHash) — BYTE-IDENTICAL to medium-u1's inline _regH (the contract shape) ──
+{
+  const mkSlot = (name, born, go, gx, gy, desc, descBar) => ({ name, born, desc, descBar, leash: { state: { go, gx, gy } } });
+  const ops = [{ ...L.id(), phase: 0.3, beta: 1.2 }, { ...L.id(), phase: 1.1 }, L.id(), L.id()];
+  const slots = [mkSlot('W', true, true, 3.14, 2.7, false, 0), mkSlot('V', true, false, 0, 0, true, 5), mkSlot('P1', false, false, 0, 0, false, 0), mkSlot('P2', false, false, 0, 0, false, 0)];
+  const edge = [[0, -0.2, 0, 0], [-0.2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+  const plates = [{ dop: { ...L.id(), phase: 0.5 }, bw: 3 }, { dop: { ...L.id(), phase: 1.9 }, bw: 7 }];
+  const beatsOf = (nm) => ({ W: 12, V: 4 }[nm]);   // undefined for unborn (the real kwe-tau behavior)
+  // reproduce the OLD inline _regH sequence VERBATIM (the contract these bytes must never silently change)
+  const old = hashNums([1234, 1, ...ops.flatMap(opNums),
+    ...slots.flatMap((s) => [s.born ? 1 : 0, beatsOf(s.name) ?? 0, s.leash.state.go ? 1 : 0, Math.round(s.leash.state.gx * 100), Math.round(s.leash.state.gy * 100), s.desc ? 1 : 0, s.descBar | 0]),
+    ...edge.flat(), plates.length, ...plates.flatMap((pl) => [...opNums(pl.dop), pl.bw | 0])]);
+  chk('regHash: BYTE-IDENTICAL to the inline _regH sequence (the contract shape, load-bearing order)', regHash({ step: 1234, rate: 1, ops, slots, edge, plates, beatsOf }) === old);
+  // null edge → the fixed 16-zero slot; empty plates → just the length
+  const oldNull = hashNums([1234, 1, ...ops.flatMap(opNums), ...slots.flatMap((s) => [s.born ? 1 : 0, beatsOf(s.name) ?? 0, s.leash.state.go ? 1 : 0, Math.round(s.leash.state.gx * 100), Math.round(s.leash.state.gy * 100), s.desc ? 1 : 0, s.descBar | 0]), ...new Array(16).fill(0), 0]);
+  chk('regHash: null edge + empty plates matches the inline fallback exactly', regHash({ step: 1234, rate: 1, ops, slots, edge: null, plates: [], beatsOf }) === oldNull);
+  chk('regHash: a 1-ULP descriptor change FORKS the hash (the contract is sensitive)', regHash({ step: 1234, rate: 1, ops: [{ ...ops[0], phase: 0.3 + 1e-5 }, ops[1], ops[2], ops[3]], slots, edge, plates, beatsOf }) !== old);
 }
 
 
@@ -595,6 +687,89 @@ const near = (a, b, t = 1e-12) => Math.abs(a - b) < t;
     if (inR) { if (regS[j] !== wholeS[j] || regS[j + 1] !== wholeS[j + 1]) inDiff++; }
     else if (regS[j] !== regF[j] || regS[j + 1] !== regF[j + 1]) outDiff++; }
   chk('shard executor: regionStepX ≡ whole step INSIDE R bit-for-bit, outside untouched (cost ∝ |R|)', inDiff === 0 && outDiff === 0);
+  // ITERATED light-cone (the HONEST bound for a live shard): freeze the outside each step; after N steps the
+  // frozen boundary's influence has crept N·reach inward, so ONLY the interior beyond N·reach from the region
+  // edge stays bit-exact vs a true whole-torus run. This is what a two-browser shard actually guarantees — NOT
+  // whole-region exactness (that would be an overclaim). The seam DIVERGES over steps; the deep interior holds.
+  // NOTE the true per-step cone: a full Strang step = 3 substeps, each propagating by the STENCIL reach
+  // (ring max offset + lap9), so one step's cone is ~3·(ringReach) ≈ 9 cells here, not 1·reach. The honest
+  // margin is N·(3·ringReach). (This corrected a v1 overclaim — the single-step test passed only because it
+  // used the field's OWN correct outside; a FROZEN boundary reveals the true, larger cone.)
+  { const reach = 9, N2 = 3, box = { x0: 2, y0: 2, x1: 62, y1: 62 };   // 60×60 (max depth 30 > N·reach 27 → a genuine deep-exact core AND a diverging rim)
+    // a field with signal EVERYWHERE (incl. near the region edge) so the seam divergence is measurable — a
+    // centered Gaussian is ~0 at the edges, hiding the (real) divergence. Deterministic pseudo-random.
+    let rs = 77; const rr = () => (rs = (rs * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const rndF = new Float64Array(2 * G * G); for (let j = 0; j < rndF.length; j++) rndF[j] = (rr() - 0.5) * 0.2;
+    let wf = Float64Array.from(rndF), sf = Float64Array.from(rndF); const regF2 = rndF;
+    for (let st = 0; st < N2; st++) { wf = leapfrogStepX(wf, radii, weights, offs, 0.11, G);
+      const stepped = regionStepX(sf, radii, weights, offs, 0.11, G, box);
+      // re-freeze the outside to the ORIGINAL boundary each step (the declared-boundary shard discipline)
+      for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) if (x < box.x0 || x >= box.x1 || y < box.y0 || y >= box.y1) { const j = (y * G + x) * 2; stepped[j] = regF2[j]; stepped[j + 1] = regF2[j + 1]; }
+      sf = stepped; }
+    const margin = N2 * reach; let deepMax = 0, seamMax = 0;
+    for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) { const j = (y * G + x) * 2;
+      const depth = Math.min(x - box.x0, box.x1 - 1 - x, y - box.y0, box.y1 - 1 - y);
+      const d = Math.max(Math.abs(sf[j] - wf[j]), Math.abs(sf[j + 1] - wf[j + 1]));
+      if (depth >= margin) deepMax = Math.max(deepMax, d); else seamMax = Math.max(seamMax, d); }
+    chk('shard iterated light-cone: interior beyond N·reach BIT-EXACT vs whole-torus after N frozen-boundary steps (the honest shard guarantee)', deepMax === 0);
+    chk('shard iterated light-cone: the seam band DID diverge (frozen boundary ≠ true field — the shard is a real approximation there, not overclaimed)', seamMax > 1e-6); }
+  // the FD-on-λ telemetry path: within the declared ~2% of the analytic sum (the live tier's 120ms→O(N) fix)
+  const vddFD = virialRateX(regF, radii, weights, offs, G, { lam: kernelLambdaGrid(radii, weights, offs, G) });
+  const vddAn = virialRateX(regF, radii, weights, offs, G, {});
+  chk('virialRateX FD-on-λ ≡ analytic within 2% (telemetry-grade v_g — bias declared, instruments keep exact)', Math.abs(vddFD / vddAn - 1) < 0.02);
+  // ── MULTISCALE SHARD, the load-bearing theorem (§9.1): the IFS tiers are a MULTIRESOLUTION decomposition of
+  // the LINEAR operator — the symbol is linear in the ring set, so Σ_d λ_tier − (nTiers−1)·lap9 = λ_merged
+  // EXACTLY, hence tier-decomposed linear propagation reconstructs the whole linear step (the presheaf's global
+  // section in the SCALE direction — an exact gluing). Nonlinearity does NOT decompose (applied once on the
+  // full field); that boundary is honest and stated. Partition the merged kernel's rings into tiers by radius.
+  { const mkRing = (r) => { const n = Math.max(8, Math.round(2 * Math.PI * r)), o = []; for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; o.push(Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a))); } return o; };
+    const R1 = mkRing(3), R2 = mkRing(8), R3 = mkRing(15);
+    const mRad = [3, 8, 15], mW = [0.3, 0.2, 0.15], mO = [R1, R2, R3];
+    const rBT = [[3], [8], [15]], wBT = [[0.3], [0.2], [0.15]], oBT = [[R1], [R2], [R3]];
+    // symbol reconstruction at several k
+    let symMax = 0; for (const kx of [0.1, 0.7, 1.5, 2.5]) for (const ky of [0.3, 1.1]) {
+      const sm = kernelSymbol(mRad, mW, mO, kx, ky), ts = tierSymbolSum(rBT, wBT, oBT, kx, ky);
+      symMax = Math.max(symMax, Math.hypot(ts.re - sm.re, ts.im - sm.im) / (Math.hypot(sm.re, sm.im) || 1)); }
+    chk('multiscale: Σ tier-symbols − (n−1)·lap9 ≡ merged symbol to the f64 floor (the exact scale-gluing — the presheaf global section)', symMax < 1e-12);
+    // the tier λ-grid ≡ the merged λ-grid → tier-decomposed spectral propagation ≡ the whole linear step
+    const G3 = 64; const lamM = kernelLambdaGrid(mRad, mW, mO, G3), lamT = tierLambdaGrid(rBT, wBT, oBT, G3);
+    let gridMax = 0; for (let j = 0; j < lamM.re.length; j++) gridMax = Math.max(gridMax, Math.abs(lamM.re[j] - lamT.re[j]), Math.abs(lamM.im[j] - lamT.im[j]));
+    chk('multiscale: tier λ-grid ≡ merged λ-grid (1e-10) — the linear step reconstructs from the tiers, whole-field FFT or not', gridMax < 1e-10);
+    const pf = new Float64Array(2 * G3 * G3); let ps = 5; const pr = () => (ps = (ps * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let j = 0; j < pf.length; j++) pf[j] = (pr() - 0.5) * 0.2;
+    const whole = kernelPropagateSpectral(pf, mRad, mW, mO, { T: 5, dt: 0.1, G: G3 }).field;
+    const viaT = kernelPropagateSpectral(pf, null, null, null, { T: 5, dt: 0.1, G: G3, lam: lamT }).field;
+    let pMax = 0; for (let j = 0; j < whole.length; j++) pMax = Math.max(pMax, Math.abs(whole[j] - viaT[j]));
+    chk('multiscale: T=5 tier-propagated linear step ≡ whole spectral step (1e-9 — the reconstruction holds under iteration)', pMax < 1e-9);
+    // ── TEMPORAL LOD (the KWE-native win — §9.1): the tiers are PROPER-TIME worldlines (T_d = T·(d+1)/N), so a
+    // coarse tier's λ can be applied at a LOWER RATE (every `period` steps, scaled ×period to preserve the
+    // average) — a refusable approximation with a MEASURED defect, NOT a fork. Fine tier every step, coarse
+    // tiers slower → fewer kernel-applications. This is the one real optimization the fractal CLOCK offers;
+    // it is invisible to the static-convolution view (tiers are broadband) and visible only as proper time.
+    const lap9 = kernelLambdaGrid([], [], [], G3);
+    const ringT = rBT.map((_, d) => { const l = kernelLambdaGrid(rBT[d], wBT[d], oBT[d], G3);
+      return { re: l.re.map((v, j) => v - lap9.re[j]), im: l.im.map((v, j) => v - lap9.im[j]) }; });
+    const T2 = 12, periods = [1, 2, 3];
+    let psi = Float64Array.from(pf);
+    for (let t = 0; t < T2; t++) { const lre = Float64Array.from(lap9.re), lim = Float64Array.from(lap9.im);
+      for (let d = 0; d < 3; d++) if (t % periods[d] === 0) for (let j = 0; j < G3 * G3; j++) { lre[j] += ringT[d].re[j] * periods[d]; lim[j] += ringT[d].im[j] * periods[d]; }
+      psi = kernelPropagateSpectral(psi, null, null, null, { T: 1, dt: 0.1, G: G3, lam: { re: lre, im: lim } }).field; }
+    const wholeT2 = kernelPropagateSpectral(pf, mRad, mW, mO, { T: T2, dt: 0.1, G: G3 }).field;
+    let lodMax = 0, ampT = 0; for (let j = 0; j < wholeT2.length; j++) { lodMax = Math.max(lodMax, Math.abs(wholeT2[j] - psi[j])); ampT = Math.max(ampT, Math.abs(wholeT2[j])); }
+    chk('multiscale temporal-LOD: coarse tiers at 1/2, 1/3 rate → <1% error at ~61% of the kernel-applications (the KWE proper-time win, refusable+measured)', lodMax / ampT < 0.01);
+    // ── SCALE-SELECTIVE HOLOGRAPHY (the theorem cashed as a CAPABILITY): a radius-BANDED λ propagates only that
+    // scale's structure — recall the coarse skeleton or the fine detail of a banked moment, EXACT by the split.
+    const mid2 = Math.sqrt(Math.max(...mRad) * Math.min(...mRad));
+    const fB = { r: [], w: [], o: [] }, cB = { r: [], w: [], o: [] };
+    mRad.forEach((r, d) => { const b = r < mid2 ? fB : cB; b.r.push(r); b.w.push(mW[d]); b.o.push(mO[d]); });
+    const lamF = kernelLambdaGrid(fB.r, fB.w, fB.o, G3), lamC = kernelLambdaGrid(cB.r, cB.w, cB.o, G3), lap = kernelLambdaGrid([], [], [], G3);
+    let splitMax = 0; for (let j = 0; j < G3 * G3; j++) splitMax = Math.max(splitMax, Math.abs(lamF.re[j] + lamC.re[j] - lap.re[j] - lamM.re[j]), Math.abs(lamF.im[j] + lamC.im[j] - lap.im[j] - lamM.im[j]));
+    chk('scale-selective: fine-band λ + coarse-band λ − lap9 ≡ merged λ (1e-10 — coarse/fine recall is an EXACT split, not an approximation)', splitMax < 1e-10);
+    const plate = kernelPropagateSpectral(pf, mRad, mW, mO, { T: 16, dt: 0.12, G: G3 }).field;
+    const lAll = kernelPropagateSpectral(plate, null, null, null, { T: 16, dt: -0.12, G: G3, lam: lamM }).field;
+    const lC = kernelPropagateSpectral(plate, null, null, null, { T: 16, dt: -0.12, G: G3, lam: lamC }).field;
+    let dCA = 0, eA = 0; for (let j = 0; j < lAll.length; j++) { dCA += (lC[j] - lAll[j]) ** 2; eA += lAll[j] ** 2; }
+    chk('scale-selective: coarse-band recall lift DIFFERS from the full lift (a distinct scale reconstruction, not a copy)', Math.sqrt(dCA / eA) > 0.2); }
 }
 
 console.log(ok ? '\nALL PASS (medium-core observer bank + beat providers + stamped input + determinism primitives + kernel ABCD slice + gate-C q register + gate-D spectral propagator + gate-F Ermakov–Lewis Casimir)' : '\nFAILURES ABOVE');

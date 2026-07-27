@@ -4,7 +4,7 @@
 // different transport law for V than W"). The slot model unifies them: ONE leashAdvance law, the only
 // per-slot difference is movAtt(gx,gy). This test proves the unification headlessly (the leash is pure).
 // Run: node test/medium-u1-slots.test.mjs.
-import { makeLeash, leashAdvance, leashDue, leashGainPredicted, makeSlot, makeSlotBank, makeSlotMux } from '../public/medium-u1-slots.js';
+import { makeLeash, leashAdvance, leashDue, leashGainPredicted, leashGainEnergy, makeSlot, makeSlotBank, makeSlotMux } from '../public/medium-core.js';
 import { makeObserverBank, makeCouplingStore, muxClocks } from '../public/medium-core.js';
 import { makeSolitonEngine } from '../public/medium-gpu.js';
 
@@ -155,6 +155,15 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     let g = 1; for (let i = 0; i < 60; i++) g = leashGainPredicted(L2.state, 4);   // EMA settles on the 10px lag
     chk('gainPredicted → 0 when the target has run far ahead (matter lagging)', g < 0.01);
     chk('gainPredicted is a pure fn of leash state (no field arg) → replay-safe', leashGainPredicted(makeLeash().state, 4) === leashGainPredicted(makeLeash().state, 4));
+  }
+  // leashGainEnergy — the UNPINNED (ℂ*) TWIN: the FIELD-measured gain observable (energy ratio), the other half of the pair
+  {
+    chk('gainEnergy: g = |ψ|²/e0 ∈ [0,1] — full budget → 1 (matter kept up)', leashGainEnergy(10, 10) === 1);
+    chk('gainEnergy: half the energy budget → g = 0.5 (matter half-drained)', leashGainEnergy(5, 10) === 0.5);
+    chk('gainEnergy: OVER budget clamps to 1 (the sigmoid saturates ≥1 anyway → transport identical)', leashGainEnergy(15, 10) === 1);
+    chk('gainEnergy: e0 ≤ 0 → 1 (no budget to gate against — the guard)', leashGainEnergy(5, 0) === 1 && leashGainEnergy(5, -1) === 1);
+    // the PAIR is the "Einstein loop, both ways": pinned (descriptor lag) and unpinned (field energy) — a gate reads ONE
+    chk('the two gain observables are the Einstein-loop PAIR: predicted (leash, pure) + energy (field, ℂ*) — both ∈ [0,1]', leashGainPredicted(makeLeash().state, 4) <= 1 && leashGainEnergy(3, 10) <= 1 && leashGainEnergy(3, 10) === 0.3);
   }
 
   // THE LOOP: a FAR target throttles itself (the gate holds it back); a NEAR target advances freely

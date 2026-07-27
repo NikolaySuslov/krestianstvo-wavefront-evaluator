@@ -234,8 +234,13 @@ export function applySettingsVerb(vq, k, ops, dials) {
   if (vq.mode === 'lensview') { dials.lensView = !dials.lensView;
     console.log(`[LENSVIEW] ${dials.lensView ? 'ON — slot panels render THROUGH each slot\'s own readOp (lensU1.apply — the same operator the meters measure)' : 'OFF — raw gauge view'} atStep=${k}`);
     return true; }
-  if (vq.mode === 'lenstau') { const lw = (typeof vq.amp === 'number') ? vq.amp : 0; for (const o of ops) o.omega = lw;   // the verb is global today — all descriptors move together
-    console.log(`[LENSTAU] ω=${lw.toFixed(3)} rad/beat atStep=${k} — ${lw ? 'each slot\'s pin reference now precesses per ITS OWN slot-beat: regRead Δφ(i,j) → ω·(τ_i−τ_j) (the register as clock comparator)' : 'precession OFF'}`);
+  if (vq.mode === 'lenstau') { const lw = (typeof vq.amp === 'number') ? vq.amp : 0;
+    // PER-SLOT when a src is given (the twin experiment needs DIFFERENT ω per worldline — each ages at its own rate);
+    // GLOBAL (all slots) when src is absent, for back-compat with the old one-knob-moves-all form.
+    if (vq.src === 'W' || vq.src === 'V' || vq.src === 'P1' || vq.src === 'P2') { const si = { W: 0, V: 1, P1: 2, P2: 3 }[vq.src]; if (ops[si]) ops[si].omega = lw;
+      console.log(`[LENSTAU] ${vq.src} ω=${lw.toFixed(3)} rad/beat atStep=${k} — THIS worldline precesses per its OWN slot-beat (per-slot ω → differential aging: regRead Δφ(i,j) → ω_i·τ_i − ω_j·τ_j)`); }
+    else { for (const o of ops) o.omega = lw;   // global: all descriptors move together (no src)
+      console.log(`[LENSTAU] ω=${lw.toFixed(3)} rad/beat atStep=${k} (ALL slots) — ${lw ? 'each slot\'s pin reference precesses per ITS OWN slot-beat' : 'precession OFF'}`); }
     return true; }
   if (vq.mode === 'refamp') { const SNI = { W: 0, V: 1, P1: 2, P2: 3 }, si = SNI[vq.src] ?? 0, mv = (typeof vq.amp === 'number') ? vq.amp : 1;
     ops[si].beta = mv;
@@ -431,6 +436,31 @@ export function makeCouplingStore() {
   return K;
 }
 
+// kuramotoStep(phases, edge, opts) — THE XY / KURAMOTO PHASE LAW as a pure function (extracted from medium-u1's
+// register XY machine). Given N worldline phases and an N×N symmetric coupling matrix κ, return the per-slot phase
+// INCREMENTS dθ_i = gain · Σ_j κ_ij · sin(θ_j − θ_i) — the classic Kuramoto/XY update (κ>0 aligns, κ<0 anti-aligns;
+// a frustrated triangle κ_ij<0 ∀ settles at the ±2π/3 splay, continuously degenerate). The caller adds dθ to its own
+// registers and wraps — this owns ONLY the increment math, so it is medium-agnostic (the phases may be register ∠, or
+// register ∠ + a measured lock offset, or anything the app calls a worldline phase). Pure fn of (phases, edge) → in
+// the determinism contract, byte-identical on peers.
+//   phases  — number[] (θ_i). edge — the κ matrix (null → no coupling; edge[i][j] the pairwise κ, self κ ignored).
+//   opts.gain  — a scalar multiplier on every increment (medium-u1: 3 under turbo = the Q-rate Euler equivalent,
+//                1 otherwise). Default 1.
+//   opts.born  — optional boolean[] (or predicate i→bool): a slot participates (as source AND sink) only if born.
+//                Index 0 is ALWAYS live (the home worldline), matching the app convention. Default: all participate.
+// Returns { dth: number[], any: bool } — dth[i] the increment for slot i (0 where uncoupled/unborn); any = did any
+// edge contribute (the app's "did the machine run this bar" gate, e.g. for logging).
+export function kuramotoStep(phases, edge, { gain = 1, born = null } = {}) {
+  const n = phases.length, dth = new Array(n).fill(0);
+  if (!edge) return { dth, any: false };
+  const live = (i) => i === 0 || (born == null ? true : (typeof born === 'function' ? !!born(i) : !!born[i]));
+  let any = false;
+  for (let i = 0; i < n; i++) { if (!live(i)) continue;
+    for (let j = 0; j < n; j++) { const kk = edge[i] && edge[i][j]; if (!kk || i === j || !live(j)) continue;
+      any = true; dth[i] += gain * kk * Math.sin(phases[j] - phases[i]); } }
+  return { dth, any };
+}
+
 
 // ── THE CHAIN METER (generalized from medium.js's chainRead/chainSee — ONE meter, every app) ─────
 // chainMeter(slots, { G, through }) — slots = [{ name, field, op }] with field = interleaved [re,im]
@@ -483,6 +513,90 @@ export function makeObserverBank(n = 4) {
     if (ops[1]) ops[1].phase = NUM(ae.V, 0); if (ops[2]) ops[2].phase = NUM(ae.P1, 0); if (ops[3]) ops[3].phase = NUM(ae.P2, 0);
     for (let i = 0; i < n; i++) ops[i].beta = Array.isArray(refAmp) ? NUM(refAmp[i], 1) : 1; };
   return { ops, reset, save, restore, restoreLegacy };
+}
+
+// wrap2pi(x) — the register's phase-wrap to [0, 2π). NOTE this is DELIBERATELY DIFFERENT from lensU1.wrap (which is
+// atan2(sin,cos) → (−π, π]): the thin apps' register aging accumulates phase in [0, 2π), and the two ranges are NOT
+// interchangeable — swapping them would fork determinism. This is the exact formula the thin apps (rhythm/observers/
+// ifsclock/selfhost) each defined locally; extracted so there is ONE definition (byte-identical, same arithmetic).
+export const wrap2pi = (x) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+
+// bankAge(bank, i, tauK, name, kp, kk, beat) — the SHARED register-aging idiom the phase-only thin apps repeat: on a
+// slot's OWN beat, stamp the worldline clock (tauK.beat) and PRECESS the register by its ω (the W-convention: the
+// phase absorbs its own precession, prec ≡ 0); otherwise advance the clock without a beat. A pure fn of (shared step,
+// register state, the beat decision the app's OWN clock made) → replay-safe. Returns the beat boolean (for the app's
+// per-beat bookkeeping — audio triggers, beatsOut lists, etc.). The app still OWNS the beat SOURCE (ripple/rhythm/
+// host/IFS): this only unifies the "what to do WITH a beat" register step, never WHY the worldline ticked.
+export function bankAge(ops, i, tauK, name, kp, kk, beat) {
+  if (beat) { tauK.beat(name, kp, kk); ops[i].phase = wrap2pi(ops[i].phase + (ops[i].omega || 0)); }
+  else tauK.advance(name, kp);
+  return beat;
+}
+
+// makeRegisterReadout(ctx) — THE FULL U(1) REGISTER INTROSPECTION, shared by every app's `regPhase()`. A thin app
+// is a U1 demo in thin mode, so it should expose the SAME register readout as the full medium — the field-specific
+// parts simply absent. The UNIVERSAL register state (what EVERY U1 worldline carries regardless of its matter) is:
+//   per slot: { name, angle (∠ = the U(1) charge), omega (ω precession rate), beta (β pin stiffness), beats (τ-beat
+//              count), tau (proper time), born } — read from the app's register (lensU1 descriptors) + τ kernel;
+//   top level: step (shared), kH (the τ-kernel determinism hash).
+// The app adds only its MATTER-SPECIFIC extra (a content hash wH/gH/mH/vH, the full determinism regH, a lock
+// coherence, a transport pos) via phase(extra). So medium-u1's "fuller" regPhase and the thin apps' compact one are
+// now ONE readout at full fidelity — the thin apps stop hiding the register they already have.
+//   ctx.tauK   — the proper-time kernel (beatsOf/tauOf/hash). Nullable (→ beats/tau 0, kH null).
+//   ctx.names  — the worldline names, e.g. ['W','V','P1','P2'].
+//   ctx.op(i)  — a getter → slot i's lens descriptor (the register element with .phase/.omega/.beta). Required for ∠.
+//   ctx.born(i)— a getter → is slot i alive? (fields[i]!=null, or live[i], or slot.born). Default: all born.
+//   ctx.step   — a getter (or value) → the current shared step.
+// Returns { phase(extra = {}), slots() }.
+//   slots() → the full per-slot register table [{ name, angle, omega, beta, beats, tau, born }] (the rich view).
+//   phase(extra) → { step, kH, born:[live names], angle:[∠…], omega:[…], beta:[…], beats:[…], tau:[…], ...extra }
+//                  — the flat regPhase shape, now carrying the universal register fields every U1 app shares.
+// Pure telemetry (a fn of shared state) → NOT in the determinism contract; safe to shape freely.
+export function makeRegisterReadout({ tauK, names, op = null, born = null, step }) {
+  const angleOf = (i) => (op ? +lensU1.wrap(lensU1.angle(op(i))).toFixed(3) : 0);
+  const omegaOf = (i) => (op ? +(op(i).omega || 0).toFixed(4) : 0);
+  const betaOf = (i) => (op ? +(op(i).beta ?? 1).toFixed(3) : 1);
+  const beatsOf = (nm) => (tauK ? (tauK.beatsOf(nm) ?? 0) : 0);
+  const tauOf = (nm) => (tauK ? +tauK.tauOf(nm).toFixed(3) : 0);
+  const isBorn = (i) => (born == null ? true : !!born(i));
+  const slots = () => names.map((nm, i) => ({ name: nm, angle: angleOf(i), omega: omegaOf(i), beta: betaOf(i), beats: beatsOf(nm), tau: tauOf(nm), born: isBorn(i) }));
+  return {
+    slots,
+    phase: (extra = {}) => ({
+      step: (typeof step === 'function' ? step() : step) | 0,
+      kH: tauK ? tauK.hash() : null,
+      born: names.filter((nm, i) => isBorn(i)),
+      angle: names.map((nm, i) => angleOf(i)),
+      omega: names.map((nm, i) => omegaOf(i)),
+      beta: names.map((nm, i) => betaOf(i)),
+      beats: names.map((nm) => beatsOf(nm)),
+      tau: names.map((nm) => tauOf(nm)),
+      ...extra,
+    }),
+  };
+}
+
+// regHash(ctx) — THE U(1) REGISTER DETERMINISM HASH: the whole "what is in the contract" statement as a pure fn.
+// A U1 world is byte-replicated iff every peer's register hashes identically at the same step, so this fixes the
+// EXACT coordinate list that constitutes the contract: (shared step, clock rate) + the per-slot lens descriptors
+// (opNums) + the per-slot dynamics flags (born · beats · leash go/gx/gy · desc-mode + its ω-time cursor descBar) +
+// the coupling edges + the plate bank's descriptor copies. Anything NOT here is telemetry (may differ across peers);
+// anything here MUST match. Extracted VERBATIM from medium-u1's _regH — the flat number order is load-bearing
+// (hashNums is order-sensitive), so it is reproduced exactly; the app supplies only the accessors.
+//   ctx.step  — the shared step (number). ctx.rate — the step-clock rate.
+//   ctx.ops   — the lens descriptors [op,…] (hashed via opNums). ctx.slots — the slot objects (born/leash/desc/…).
+//   ctx.edge  — the κ matrix (null → 16 zeros, the fixed 4×4 slot). ctx.plates — the hologram plates ({dop,bw}).
+//   ctx.beatsOf(name) — the τ-beat count for a slot (or null-kernel → 0). ctx.slotName(s) — a slot's worldline name.
+// Returns the 8-hex hash. BYTE-IDENTICAL to the inline _regH by construction (same sequence, same hashNums).
+export function regHash({ step, rate, ops, slots, edge, plates, beatsOf, slotName = (s) => s.name }) {
+  const nums = [
+    step, rate,
+    ...ops.flatMap((op) => opNums(op)),
+    ...slots.flatMap((s) => [s.born ? 1 : 0, beatsOf ? (beatsOf(slotName(s)) ?? 0) : 0, s.leash.state.go ? 1 : 0, Math.round(s.leash.state.gx * 100), Math.round(s.leash.state.gy * 100), s.desc ? 1 : 0, s.descBar | 0]),
+    ...(edge ? edge.flat() : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    plates.length, ...plates.flatMap((pl) => [...opNums(pl.dop), pl.bw | 0]),
+  ];
+  return hashNums(nums);
 }
 
 // makeStampedInput(tauK, name, opts) — THE STAMPED REPLICATED-INPUT pattern (the general field-determinism law,
@@ -821,6 +935,64 @@ export function crossCorrScan(a, b, G = Math.round(Math.sqrt(a.length / 2))) {
   return { corr0: c0, corrMax: Math.sqrt(bv) / nrm, dx, dy };
 }
 
+// occlude(field, {mode, frac, block, seed, G}) — CORRUPT/MASK a field into a PARTIAL image, the input side of the
+// classic "break the hologram, still reconstruct the whole scene" demonstration. Returns a FRESH copy (never
+// mutates); the kept fraction of the image can then be `bind`-ed against the FULL bank and the winner `lift`-ed —
+// a real hologram argmaxes correctly from a fragment and reconstructs the whole, and the fidelity degrades
+// GRACEFULLY as `frac` grows. This is the CPU/f64 twin of the GPU occluder (ifs-gpu.js GLSL_EYE_HOLOGRAM) — same
+// mode vocabulary and same per-block hash, so a headless test and the live GPU render agree on the mask.
+//   modes (mirrors the shader):
+//     1 low-pass   keep |k-radius| ≤ frac        (aperture — keep the centre)
+//     2 high-pass  keep radius ≥ frac            (keep the outside)
+//     3 conjugate  flip Im (phase conjugate — the family member that is not a mask)
+//     5 box        keep a CENTERED frac·G window (the graceful-degradation window; NEW vs the shader)
+//     6 half       zero the LEFT frac·G columns  (contiguous slab — "cut the plate in half")
+//     7 rand-zero  scattered square blocks (size `block`) knocked to 0 with probability `frac`  ← the CLASSIC
+//     8 rand-noise those same blocks REPLACED by amplitude-scaled complex noise (corruption, not loss)
+//   frac ∈ [0,1] is "how much is removed/aperture radius"; `block` (px, modes 7/8) and `seed` (reshuffle the
+//   random pattern) match the shader defaults (8, 0). The hash is the shader's hash — a pure fn of (block coord,
+//   seed) → deterministic and peer-identical.
+const _fract = (v) => v - Math.floor(v);
+const _occHash = (x, y, seed) => {   // GLSL hash(vec2)+u_seed, hardened so an INTEGER seed still reshuffles (a bare
+  // additive seed cancels under fract for integer x; here seed enters MULTIPLICATIVELY via a 0.618… stir first).
+  const s = _fract(seed * 0.6180339887 + 0.31830988);   // seed → a fractional stir (irrational step, integer-seed-safe)
+  let px = _fract((x + s * 37.0) * 123.34 + s);
+  let py = _fract((y + s * 51.0) * 456.21 + s);
+  const dt = px * (px + 45.32) + py * (py + 45.32); px += dt; py += dt;
+  return _fract(px * py);
+};
+export function occlude(field, { mode = 7, frac = 0.5, block = 8, seed = 0, G = Math.round(Math.sqrt(field.length / 2)) } = {}) {
+  if (!field || !mode) return field ? Float64Array.from(field) : null;   // mode 0 / falsy = identity
+  const out = Float64Array.from(field), half = G * 0.5, b = Math.max(block | 0, 1);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+    const j = (y * G + x) * 2;
+    if (mode === 3) { out[j + 1] = -out[j + 1]; continue; }
+    let masked = false, noise = false;
+    if (mode === 1 || mode === 2) { const dx = x - half, dy = y - half, r = Math.hypot(dx, dy) / half;
+      masked = mode === 1 ? (r > Math.max(frac, 0.001)) : (r < Math.max(frac, 0.001)); }
+    else if (mode === 5) { const w = frac * G, lo = (G - w) / 2, hi = (G + w) / 2;   // centered box: zero OUTSIDE the window
+      masked = !(x >= lo && x < hi && y >= lo && y < hi); }
+    else if (mode === 6) { masked = x < frac * G; }                                  // left slab: zero the left frac columns
+    else if (mode === 7 || mode === 8) { const h = _occHash(Math.floor(x / b), Math.floor(y / b), seed);
+      if (h < frac) { masked = true; noise = mode === 8; } }
+    if (!masked) continue;
+    if (!noise) { out[j] = 0; out[j + 1] = 0; }
+    else { const amp = Math.hypot(field[j], field[j + 1]) + 1e-4;
+      out[j] = amp * (_occHash(x, y, seed + 7.1) - 0.5) * 2; out[j + 1] = amp * (_occHash(x, y, seed + 19.7) - 0.5) * 2; }
+  }
+  return out;
+}
+
+// keptFraction(field, occluded) — energy ratio surviving a mask, ‖occluded‖²/‖field‖² ∈ [0,1]: the HONEST "how
+// much of the image is left" number to report alongside a reconstruction fidelity (the demo's x-axis). For a
+// noise mode this exceeds the geometric kept-area (noise carries energy) — which is exactly why loss (7) and
+// corruption (8) degrade differently, and why the number must be MEASURED, not assumed from `frac`.
+export function keptFraction(field, occluded) {
+  if (!field || !occluded) return 0;
+  let e0 = 0, e1 = 0; for (let i = 0; i < field.length; i++) { e0 += field[i] * field[i]; e1 += occluded[i] * occluded[i]; }
+  return e0 > 0 ? e1 / e0 : 0;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //  DESCENT RUNG 1 — THE COVER LAW (local-to-global made first-class on ONE peer). Can a single peer carry the
 //  sharding structure for free? In THIS architecture, yes: the GLOBAL MODEL is already the register (tiny,
@@ -1136,4 +1308,869 @@ export function secondMomentTorus(field, G = Math.round(Math.sqrt(field.length /
     let dy = (((j / G) | 0) - cy + G) % G; if (dy > G / 2) dy -= G;
     V += (dx * dx + dy * dy) * I; }
   return { V, P, cx, cy, m };
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ── MERGED FROM medium-u1-engine.js ── THE ABSTRACT REGISTER ENGINE (makeRegisterEngine)
+// (was a separate file; consolidated into medium-core.js — the one abstract-medium module. medium-gpu.js
+//  stays separate because it is WebGL-bound and would break core's headless purity.)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// medium-u1-engine.js — THE ABSTRACT REGISTER ENGINE, extracted from medium-u1.js (extraction ladder rung after
+//   medium-gpu / medium-u1-slots). This is the U1 abstract-holography machine's PURE PHYSICS CORE: the operators
+//   the register runs on itself, freed from the app's DOM/GPU/verb scaffolding so ANY app (medium-u1 itself, and
+//   the thin apps as they migrate off the old phase-only U1) can host a live register-driven medium.
+//
+//   WHAT IT IS (the meta-circular step, v7): the register does not DESCRIBE the medium, it RUNS it. One step is
+//   five operators, all f64 CPU, zero GPU:  pin superpose (β replicated) → exact spectral linear step (gate D, via
+//   the λ-grid cache) → engine SPM phase → energy cap at the slot's own descE0 → f32 grain (Math.fround — the wire
+//   lattice IS the original engine's own grain). Pure fn of (slot state, shared step): the whole determinism
+//   contract (regH) reads its output.
+//
+//   THE CONTEXT OBJECT (why a factory, not free functions): every operator here needs a handful of LIVE, app-owned
+//   values — the running IFS ring cache (recomputed by the fractal clock), the per-slot lens register (∠,β,ω), the
+//   slot bank, the coupling edges, the linear-mode dial. The app OWNS and MUTATES those (they ride replication);
+//   the engine only READS them, through getters on `ctx`. So `makeRegisterEngine(ctx)` closes over getters, never
+//   over a snapshot — the engine always sees the app's current state, and the app's determinism/snapshot/verb
+//   machinery is untouched. Constants (GRID, DT, N_CELLS, γ, isat) are captured by value.
+//
+//   BOUNDARY (what stayed in medium-u1.js, by the medium-gpu extraction rule — engine math moves, orchestration
+//   + GPU + DOM stay): the GPU turbo executor (_tbAdvanceAll — WebGL), the drive loop, verb wiring, snapshot glue,
+//   store/recall of moments (they touch _plates + platform hooks), regH assembly (the app chooses which fields).
+//   The pure per-step engine, the symbol/scale grids, the declaration projection, the cross-slot coupling, the
+//   sl(2)/Casimir charge builders, and the region (shard) step are here.
+//
+//   EXTRACTION INVARIANT: byte-for-byte. medium-u1's regH and the npm suites must be identical before/after — the
+//   functions moved verbatim, only their closure variables became ctx getters. (Same discipline that kept
+//   medium.js byte-identical through the medium-gpu extraction.)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// makeRegisterEngine(ctx) — build the register engine over an app context.
+//
+//   ctx (constants):   GRID, DT, N_CELLS, gamma, isat
+//   ctx (live getters — the app owns the state, the engine only reads):
+//     ringCache()   → the current IFS ring kernel { r, w, o } (recomputed by the fractal clock)
+//     kernelVer()   → the ring cache's version (drives the λ-grid cache invalidation)
+//     lensOp(i)     → slot i's lens register { phase, beta, omega, prec, ... } (∠ ω β aging)
+//     slots()       → the slot bank's slots[] (each { desc, descBase, descE0, descLive, descAtt, _eng, _engE, ... })
+//     edge()        → the coupling matrix _K.edge (4×4 κ) or null
+//     linearMode()  → 0 full · 1 free-linear · 2 linear sharp-trap
+//     linLeak()     → the mode-2 leak (β-derived unit-gain damping)
+//     shardRing()   → the ring used by the region step (demo sandbox override or the live ringCache)
+//     wSlot()       → the W slot object (for _declProject's leash/pos/phi anchors)
+//
+// Returns { lambda, lambdaScale, rMid, specLeg, declProject, step, coupledAtt, stepRegion, mkSl2, sl2Rekey }.
+export function makeRegisterEngine(ctx) {
+  const { GRID, DT, N_CELLS, gamma, isat } = ctx;
+
+  // ── the symbol λ(k) grid, cached per kernelVer (the gate-D diagonalization of the live ring) ──
+  let _lamCache = { ver: -9999, lam: null };
+  const lambda = () => { const rc = ctx.ringCache(); if (!rc?.r?.length) return null;
+    const ver = ctx.kernelVer();
+    if (_lamCache.ver !== ver) _lamCache = { ver, lam: kernelLambdaGrid(rc.r, rc.w, rc.o, GRID) };
+    return _lamCache.lam; };
+
+  // ── SCALE-SELECTIVE λ (the tier-decomposition theorem cashed): the propagator is EXACTLY additive over the
+  //    ring scale-tiers (λ_merged = Σ_d λ_tier − (n−1)·lap9, f64-pinned). So a λ built from a RADIUS BAND of the
+  //    rings propagates ONLY that scale's structure — coarse (large radius = the smooth skeleton) or fine (small
+  //    radius = the speckle detail). Exact by the theorem, not an approximation. The band λ = lap9 + only the
+  //    in-band rings' contribution. Cached per (kernelVer, band). rMid splits at the geometric mean.
+  let _lamScaleCache = { key: '' };
+  const rMid = () => { const rc = ctx.ringCache(); if (!rc?.r?.length) return 0; const r = rc.r; return Math.sqrt(Math.max(...r) * Math.min(...r)); };
+  const lambdaScale = (band) => { const rc = ctx.ringCache(); if (!rc?.r?.length) return null; if (band === 'all') return lambda();
+    const key = `${ctx.kernelVer()}:${band}`; if (_lamScaleCache.key === key) return _lamScaleCache.lam;
+    const mid = rMid(); const keep = [], kw = [], ko = [];
+    for (let d = 0; d < rc.r.length; d++) { const inBand = band === 'coarse' ? rc.r[d] >= mid : rc.r[d] < mid;
+      if (inBand) { keep.push(rc.r[d]); kw.push(rc.w[d]); ko.push(rc.o[d]); } }
+    const lam = kernelLambdaGrid(keep, kw, ko, GRID);   // lap9 + only the in-band rings (kernelLambdaGrid always includes lap9)
+    _lamScaleCache = { key, lam }; return lam; };
+
+  const specLeg = (f, T, dt, band) => { const lam = band && band !== 'all' ? lambdaScale(band) : lambda(); if (!lam || !f) return null;
+    return kernelPropagateSpectral(f, null, null, null, { T, dt, G: GRID, lam }).field; };
+
+  // ── the BAR-EXACT declaration of W (register state only — no render frac): the boundary source for a REGIONAL
+  //    witness and the seam-glue reference (same math as the mirror seed / materialize). ──
+  const declProject = () => { const W = ctx.wSlot(); if (!W.desc || !W.descBase) return null;
+    const dphi = lensU1.wrap(lensU1.angle(ctx.lensOp(0)) - (W.descPhi0 || 0));
+    const L0 = W.leash.state, ox = L0.gx - (W.descPos?.[0] ?? 0), oy = L0.gy - (W.descPos?.[1] ?? 0);
+    try { return (ox || oy) ? lensC1.apply({ mode: 'metric', phase: dphi, beta: 1, omega: 0, prec: 0, gain: 1, tx: ox, ty: oy }, W.descBase, GRID)
+                            : lensU1.apply({ mode: 'id', phase: dphi, beta: 1, omega: 0, prec: 0 }, W.descBase, GRID); } catch (e) { return null; } };
+
+  // ── THE REGISTER ENGINE'S ONE-STEP KERNEL (shared by every LIVING slot): pin superpose (β replicated) → exact
+  //    spectral linear step (gate D, λ-grid cache) → engine SPM phase → cap at the slot's own descE0 → f32 grain
+  //    (the wire lattice = the original engine's grain). Pure fn of (slot state, shared step).
+  //    FAST PATH (the GC-lag fix): the spectral call runs on a per-G scratch pool (reuse:true — zero allocation),
+  //    and each slot keeps a ping-pong spare (s._eng) the result is copied into, fused with the SPM pass. Op ORDER
+  //    is preserved exactly (superpose → linear → SPM → energy → cap → fround), so the bytes are identical to the
+  //    allocating path — only the garbage is gone (~6 × 128 KB/step before).
+  const step = (s, att, bfac) => { const lamS = lambda(); if (!lamS || !s.descBase || !s.descE0) return;
+    const linearMode = ctx.linearMode();
+    const psi = s.descBase;
+    // PIN (linear injection lock): ON in the full medium AND in the linear SHARP TRAP (mode 2 — the pin IS the
+    // linear trap); OFF only in FREE-linear (mode 1) to show the dispersing free field.
+    if (att && linearMode !== 1) { const b = 0.15 * (bfac || 1); for (let j = 0; j < psi.length; j++) psi[j] += b * att[j]; }
+    const ev = kernelPropagateSpectral(psi, null, null, null, { T: 1, dt: DT, G: GRID, lam: lamS, reuse: true }).field;
+    const nb = (s._eng && s._eng !== psi && s._eng.length === ev.length) ? s._eng : new Float64Array(ev.length);
+    if (linearMode) { const damp = linearMode === 2 ? (1 - ctx.linLeak()) : 1;   // mode 2: LINEAR damping balances the pin (driven-damped oscillator → sharp fixed point at A); mode 1: none (free dispersal)
+      for (let j = 0; j < ev.length; j++) nb[j] = ev[j] * damp; }
+    else for (let j = 0; j < N_CELLS; j++) { const re = ev[j * 2], im = ev[j * 2 + 1], I2 = re * re + im * im;   // nonlinear SPM (full medium)
+      const th = gamma * I2 / (1 + I2 / isat) * DT, c = Math.cos(th), sn = Math.sin(th);
+      nb[j * 2] = re * c - im * sn; nb[j * 2 + 1] = re * sn + im * c; }
+    let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];
+    // the CAP (nonlinear energy renormalization) runs ONLY in the full medium; the linear modes use their own
+    // linear energy handling (mode 1: none, conserves; mode 2: the linear leak above balances the pin).
+    const sc = Math.sqrt(s.descE0 / (e2 || 1)); if (!linearMode && e2 > 1e-9) for (let j = 0; j < nb.length; j++) nb[j] *= sc;
+    for (let j = 0; j < nb.length; j++) nb[j] = Math.fround(nb[j]);
+    s._engE = e2;   // pre-cap energy (pure fn of shared k) — the UNPINNED coevo gate's field reading in ⌀PDE
+    s._eng = psi; s.descBase = nb; };
+
+  // ── CROSS-SLOT ATTRACTOR COUPLING (real, physical — the U1 register form of the old shared-substrate "β mixes
+  //    slots"). Slot i's pin target = its own att + Σ_j κ_ij · (slot j's FIELD): the soliton is pulled toward a
+  //    coupled neighbor's shape, so it physically DEFORMS toward it (V observing W → V's letter bleeds toward W's).
+  //    Driven by the SAME edge κ as the Kuramoto phase law (consistent: an edge means "these slots interact"), so
+  //    it rides regH via _K.edge — deterministic, byte-replicated. κ>0 attracts (blend), κ<0 repels (anti-blend).
+  //    snap = the same-step frozen field (turbo); slots' descBase (CPU, per-step current) otherwise. ──
+  // fieldMix gate (app-owned, replicated): an edge ALWAYS drives the Kuramoto PHASE law (app-side); this gate governs
+  //   only the SECOND layer — the attractor FIELD-mixing here. false → coupledAtt returns the bare att (phases still
+  //   entrain, but the soliton shape does NOT bleed toward the neighbor). Default true = the current behavior (byte-
+  //   identical when the getter is absent). It must be replicated, not peer-local: it changes descBase (in regH).
+  const coupledAtt = (i, baseAtt, snap) => { const edge = ctx.edge(); if (!edge || !baseAtt) return baseAtt;
+    if (ctx.fieldMix && !ctx.fieldMix()) return baseAtt;   // field-mixing OFF: edge couples PHASE only, shapes stay pure
+    let any = false; for (let jc = 0; jc < 4; jc++) if (jc !== i && edge[i][jc]) any = true;
+    if (!any) return baseAtt;
+    const slots = ctx.slots();
+    const out = Float64Array.from(baseAtt);
+    for (let jc = 0; jc < 4; jc++) { const kk = edge[i][jc]; if (!kk || jc === i) continue;
+      const sj = slots[jc]; if (!sj.desc || (jc > 0 && !sj.descLive)) continue;
+      const fj = snap ? snap[jc] : sj.descBase; if (!fj) continue;
+      for (let n2 = 0; n2 < out.length; n2++) out[n2] += kk * fj[n2]; }
+    return out; };
+
+  // ── THE REGION (SHARD) STEP — one engine step computed ONLY inside the region (regionStepX: bit-identical inside
+  //    R by the light-cone margins, cost ∝ |R|); same pin→linear→SPM→cap→fround order as `step`, scissored to R
+  //    (the outside is never renormalized — the GPU-shard scissor discipline). ──
+  const stepRegion = (s, att, bfac, reg) => { const rc = ctx.shardRing(); if (!rc?.r?.length || !s.descBase || !s.descE0) return;
+    const psi = s.descBase;
+    if (att) { const b = 0.15 * (bfac || 1);
+      for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; psi[j] += b * att[j]; psi[j + 1] += b * att[j + 1]; } }
+    const nb = (s._eng && s._eng !== psi && s._eng.length === psi.length) ? s._eng : new Float64Array(psi.length);
+    regionStepX(psi, rc.r, rc.w, rc.o, DT, GRID, reg, { out: nb });
+    for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2;
+      const re = nb[j], im = nb[j + 1], I2 = re * re + im * im;
+      const th = gamma * I2 / (1 + I2 / isat) * DT, c = Math.cos(th), sn = Math.sin(th);
+      nb[j] = re * c - im * sn; nb[j + 1] = re * sn + im * c; }
+    let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];
+    const sc = Math.sqrt(s.descE0 / (e2 || 1));
+    if (e2 > 1e-9) for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] *= sc; nb[j + 1] *= sc; }   // both directions (the true engine cap), inside R only (scissor discipline)
+    for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] = Math.fround(nb[j]); nb[j + 1] = Math.fround(nb[j + 1]); }
+    s._eng = psi; s.descBase = nb; s._texStepSynced = -1;   // sharded W is CPU-stepped → mark texture-desync (a later _tbSyncSlot re-reads correctly if unsharded); descDisp refreshed at display cadence by the caller
+  };
+
+  // ── THE REGISTER-RESIDENT sl(2) TIER (the gate-F meta-circular rung): V and V̈ are INVARIANT under the anchors
+  //    (translation + global phase), so they are pure functions of descBase + the stencil — REGISTER content.
+  //    W.sl2 = {V, vdd, I, kv} is captured at every compile door (wabs/autoc), RE-KEYED lazily when kernelVer
+  //    moves (the rekeyTest-validated law: same envelope, new stencil). ──
+  const mkSl2 = (env) => { const rc = ctx.ringCache(); if (!rc?.r?.length || !env) return null;
+    const sm = secondMomentTorus(env, GRID);
+    const sE = Math.min(48, Math.max(2, Math.sqrt(sm.V / (2 * (sm.P || 1)))));
+    const Dq = packetD(rc.r, rc.w, rc.o, sE);
+    const spec = virialSpec(env, GRID, { gamma, isat });   // ONE FFT, at the door — the spectrum IS compile content
+    const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma, isat, Dq, spec, lam: lambda() });   // FD-on-λ v_g (≈1.7% bias, telemetry-grade)
+    return { V: sm.V, vdd, I: vdd * sm.V, kv: ctx.kernelVer(), m: sm.m, spec, Dq }; };
+
+  // RE-KEY = a pure stencil re-sum over the cached spectrum (FFT-free): V, m, spec are stencil-independent.
+  const sl2Rekey = (sl2) => { const rc = ctx.ringCache(); if (!rc?.r?.length || !sl2?.spec) return null;
+    const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma, isat, Dq: sl2.Dq, spec: sl2.spec, lam: lambda() });   // FD-on-λ
+    return { V: sl2.V, vdd, I: vdd * sl2.V, kv: ctx.kernelVer(), m: sl2.m, spec: sl2.spec, Dq: sl2.Dq }; };
+
+  return { lambda, lambdaScale, rMid, specLeg, declProject, step, coupledAtt, stepRegion, mkSl2, sl2Rekey };
+}
+
+// buildNativeKernel(fracKernel, fracAlpha, maxBands) — THE LIVE-RING BUILDER (radii → weighted ring bands), pure.
+// Extracted from krestianstvo-wavefront-physics.js (where it lives baked into the world-program string, so it wasn't
+// importable). fracKernel = a flat list of ring RADII (one per fresnel beat / cascade firing — repeats encode weight);
+// counts them into distinct radii, weights each by fracAlpha·count/total, merges excess bands into the nearest kept
+// radius (top maxBands by count), and estimates the emergent self-similar exponent sEff (log-log slope of w vs r).
+// This is the pure half of the reducer's live recompute — a thin app running its OWN IFS clock can call it to turn
+// the clock's radii into a ring, without the reducer's replicated/reactive fresnel machinery. Returns {fRadii, fWeights, sEff}.
+export function buildNativeKernel(fracKernel, fracAlpha, maxBands) {
+  const countMap = new Map();
+  for (const r of fracKernel) countMap.set(r, (countMap.get(r) ?? 0) + 1);
+  const totalBeats = fracKernel.length || 1;
+  let fRadii = [...countMap.keys()].sort((a, b) => a - b);
+  if (maxBands && fRadii.length > maxBands) {   // merge excess bands by weight — keep top maxBands by count, fold the rest into the nearest kept radius
+    const byCount = fRadii.slice().sort((a, b) => countMap.get(b) - countMap.get(a));
+    const kept = new Set(byCount.slice(0, maxBands));
+    const mergedCount = new Map();
+    for (const r of fRadii) {
+      if (kept.has(r)) { mergedCount.set(r, (mergedCount.get(r) ?? 0) + countMap.get(r)); }
+      else { let nearest = byCount[0], minD = Math.abs(r - nearest);
+        for (const kr of kept) { const d = Math.abs(r - kr); if (d < minD) { minD = d; nearest = kr; } }
+        mergedCount.set(nearest, (mergedCount.get(nearest) ?? 0) + countMap.get(r)); }
+    }
+    fRadii = [...kept].sort((a, b) => a - b);
+    fRadii.forEach((r) => countMap.set(r, mergedCount.get(r) ?? countMap.get(r)));
+  }
+  const fWeights = fRadii.map((r) => fracAlpha * countMap.get(r) / totalBeats);
+  let sEff = 0;
+  if (fRadii.length >= 2) {
+    const logR = fRadii.map((r) => Math.log(r)), logW = fWeights.map((w) => Math.log(w + 1e-30)), n = fRadii.length;
+    const mR = logR.reduce((a, b) => a + b, 0) / n, mW = logW.reduce((a, b) => a + b, 0) / n;
+    let num = 0, den = 0;
+    for (let i = 0; i < n; i++) { num += (logR[i] - mR) * (logW[i] - mW); den += (logR[i] - mR) ** 2; }
+    sEff = den > 1e-10 ? -num / (2 * den) : 0;
+  }
+  return { fRadii, fWeights, sEff };
+}
+
+// buildRingOffsets(fRadii) — each radius r → an Int16Array of the (dx,dy) integer lattice offsets around a circle
+// of radius r (≥8 steps, ~2πr for dense rings). Pure; the geometric half of the live-ring builder (verbatim from
+// the physics file). Returns fRadii.map(r → Int16Array). Pair with buildNativeKernel's fRadii → the ringCache offsets.
+export function buildRingOffsets(fRadii) {
+  return fRadii.map((r) => {
+    const nSteps = Math.max(8, Math.ceil(2 * Math.PI * r));
+    const flat = new Int16Array(nSteps * 2);
+    for (let kk = 0; kk < nSteps; kk++) { flat[kk * 2] = Math.round(r * Math.cos(kk * 2 * Math.PI / nSteps)); flat[kk * 2 + 1] = Math.round(r * Math.sin(kk * 2 * Math.PI / nSteps)); }
+    return flat;
+  });
+}
+
+// makeRingProvider(ifsClock, { alpha, maxBands, gridR }) — a LIVE IFS RING for a thin app, driven by its OWN core
+// makeIFSClock (the ℂ* cascade — already pure/core), NOT the world reducer's replicated fresnel machinery. Each tick
+// advances the clock and, when its ring set CHANGES, rebuilds the ringCache (buildNativeKernel + buildRingOffsets)
+// and bumps a version. So a thin app gets a DYNAMIC fractal ring (the clock breathes the kernel) instead of a static
+// simpleRing — feed .ring() to makeFieldMatter (or the engine's ringCache getter) and .version() to kernelVer.
+//   ifsClock — a makeIFSClock instance (the app owns it: launch/advance/save/restore ride the app's determinism).
+//   alpha (default 0.03 = FRAC_ALPHA) · maxBands (default 4 = MAX_IFS_BANDS) · gridR (max radius kept, default 24).
+// Returns { tick(kp), ring(), version(), clock } — tick(kp) advances the clock at proper step kp (returns {beat}).
+// NOTE: the app must advance this at SHARED steps (the determinism law) — the provider is pure given (kp, clock state).
+export function makeRingProvider(ifsClock, { alpha = 0.03, maxBands = 4, gridR = 24 } = {}) {
+  let ring = simpleRing(3), version = 0, lastRadiiStr = '';
+  const rebuild = () => {
+    const kernel = ifsClock.kernel();   // [{r, a}] — the accumulated ring set (radius + amplitude)
+    // flatten to a fracKernel (radii list, weighted by rounded amplitude) so buildNativeKernel's count-weighting
+    // reflects each ring's strength; keep only r < gridR (the physics guard).
+    const frac = [];
+    for (const e of kernel) { if (e.r < gridR) { const w = Math.max(1, Math.round(e.a * 4)); for (let c = 0; c < w; c++) frac.push(e.r); } }
+    const radiiStr = frac.slice().sort((a, b) => a - b).join(',');
+    if (radiiStr === lastRadiiStr) return false;   // no change → keep the ring + version (kernelVer stable)
+    lastRadiiStr = radiiStr;
+    if (!frac.length) { ring = simpleRing(3); version++; return true; }   // empty → fall back to the static ring
+    const { fRadii, fWeights } = buildNativeKernel(frac, alpha, maxBands);
+    ring = { r: fRadii, w: fWeights, o: buildRingOffsets(fRadii).map((o) => Float64Array.from(o)) };
+    version++; return true;
+  };
+  return {
+    clock: ifsClock,
+    tick: (kp) => { const r = ifsClock.advance(kp); rebuild(); return r; },   // advance the cascade + rebuild the ring if it changed
+    refresh: () => rebuild(),   // rebuild the ring from the clock's CURRENT kernel WITHOUT advancing (for an app that advances the clock itself, e.g. ifsclock's stepSlot)
+    ring: () => ring, version: () => version,
+  };
+}
+
+// simpleRing(r, n) — a single small IFS ring kernel: n offsets on a circle of radius r (default 8 axis+diagonal),
+// weight split. The minimal ring that turns the engine's lap9 into a real DISPERSIVE medium (a static stand-in for
+// the fractal clock's kernel — a thin app has no clock, so a fixed ring is its dispersion). This is the recipe
+// observers and rhythm each hand-rolled identically. Returns { r:[…], w:[…], o:[Float64Array] } (the ringCache shape).
+export function simpleRing(r = 3, n = 8, weight = 0.5) {
+  const off = [];
+  for (let a = 0; a < n; a++) { const th = a * 2 * Math.PI / n; off.push(Math.round(r * Math.cos(th)), Math.round(r * Math.sin(th))); }
+  return { r: [r], w: [weight], o: [Float64Array.from(off)] };
+}
+
+// makeFieldMatter(opts) — TURNKEY FIELD MATTER: a real ψ-field medium a thin app can OPT INTO in one line, without
+// hand-rolling the ring cache + engine-slot adapters + makeRegisterEngine ctx + seed (the ~40 lines observers and
+// rhythm each copied). It wraps makeRegisterEngine (the shared meta-circular step: pin → spectral lap9+ring → SPM →
+// cap → f32) and owns the PLUMBING; the app supplies only its MATTER SHAPE (the seed's bump list) and its register
+// (lensOp) — the same mechanism-to-core / content-stays-app boundary as the rest of the arc. A thin app with no rich
+// matter thus gets the full abstract medium as its matter, exactly like medium-u1 / observers / rhythm's field mode.
+//   opts.G        grid side (default 16 — small = cheap CPU, deterministic). N = G².
+//   opts.slots    slot count (default 4). opts.ring — the ringCache (default simpleRing(3)).
+//   opts.gamma/isat/dt   the engine step constants (default 20 / 1 / 0.12 — the medium-u1 recipe).
+//   opts.lensOp(i)  → slot i's lens register (for the pin's ∠/β; the app owns it). Default: identity (β=1).
+//   opts.linearMode() → 0 full · 1 free · 2 sharp-trap (default 0). opts.edge() → coupling matrix (default null).
+// Returns:
+//   slots       — the per-slot engine-slot adapters (pass slots[i] to step; descBase/descE0/descAtt live here).
+//   G, N, ring  — the geometry (for the app's own reads).
+//   seed(i, bumps)      — stand up slot i's ψ from a bump list [{cx,cy,sg,amp,ph?}] (Gaussian, deterministic, no RNG);
+//                         sets descE0 = the seed energy (the cap holds it there). Returns the field.
+//   seedAtt(i, bumps)   — the same for the PIN attractor (descAtt). Pass the pin's target shape.
+//   step(i, bfac=1)     — one engine step on slot i, pinned toward its att (bfac scales the pin; the app maps its
+//                         own historical pin strength through this, e.g. BETA/0.15).
+//   field(i)/setField/att(i)/energy(i)  — reads/writes.
+//   spectrum(i, nBands) — the radial-FFT bands of |ψ|² (spatial-frequency content), normalized to [0,1]. Generic
+//                         (rhythm reads it as overtone timbre; any app can read a field's spectral shape). null if unseeded.
+//   save()/restore(arr, {deserialize}) — the field snapshot slice (fields + E0; the app's typed-array codec via hook).
+export function makeFieldMatter(opts = {}) {
+  const G = opts.G || 16, N = G * G;
+  const names = opts.names || ['W', 'V', 'P1', 'P2'];
+  // ring may be: a static ringCache {r,w,o}; a makeRingProvider (has .ring()/.version() — a LIVE fractal ring that
+  // breathes as the app's IFS clock fires); or omitted → the static simpleRing(3). The engine reads it through
+  // getters, so a live provider's changing ring + version drive the λ-grid cache invalidation exactly like the full
+  // app's fractal clock does. (opts.ringProvider is an explicit alias for the live case.)
+  const provider = opts.ringProvider || (opts.ring && typeof opts.ring.ring === 'function' ? opts.ring : null);
+  const staticRing = provider ? null : (opts.ring || simpleRing(3));
+  const ringOf = () => (provider ? provider.ring() : staticRing);
+  const verOf = () => (provider ? provider.version() : 1);
+  const gamma = opts.gamma ?? 20, isat = opts.isat ?? 1, dt = opts.dt ?? 0.12;
+  const linearMode = opts.linearMode || (() => 0);
+  const edge = opts.edge || (() => null);
+  // ── THE REAL SLOT BANK (not throwaway adapters): the field lives in the SAME slot type medium-u1 uses — a
+  //    makeSlot with a leash (transport), a readOp (its register descriptor), born/kv/save, and the register
+  //    engine's desc* contract (descBase/descE0/descAtt) as dynamic fields (exactly how medium-u1 attaches them).
+  //    So a thin app's field slots ARE the full app's slots in thin mode — leash/transport available, not stripped.
+  //    The app may PASS its own observer bank (opts.bank) so the field slots share its register (readOp = bank.ops[i]);
+  //    else a fresh bank is created. lensOp(i) defaults to the slot's readOp (the register the pin ages/reads).
+  const bank = opts.bank || makeObserverBank(names.length);
+  const sb = makeSlotBank({ names, bank, engine: null, kinds: Object.fromEntries(names.map((nm) => [nm, 'plate'])) });
+  const slots = sb.slots;
+  const lensOp = opts.lensOp || ((i) => slots[i].readOp);   // the pin reads the slot's own register by default
+  const reg = makeRegisterEngine({
+    GRID: G, DT: dt, N_CELLS: N, gamma, isat,
+    ringCache: ringOf, kernelVer: verOf,
+    lensOp, slots: () => slots, edge,
+    linearMode, linLeak: () => 0.1, shardRing: ringOf, wSlot: () => slots[0],
+  });
+
+  const energy = (f) => { let e = 0; for (let j = 0; j < f.length; j++) e += f[j] * f[j]; return e; };
+  const paint = (bumps) => { const f = new Float64Array(N * 2);   // deterministic Gaussian bumps (no RNG → byte-identical across peers)
+    for (const b of (bumps || [])) { const c = Math.cos(b.ph || 0), s = Math.sin(b.ph || 0), sg = b.sg || 2, amp = b.amp ?? 1;
+      for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const r2 = (x - b.cx) ** 2 + (y - b.cy) ** 2, a = amp * Math.exp(-r2 / (2 * sg * sg)), j = (y * G + x) * 2; f[j] += a * c; f[j + 1] += a * s; } }
+    return f; };
+
+  return {
+    slots, bank, G, N, ring: ringOf,   // the REAL slots (leash/transport/readOp/save) + the register bank + the (possibly live) ring getter
+    // seed slot i's field into its descBase (the engine step's contract); descE0 = the cap target; descAtt = the pin.
+    seed: (i, bumps) => { const f = paint(bumps); slots[i].descBase = f; slots[i].descE0 = energy(f) || 1; slots[i].born = true; return f; },
+    seedAtt: (i, bumps) => { const a = paint(bumps); slots[i].descAtt = a; return a; },
+    step: (i, bfac = 1) => reg.step(slots[i], slots[i].descAtt, bfac),
+    field: (i) => slots[i].descBase, setField: (i, f) => { slots[i].descBase = f; }, att: (i) => slots[i].descAtt,
+    energy: (i) => (slots[i].descBase ? energy(slots[i].descBase) : 0), e0: (i) => slots[i].descE0 ?? 1,   // e0 = the seed/cap-target energy (energy(i)/e0(i) = the fill ratio)
+    reg,   // the underlying engine (for lambda/specLeg/… if the app needs them)
+    // the radial spectrum of |ψ|² → nBands (rhythm's timbre reader, generalized). Pure fn of the field.
+    spectrum: (i, nBands = 6) => { const f = slots[i].descBase; if (!f) return null;
+      const re = new Float64Array(N), im = new Float64Array(N);
+      for (let j = 0; j < N; j++) { const rr = f[j * 2], ii = f[j * 2 + 1]; re[j] = rr * rr + ii * ii; }
+      fft2d(re, im, G, false);
+      const bands = new Float64Array(nBands), cnt = new Float64Array(nBands), c = G / 2;
+      for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const kx = x <= G / 2 ? x : x - G, ky = y <= G / 2 ? y : y - G;
+        const kr = Math.hypot(kx, ky), b = Math.min(nBands - 1, Math.floor(kr / c * nBands)), j = y * G + x;
+        bands[b] += Math.hypot(re[j], im[j]); cnt[b]++; }
+      let mx = 1e-9; for (let h = 0; h < nBands; h++) { bands[h] = cnt[h] ? bands[h] / cnt[h] : 0; if (bands[h] > mx) mx = bands[h]; }
+      for (let h = 0; h < nBands; h++) bands[h] /= mx; return bands; },
+    // save/restore the field slice (descBase/descAtt/descE0 per slot). The app's typed-array codec via the hook; the
+    // slots' CONTROL state (leash/kind/born) rides sb.save() separately if the app wants transport preserved too.
+    save: ({ serialize = (f) => (f ? Array.from(f) : null) } = {}) => ({ fields: slots.map((s) => serialize(s.descBase)), atts: slots.map((s) => serialize(s.descAtt)), E0: slots.map((s) => s.descE0 ?? 1) }),
+    restore: (s, { deserialize = (v) => (v ? Float64Array.from(v) : null) } = {}) => { if (!s) return;
+      for (let i = 0; i < slots.length; i++) { slots[i].descBase = deserialize(s.fields?.[i]); slots[i].descAtt = deserialize(s.atts?.[i]); slots[i].descE0 = s.E0?.[i] ?? 1; slots[i].born = !!slots[i].descBase; } },
+  };
+}
+
+// makeEye(source) — THE U(1) EYE as a MEDIUM-AGNOSTIC RECONSTRUCTION. A register is a compact description of a wave
+// (∠φ, k tilt, ω precession, β, translation) over a recorded ENVELOPE; rendering it to GPU pixels is just ONE
+// reconstruction of that description. This factory produces the SIGNAL in a requested feature space — the same linOp
+// phasor content(x−off)·e^{i(φ+k·(x−c))} medium-u1's renderDescField draws — as a PURE fn of the register, with no
+// device. Each app then has a thin SINK (a WebGL shader, a WebAudio graph, a canvas 2d ctx) that pushes this signal
+// to its medium: the register renders to ANY output because core computes the medium-agnostic signal and the sink is
+// pluggable and app-side. (The no-tricks law: the signal is computed ONCE, deterministically; every sink is a faithful
+// projection of the SAME state — GPU pixels, audio overtones, and a clock hand all read one register, never faked.)
+//   THE OUTPUT-CONCEPT AWARENESS (what core now knows): a register can be RECONSTRUCTED INTO A SIGNAL — a ψ field, its
+//   spectrum, or its scalar phase/angle. It does NOT know GPU/audio/canvas exist; it produces what those consume.
+//   source — getters describing the register to render (all optional; a bare {} yields nulls):
+//     op()       → the lens descriptor { phase, k?, beta, omega, prec, tx?, ty?, mode? } (the register). Default id.
+//     envelope() → the recorded complex ψ profile the phasor rotates (descBase/w0). Null → a phase-only eye (scalars only).
+//     pose()     → { dphi, ox, oy } the AGING phase Δ∠ + leash offset (medium-u1's _descPose); default {dphi:op.phase}.
+//     G()        → the grid side (for the field reconstruction). Default 0.
+//   reconstruct(as, nBands?) — the signal in a feature space:
+//     'field'    → the reconstructed ψ = lensC1.apply(op@pose, envelope, G) — the pixel/canvas sink's input (Float64 [re,im,…]).
+//     'spectrum' → radial |ψ|² FFT bands [0,1] (the audio sink's overtones; nBands default 6). Needs a field.
+//     'phase' | 'angle' → the register's total angle lensU1.angle(op) (a scalar; the canvas clock-hand / audio detune).
+//     'intensity'→ total |ψ|² energy (a scalar loudness/brightness). Needs a field.
+//   Convenience: field(), spectrum(n), angle(), intensity().
+export function makeEye(source = {}) {
+  const opOf = source.op || (() => lensU1.id());
+  const envOf = source.envelope || (() => null);
+  const gOf = source.G || (() => 0);
+  const poseOf = source.pose || (() => { const o = opOf(); return { dphi: o.phase || 0, ox: 0, oy: 0 }; });
+  const field = () => { const env = envOf(); if (!env) return null; const G = gOf() || Math.round(Math.sqrt(env.length / 2)); const P = poseOf();
+    try { return (P.ox || P.oy) ? lensC1.apply({ mode: 'metric', phase: P.dphi, beta: 1, omega: 0, prec: 0, gain: 1, tx: P.ox, ty: P.oy }, env, G)
+                                : lensU1.apply({ mode: 'id', phase: P.dphi, beta: 1, omega: 0, prec: 0 }, env, G); } catch (e) { return null; } };
+  const spectrum = (nBands = 6) => { const f = field(); if (!f) return null; const G = gOf() || Math.round(Math.sqrt(f.length / 2)), N = G * G;
+    const re = new Float64Array(N), im = new Float64Array(N);
+    for (let j = 0; j < N; j++) { const rr = f[j * 2], ii = f[j * 2 + 1]; re[j] = rr * rr + ii * ii; }
+    fft2d(re, im, G, false);
+    const bands = new Float64Array(nBands), cnt = new Float64Array(nBands), c = G / 2;
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const kx = x <= G / 2 ? x : x - G, ky = y <= G / 2 ? y : y - G;
+      const kr = Math.hypot(kx, ky), b = Math.min(nBands - 1, Math.floor(kr / c * nBands)), j = y * G + x;
+      bands[b] += Math.hypot(re[j], im[j]); cnt[b]++; }
+    let mx = 1e-9; for (let h = 0; h < nBands; h++) { bands[h] = cnt[h] ? bands[h] / cnt[h] : 0; if (bands[h] > mx) mx = bands[h]; }
+    for (let h = 0; h < nBands; h++) bands[h] /= mx; return bands; };
+  const angle = () => lensU1.angle(opOf());
+  const intensity = () => { const f = field(); if (!f) return 0; let e = 0; for (let j = 0; j < f.length; j++) e += f[j] * f[j]; return e; };
+  return {
+    field, spectrum, angle, intensity,
+    reconstruct: (as, nBands = 6) => (as === 'field' ? field() : as === 'spectrum' ? spectrum(nBands)
+      : (as === 'phase' || as === 'angle') ? angle() : as === 'intensity' ? intensity() : null),
+  };
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ── MERGED FROM medium-u1-holography.js ── THE ABSTRACT U1 HOLOGRAM (makeHologramBank)
+// (was a separate file; consolidated into medium-core.js — the one abstract-medium module. medium-gpu.js
+//  stays separate because it is WebGL-bound and would break core's headless purity.)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// medium-u1-holography.js — THE ABSTRACT U1 HOLOGRAM, extracted from medium-u1.js (extraction ladder rung after
+//   medium-u1-engine). The U1 register's MEMORY, freed from the app so any thin app (medium-u1, observers, rhythm,
+//   …) banks + recalls moments with one shared, tested implementation instead of a hand-rolled copy each.
+//
+//   THE IDEA (why holography, literally): a moment is banked as a DUAL PLATE — a field IMAGE and its descriptor
+//   ALGEBRA — and retrieved by CORRELATION, not by address. Two independent readings of the same recall must agree:
+//     • the FIELD path — bind the cue against the bank by amplitude overlap, lift the winner (an image reconstruction);
+//     • the DESCRIPTOR path — the same read in CLOSED FORM on the 6-float register copy alone (no field).
+//   And the aging between store and recall is measured BOTH ways — from the field bytes (phaseCorr) and from the
+//   register (∠now − ∠stored) — the |field − equation| ≈ 0 EQUIVALENCE that is the whole U1 story's headline.
+//
+//   PLUGGABLE PROPAGATION (the generalization): medium-u1 stores a ±T SPECTRAL LEG (a genuine hologram — the plate
+//   is an interference record, recall is a backward propagation). A phase-only thin app has no propagation: its plate
+//   is the RAW field and recall is plain correlation. Both are the SAME structure with a different `leg` — so `leg`
+//   is a ctx hook, default IDENTITY. A hologram over non-propagating matter is just content-addressable recall; the
+//   spectral leg turns it into optical holography. One module, both regimes.
+//
+//   ctx (all optional except where noted):
+//     leg(field, sign, scale?) → propagate field by sign·T (medium-u1: the spectral leg; default: identity copy).
+//                                Used at STORE (+) to make the plate and at LIFT (−) to reconstruct.
+//     corr(a, b)               → amplitude overlap ∈ [0,1] for binding (default: ampCorr).
+//     phaseCorr(a, b)          → the overlap ANGLE (the field-measured aging; default: the core phaseCorr).
+//     shiftScan(a, b)          → { corrMax, dx, dy } shift-invariant bind (default: crossCorrScan). Only if used.
+//     shift(field, dx, dy)     → translate a field (default: spectralShift). Only if xshift recall is used.
+//     angleOf(register)        → the register's total angle (default: lensU1.angle).
+//     wrap(x)                  → wrap to (−π,π] (default: lensU1.wrap).
+//     beatsOf(name)            → worldline beat count for the Δτ readout (default: () => null).
+//     G                        → grid side (needed only for shiftScan/shift).
+//     bankMax                  → ring-buffer size (default 4).
+//     sigma                    → recalla content-address width in px (default 6).
+//     f32                      → quantize plate bytes to f32 at store (default true — the wire-lattice discipline;
+//                                a leader keeping f64 while a joiner restores f32 splits recall's argmax at the margin).
+//
+//   A PLATE = { p (field image), dop (register copy), pos, obj, w0 (dressed profile), bw (beats at store), k (step) }.
+//   All arithmetic is CPU f64 at the caller's shared drain step → in the determinism contract, byte-identical on peers.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+const _quantF32 = (f) => Float64Array.from(Float32Array.from(f));
+
+export function makeHologramBank(ctx = {}) {
+  const G = ctx.G || 0;
+  const BANK_MAX = ctx.bankMax || 4;
+  const SIG = ctx.sigma || 6;
+  const useF32 = ctx.f32 !== false;
+  const leg = ctx.leg || ((f) => (f ? Float64Array.from(f) : null));   // default propagation = identity copy (raw-field recall)
+  const corr = ctx.corr || ampCorr;
+  const phCorr = ctx.phaseCorr || phaseCorr;
+  const shiftScan = ctx.shiftScan || ((a, b) => crossCorrScan(a, b, G));
+  const shift = ctx.shift || ((f, dx, dy) => spectralShift(f, dx, dy, G));
+  const angleOf = ctx.angleOf || ((op) => lensU1.angle(op));
+  const wrap = ctx.wrap || ((x) => lensU1.wrap(x));
+  const beatsOf = ctx.beatsOf || (() => null);
+
+  const plates = [];
+
+  // store(field, register, meta) — bank a moment. field → (optionally propagated) plate IMAGE `p`; register → the
+  // descriptor `dop`; meta carries pos/obj/w0/bw/k. Returns the banked plate.
+  //   THE TWO REGIMES (the honest typing rule): a FIELD plate has `p` (bind by amplitude overlap, lift reconstructs
+  //   the image, aging measures the field-Δφ). A NON-FIELD plate has `meta.m` instead (arbitrary matter — an M/O
+  //   pair, an IFS genome — bound by a pluggable `metric`, NO lift, aging is descriptor-only). `p` and `m` are
+  //   distinct slots; a plate may carry either. `register` (the algebra half) is ALWAYS present — it is what makes
+  //   the aging readout work for every matter. Pass field=null + meta.m=… for the non-field case.
+  const store = (field, register, meta = {}) => {
+    let p = field != null ? leg(field, +1, meta.scale) : null;
+    if (p && useF32) p = _quantF32(p);
+    const plate = {
+      p, m: meta.m ?? null, dop: { ...register },   // p = field image (nullable) · m = non-field matter (nullable) · dop = the register
+      pos: meta.pos ? [meta.pos[0], meta.pos[1]] : null,
+      obj: meta.obj ?? null,
+      w0: meta.w0 != null ? (useF32 ? _quantF32(meta.w0) : Float64Array.from(meta.w0)) : null,
+      bw: meta.bw != null ? meta.bw : (beatsOf(meta.name || 'W') ?? 0),
+      k: meta.k ?? 0,
+    };
+    plates.push(plate);
+    if (plates.length > BANK_MAX) plates.shift();
+    return plate;
+  };
+
+  // bind(cue, {xshift, scale, metric}) — content-address: score the cue against every plate, return the argmax.
+  //   FIELD bind (no metric): propagate the cue to plate space (leg), score amplitude overlap corr(cueLeg, plate.p)
+  //     — or shift-invariantly (shiftScan) with xshift, reporting the winning offset. cueLeg rides the result for
+  //     the field-Δφ aging.
+  //   METRIC bind (metric given): score metric(cue, plate.m) on the NON-FIELD matter directly — the cue is whatever
+  //     the app's matter is (an M-element, a genome), NOT a field; no leg, no cueLeg (aging will be descriptor-only).
+  //     THE GENERALIZATION: the hologram is a correlation memory over a PLUGGABLE similarity; the field/ampCorr case
+  //     is one instance. metric(cue, plate.m) → a scalar (higher = closer). Plates without `m` score −Infinity.
+  // Returns { index, plate, scores, corr, shift:[dx,dy], cueLeg } or null if the bank is empty.
+  const bind = (cue, { xshift = false, scale, metric = null } = {}) => {
+    if (!plates.length || cue == null) return null;
+    if (metric) {   // METRIC bind (non-field matter): score by the app's similarity on plate.m
+      let best = 0, bc = -Infinity;
+      const scores = plates.map((pl, i) => { const c = (pl.m != null) ? metric(cue, pl.m) : -Infinity;
+        if (c > bc) { bc = c; best = i; } return +(Number.isFinite(c) ? c : 0).toFixed(3); });
+      return { index: best, plate: plates[best], scores, corr: bc, shift: [0, 0], cueLeg: null };   // no cueLeg → agingReadout is descriptor-only (honest: no field to measure)
+    }
+    const c0 = leg(cue, +1, scale);
+    let best = 0, bc = -1, bestD = [0, 0];
+    const scores = plates.map((pl, i) => { let c, d = [0, 0];
+      if (!pl.p) { c = 0; }
+      else if (xshift) { const r = shiftScan(c0, pl.p); c = r.corrMax; d = [r.dx, r.dy]; }
+      else c = corr(c0, pl.p);
+      if (c > bc) { bc = c; best = i; bestD = d; } return +c.toFixed(3); });
+    return { index: best, plate: plates[best], scores, corr: bc, shift: bestD, cueLeg: c0 };
+  };
+
+  // lift(plate, {scale, shift:[dx,dy]}) — reconstruct the IMAGE: the backward leg of the plate (relocated if a shift
+  // is given). Returns the lifted field (a fresh array). For the identity leg this is just the stored plate (± shift).
+  const lift = (plate, { scale, shift: sh = [0, 0] } = {}) => {
+    if (!plate?.p) return null;
+    let out = leg(plate.p, -1, scale);
+    if (out && (sh[0] || sh[1])) out = shift(out, -sh[0], -sh[1]);
+    return out;
+  };
+
+  // bindDesc(pos, obj) — the DESCRIPTOR-ONLY recall (recalla): closed-form content-address with NO field. Two
+  // translated copies of one base object overlap as the autocorrelation of the probe ≈ exp(−|Δpos|²/2σ²); a
+  // cross-object plate (different obj) scores 0. Returns { index, plate, scores } or null. This is the 𝔸-path.
+  const bindDesc = (pos, obj) => {
+    if (!plates.length) return null;
+    const cx = pos?.[0] ?? 0, cy = pos?.[1] ?? 0;
+    let best = 0, bc = -1;
+    const scores = plates.map((pl, i) => { const dx = (pl.pos?.[0] ?? 0) - cx, dy = (pl.pos?.[1] ?? 0) - cy;
+      const c = (pl.obj && obj && pl.obj !== obj) ? 0 : Math.exp(-(dx * dx + dy * dy) / (2 * SIG * SIG));
+      if (c > bc) { bc = c; best = i; } return +c.toFixed(3); });
+    return { index: best, plate: plates[best], scores, corr: bc };
+  };
+
+  // agingReadout(plate, cueLeg, registerNow) — THE DUAL-LAYER [RECALL-∠] proof, as a value. Returns:
+  //   dField   — aging measured from the FIELD BYTES: arg⟨plate, cueLeg⟩ (both in plate space → common propagation
+  //              cancels, leaving pure aging). null if either field is missing (descriptor-only recall).
+  //   dDesc    — aging from the 6-FLOAT register: ∠now − ∠stored (the Σω difference; handles a CHANGING ω exactly,
+  //              which naive ω·Δτ does not).
+  //   dTau     — Δτ in beats (beatsOf(name) − plate.bw).
+  //   dOmegaTau— ω·Δτ, the CLOSED-FORM special case (exact only if ω was constant since store; shown for comparison).
+  //   eqErr    — |dField − dDesc|: the equivalence. < tol ⇒ "the macro-law describes the micro-physics".
+  //   agree    — eqErr == null || eqErr < tol.
+  // The caller logs it however it likes; this owns only the MATH (identical on every peer).
+  const agingReadout = (plate, cueLeg, registerNow, { name = 'W', tol = 0.15 } = {}) => {
+    const dField = (plate?.p && cueLeg) ? wrap(phCorr(plate.p, cueLeg)) : null;
+    const dDesc = wrap(angleOf(registerNow) - angleOf(plate.dop));
+    const dTau = (plate.bw != null) ? ((beatsOf(name) ?? 0) - plate.bw) : null;
+    const dOmegaTau = (dTau != null && registerNow.omega) ? wrap(registerNow.omega * dTau) : null;
+    const eqErr = (dField != null) ? Math.abs(wrap(dField - dDesc)) : null;
+    return { dField, dDesc, dTau, dOmegaTau, eqErr, agree: eqErr == null || eqErr < tol };
+  };
+
+  // regenPlateAtt(plate, pos, probeOf) — regenerate a plate's attractor from the register (NOT shipped in snapshots;
+  // it is a pure fn a = lensC1.apply(dop@pos, ψ_base(obj))). probeOf(obj) → the bare probe field for that object.
+  // Returns the att field, or null. (Optional helper — apps with a probe model use it; others skip.)
+  const regenPlateAtt = (plate, pos, probeOf) => {
+    if (typeof probeOf !== 'function') return null;
+    const base = probeOf(plate.obj); if (!base) return null;
+    const op = { ...plate.dop, tx: (pos?.[0] ?? plate.pos?.[0] ?? 0), ty: (pos?.[1] ?? plate.pos?.[1] ?? 0),
+      mode: (plate.pos ? 'metric' : plate.dop.mode) };
+    try { return lensC1.apply(op, base, G); } catch (e) { return null; }
+  };
+
+  return {
+    plates,
+    store, bind, lift, bindDesc, agingReadout, regenPlateAtt,
+    count: () => plates.length,
+    clear: () => { plates.length = 0; },
+    // save/restore — the bank owns the plate-snapshot STRUCTURE (which fields ride, the dop copy, the ordering); the
+    // app supplies only the field WIRE ENCODING as a hook (base64 for big GPU fields, plain Array for tiny toy
+    // fields — a real per-app choice, not a structural one). This is the answer to "can the register/plate snapshot
+    // codec go to core?": the SHAPE does (here); the ENCODING stays a one-line app hook. `a` (the live-only att) is
+    // NEVER shipped — it is a pure fn regenerated at restore (regenPlateAtt), saving 1/3 of every plate's bytes.
+    //   save({serialize, serializeM})     — serialize(field)→wire (default Array.from); serializeM(matter)→wire
+    //                                        (default: JSON structured clone — m is plain objects, not typed arrays).
+    //   restore(arr, {deserialize, deserializeM}) — the inverse hooks. Rebuilds the bank (field p AND non-field m).
+    save: ({ serialize = (f) => (f ? Array.from(f) : null), serializeM = (m) => (m != null ? JSON.parse(JSON.stringify(m)) : null) } = {}) => plates.map((pl) => ({
+      p: serialize(pl.p), m: serializeM(pl.m), dop: { ...pl.dop }, pos: pl.pos ? [...pl.pos] : null,
+      obj: pl.obj ?? null, w0: pl.w0 != null ? serialize(pl.w0) : null, bw: pl.bw, k: pl.k,   // a NOT shipped (regenerated)
+    })),
+    restore: (arr, { deserialize = (v) => (v ? Float64Array.from(v) : null), deserializeM = (m) => (m != null ? JSON.parse(JSON.stringify(m)) : null) } = {}) => {
+      plates.length = 0;
+      for (const pl of (arr || [])) plates.push({
+        p: deserialize(pl.p), m: deserializeM(pl.m), dop: { ...pl.dop }, pos: pl.pos ? [...pl.pos] : null,
+        obj: pl.obj ?? null, w0: pl.w0 != null ? deserialize(pl.w0) : null, bw: pl.bw, k: pl.k,
+      });
+    },
+  };
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ── MERGED FROM medium-u1-slots.js ── THE OBSERVER SLOT ABSTRACTION (makeLeash / makeSlot / makeSlotBank / makeSlotMux)
+// (was a separate file; consolidated into medium-core.js — the one abstract-medium module. medium-gpu.js
+//  stays separate because it is WebGL-bound and would break core's headless purity.)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//  MEDIUM-U1 SLOTS — the observer SLOT abstraction (doc/medium-u1-slots.md). The U(1)/ℂ* register arc
+//  made into the app's ORGANIZING PRINCIPLE: an observer slot is (field, readOp, clock τ, register,
+//  leash), and transport / eye / perception / holography are all BEHAVIORS OF SLOTS, not separate
+//  subsystems. This module owns ONLY the slot facade + the ONE leash law; the fork-critical substrate
+//  (fields, mux, τ queues, GPU) stays in medium-gpu (_E) + medium-core + kwe-tau, reused not copied.
+//
+//  THE UNIFICATION (verified in the oracle, medium.js:1551 — "a different transport law for V than W"):
+//  W transports by regenerating its attractor (makeProbeField at the eased position), V/P by rolling a
+//  stored plate (rollField). The LEASH LAW (advance gx,gy toward tx,ty at ≤1px/beat × the lock-slack
+//  sigmoid) is IDENTICAL for every slot — the only per-slot difference is `movAtt(gx,gy)`. So transport
+//  is not a special drive: it is the W slot's leash with a REGENERABLE movAtt. One leash, N slots.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// makeLeash() — the per-slot chase command + eased position + τ-cadence cursor (the 9-field record the
+// oracle carried as _V.virt* globals, now owned per slot). go/tx/ty = the command; gx/gy = the eased
+// operator position (where movAtt regenerates/rolls to); ll/l0 = the live/baseline lock; lt/lk = the
+// τ_i cadence cursor (last slot-beat consumed / kp at last advance). reset() releases an in-flight chase.
+export function makeLeash() {
+  const L = { go: false, tx: 0, ty: 0, gx: 0, gy: 0, ll: 1, l0: 0, lt: 0, lk: 0 };
+  return {
+    state: L,
+    virtGo(tx, ty) { L.go = true; L.tx = tx; L.ty = ty; L.l0 = 0; L.lt = -1; L.lk = 0; },   // COMMAND a fresh target; lt=-1 = command-fresh → first advance fires immediately, baseline re-learns
+    setTarget(tx, ty) { L.go = true; L.tx = tx; L.ty = ty; },   // MOVE the target WITHOUT re-arming (objorbit's continuous motion; must NOT reset l0/lt each frame — that would freeze the eased chase)
+    release() { L.go = false; L.tx = 0; L.ty = 0; L.gx = 0; L.gy = 0; L.l0 = 0; L.lt = 0; L.lk = 0; },
+    save: () => ({ ...L }),
+    restore: (s) => { if (s) Object.assign(L, s); },
+  };
+}
+
+// THE LEASH LAW (verbatim from the oracle _leashAdvance, generalized): advance the eased position (gx,gy)
+// toward the target (tx,ty) by ≤1px/beat × a slack sigmoid. THREE MODES (the sig throttle is the ⟲coevo
+// Einstein loop — "matter tells geometry how far it may go"; the DIFFERENCE is WHICH matter observable gates it):
+//   • FIELD-FED (field != null, corr supplied): sig paces on ampCorr(field, mov) — the soliton stalls when it loses
+//     COHERENCE with its target. Reads the FIELD → NOT replay-safe (per-peer field noise → gx forks). The oracle form.
+//   • GAIN-GATED (field == null, gainOf supplied): sig paces on a DESCRIPTOR ENERGY observable g = gainOf(L) ∈ (0,1]
+//     — matter's ENERGY STATE throttles its own transport. This is the HONEST ℂ* Einstein loop (doc §"why can't the
+//     Einstein loop be achieved — IT CAN"): the back-reaction SURVIVES but the sensor is a REGISTER coordinate, not the
+//     field. When gainOf is a pure fn of leash state (the descriptor-predicted lag), gx/gy stays exact → in regH →
+//     replay-safe. (An unpinned slot may pass a FIELD-measured gainOf for true energy back-reaction — its choice.)
+//   • DESCRIPTOR-ONLY (field == null, no gainOf): sig = 1, full deterministic ≤1px/beat, a PURE fn of leash state.
+//     The DOP-DRIVEN REPLAY default (no back-reaction; the target moves open-loop, the pinned soliton follows).
+// Returns the new moving attractor (for setObjField), or null if not chasing.
+export function leashAdvance(L, field, movAtt, corr, gainOf) {
+  if (!L.go) return null;
+  const mov0 = movAtt(L.gx, L.gy); if (!mov0) return null;
+  let sig = 1;
+  if (field && corr) { L.ll = corr(field, mov0);   // FIELD-FED pacing (not replay-safe; kept for the field-driven modes)
+    if (L.l0 <= 0) L.l0 = L.ll || 1; else L.l0 = L.l0 * 0.98 + L.ll * 0.02;   // slow always-learning baseline
+    sig = Math.max(0, Math.min(1, (L.ll / Math.max(1e-6, L.l0) - 0.75) * 4)); }   // the ⟲coevo sigmoid
+  else if (gainOf) { const g = gainOf(L); L.ll = g;   // GAIN-GATED (ℂ* honest back-reaction): energy throttles transport
+    // sig ∈ [0,1] rises with the gain observable: g≥1 (matter kept up) → full advance; g→0 (matter lagging) → target waits.
+    // Same shape as the coevo sigmoid but on the DESCRIPTOR energy, so (if gainOf is descriptor-derived) gx/gy stays exact.
+    sig = Math.max(0, Math.min(1, (g - 0.25) / 0.5)); }
+  else { L.ll = 1; }   // DESCRIPTOR-ONLY: full advance, no read → gx/gy is a pure fn of the shared step (replay-safe)
+  const dx = L.tx - L.gx, dy = L.ty - L.gy, d = Math.hypot(dx, dy);   // ≤1px per beat in ANY direction (normalized step)
+  if (d > 1e-9) { const st = Math.min(1, d) * sig; L.gx += (dx / d) * st; L.gy += (dy / d) * st; }
+  return movAtt(L.gx, L.gy);
+}
+
+// leashGainPredicted(L, maxLag) — the DESCRIPTOR-derived energy observable for the gain-gated Einstein loop: a pure
+// function of leash state (no field). Models "how much has matter fallen behind its target": g = 1 − min(1, lag/maxLag)
+// where lag = |target − eased-position| accumulated as a slow follower of the gap. g≈1 when the soliton is at its
+// target (kept up), g→0 when the target has run far ahead (matter lagging → the loop throttles the target). In regH
+// (pure leash arithmetic) → replay-safe. The default gainOf for a PINNED slot's Einstein loop.
+export function leashGainPredicted(L, maxLag = 4) {
+  const dx = L.tx - L.gx, dy = L.ty - L.gy, lag = Math.hypot(dx, dy);
+  // EMA the lag onto the leash (L.lg) so a momentary jump doesn't spike the gate; slow follower like the coevo baseline.
+  L.lg = (L.lg == null) ? lag : (L.lg * 0.9 + lag * 0.1);
+  return Math.max(0, Math.min(1, 1 - L.lg / Math.max(1e-6, maxLag)));
+}
+
+// leashGainEnergy(energy, e0) — THE UNPINNED (ℂ*) TWIN of leashGainPredicted: the FIELD-MEASURED gain observable for
+// the gain-gated Einstein loop. Where the pinned gate reads the DESCRIPTOR's predicted lag (pure, replay-safe), the
+// UNPINNED gate reads the TRUE matter energy ratio g = |ψ|²/e0 ∈ [0,1] — real back-reaction (the field's own energy
+// tells geometry how far it may go). g≈1 when the field kept its energy budget, g→0 when it drained (matter lagging →
+// throttle the target). The two together ARE the "why can't the Einstein loop be achieved — it CAN" pair (doc): pinned
+// = descriptor-side (in regH, deterministic), unpinned = field-side (reads bytes → may fork regH, the honest ℂ* price).
+// Named here so BOTH gain modes live together in core, even though only a TRANSPORTING slot (medium-u1's W) uses them.
+export function leashGainEnergy(energy, e0) {
+  return e0 > 0 ? Math.max(0, Math.min(1, energy / e0)) : 1;
+}
+
+// leashDue(L, kp, beats) — the τ_i cadence gate (verbatim from the oracle _leashDue): a commanded slot's
+// leash advances once per SLOT-BEAT (its own worldline clock's integer crossing), NOT the flat 21-step
+// grid. `beats` = the slot's τ-kernel beat count (or null = no clock → flat kp%21 fallback, the no-op
+// guarantee). Cursor on the leash (lt = slot-beats consumed, lk = kp at last advance).
+export function leashDue(L, kp, beats) {
+  if (beats == null) return (kp % 21) === 0;
+  if ((beats | 0) > (L.lt | 0)) { L.lt = beats | 0; L.lk = kp; return true; }
+  return false;
+}
+
+// makeSlot({ name, kind, bank, index, engine, clockName, movAtt }) — the observer SLOT facade. It does NOT
+// own the readOp (that lives in the observer bank, ops[index] — the extracted store) or the field (that
+// lives in the engine / a plate — the extracted state); it BINDS them with a clock name + a leash + the
+// per-kind movAtt strategy, so the mux/register/render can treat every slot uniformly.
+//   name      'W' | 'V' | 'P1' | 'P2' — the worldline clock key + slot label
+//   kind      'regenerable' (a live object → movAtt = makeProbeField at eased pos)  |
+//             'plate'       (a stored moment → movAtt = rollField of the stored att)
+//   bank      the makeObserverBank instance (readOp = bank.ops[index], the lensC1 element)
+//   engine    the makeSolitonEngine instance (_E) — for rollField + the shared substrate
+//   movAtt    (gx,gy) → Float64 attractor field at the eased operator position (the per-kind strategy;
+//             the caller wires it: regenerable = () => makeProbeField(obj, {x0:1+gx,y0:1+gy}); plate =
+//             (gx,gy) => engine.rollField(storedAtt, round(gx), round(gy)))
+// The slot exposes: readOp (live descriptor), leash (+ virtGo/release), clockName, kind, and the register
+// reads (angle/beats/tau via the caller's tauK). One object; the mux advances it, the render draws it.
+export function makeSlot({ name, kind = 'plate', bank, index, engine, clockName = name, movAtt = null } = {}) {
+  const leash = makeLeash();
+  const S = {
+    name, kind, index, clockName, engine,
+    leash,
+    // ── the slot's FIELD + operator storage (the canonical store the mux parks to; null until the slot is born) ──
+    field: null,          // this slot's canonical ψ (frozen at its last mux-transition; W's rides the engine buffer live)
+    att: null,            // the slot's stored operator/attractor (a plate slot chases/holds this; regenerable slots leave it null)
+    e0: 1,                // the slot's energy-cap target
+    kv: 0,                // this slot's PROPER-step counter (τ_i clocks on it; W uses the engine's kwSteps)
+    // ── per-slot BEHAVIOR FLAGS (the S2 ruling: V/P asymmetries are DATA, not code branches). The uniform
+    //    advance reads these as optional hooks; a bare register slot leaves them all false/0. ──
+    mirror: false,        // V-style: receive the SAME operator drive as the buffer-home (the Lyapunov readout)
+    hold: false,          // driven toward the slot's OWN recorded att (parked at the remembered moment)
+    leak: 0,              // κ: ψ_slot += κ·ψ_home at shared boundaries (imperfect isolation)
+    ears: null,           // the slot's reactor state (CFAR posts) — null = no ears (added when the ears feature lands)
+    born: false,          // has this slot been recorded/booted into a live field? (W is born at seed)
+    get readOp() { return bank.ops[index]; },          // the lensC1 element — LIVE (mutated by verbs/beats at shared steps)
+    // movAtt: the per-kind attractor at the eased leash position. Overridable (a slot's stored att changes
+    // on record/recall; a regenerable slot's object changes on obj switch) — the caller re-binds it.
+    movAtt: movAtt || (() => null),
+    virtGo(tx, ty) { leash.virtGo(tx, ty); },          // shiftX/Y → virtGo (transport = THIS command on the W slot; fresh command)
+    setTarget(tx, ty) { leash.setTarget(tx, ty); },    // move the target without re-arming (objorbit continuous motion)
+    release() { leash.release(); },
+    // register reads (the observer's phase/aging), delegated to the algebra + the caller's τ kernel:
+    angle() { return lensC1.angle(this.readOp); },     // total reference angle = phase + prec
+    // save/restore the slot's OWN control state (leash + kind + flags); the readOp rides the bank snapshot, the
+    // FIELD/att ride the engine/plate snapshot (typed arrays go through the app's {__f64} boundary, not here).
+    save() { return { name, kind: S.kind, leash: leash.save(), e0: S.e0, kv: S.kv, mirror: S.mirror, hold: S.hold, leak: S.leak, born: S.born }; },
+    restore(s) { if (!s) return; if (s.kind) S.kind = s.kind; leash.restore(s.leash);
+      S.e0 = s.e0 ?? 1; S.kv = s.kv | 0; S.mirror = !!s.mirror; S.hold = !!s.hold; S.leak = s.leak || 0; S.born = !!s.born; },
+  };
+  return S;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//  THE SLOT MUX (S2) — the §7.44 clock-phase mux re-expressed as "advance the OWNING slot", uniform for
+//  every slot, with the V/P asymmetries (mirror/hold/leak/ears) as per-slot FLAGS not code branches.
+//  This is the fork-critical scheduling law from the oracle _muxVirtualStep, transcribed FAITHFULLY (its
+//  determinism fixes are the comments' ledger) but organized slot-first. The GPU + the physics callbacks
+//  (selfClkTick / kApply / tauAdv / beta / applyOpenBoundary / ampCorr) are passed in via ctx — the C4
+//  boundary: this module owns the SCHEDULING + the uniform advance STRUCTURE, the app owns the physics.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// makeSlotMux(ctx) — ctx = {
+//   gpu()                the live IFSGpu handle getter
+//   engine               the makeSolitonEngine (_E) — muxStepped/kwSteps + rollField
+//   muxClocks(k,nSl,beats)  the two-clock law (medium-core) — { ph (fine buffer owner), capPh (coarse coupling/τ) }
+//   K                    the coupling store (medium-core) — shouldCapture/capture, edge/src
+//   selfClk()            the selfClock beat state (or null) — { beats, lastK }
+//   DT, SOL_GAMMA, SOL_ISAT, Q   the soliton-step constants + the quantum boundary
+//   beta(i)              the pin amplitude for slot i (refAmp sweep)
+//   kApply(field, i)     apply slot i's coupling edges (physics; medium-side)
+//   selfClkTick(field, k, refAtt, ph, kp)   the beat detector + τ advance (physics; medium-side)
+//   tauAdv(k)            advance global τ (physics; medium-side)
+//   applyOpenBoundary(field)   the sponge (physics; medium-side)
+//   ampCorr(a,b)         amplitude correlation (physics; medium-side)
+//   boundOpen()          the open-boundary toggle
+// }
+// The returned mux exposes step(k, slots, homeAtt) → true if a NON-home slot owned k (the drive `continue`s;
+// queues/verbs are home-slot events). Home = slots[0] (W) owns the live GPU buffer; others park to slot.field.
+export function makeSlotMux(ctx) {
+  const { gpu, engine, muxClocks, K, DT, SOL_GAMMA, SOL_ISAT } = ctx;
+  const M = { loaded: 0, nSl: 1 };   // mux SCHEDULING state (buffer owner + live-slot count) — the mux's own, not the engine's
+  const nSlots = (slots) => slots.reduce((n, s) => n + (s.born ? 1 : 0), 0);   // live slots (born = has a field)
+  // park the loaded non-home slot's field back to its store + restore the home field to the buffer
+  const parkToHome = (slots, homeAtt, loaded) => { const g = gpu(); if (loaded === 0 || !g) return;
+    slots[loaded].field = g.readEyePsi();                       // write the loaded slot's live field home
+    g.setEyePsi(slots[0].field); M.loaded = 0; if (homeAtt) g.setObjField(homeAtt); };
+
+  // advanceSlot(slot, k) — the UNIFORM per-slot advance (the register core; flags add optional hooks). The
+  // slot owns the GPU buffer here. movAtt drives the chase; the flags (mirror/hold/leak/ears) layer on.
+  const advanceSlot = (slot, k, homeAtt, homeField) => { const g = gpu();
+    const beats = ctx.selfClk() ? null : null;   // (τ cadence resolved by the app's tauK via leashDue; see below)
+    const indep = slot.leash.state.go && slot.att;
+    const holdPin = !slot.mirror && !indep && slot.hold && slot.att;
+    const vh = indep || holdPin;
+    // pin amplitude (superpose toward the operator) — mirror uses the home att, else the slot's own
+    if ((slot.mirror && homeAtt) || vh) g.applyEyeSuperpose(ctx.beta(slot.index));
+    if (holdPin) { const xtra = Math.min(M.nSl - 1, 2); for (let e = 0; e < xtra; e++) g.applyEyeSuperpose(ctx.beta(slot.index)); }   // MUX-RATE COMPENSATION (held slice only): match the home slot's per-global-step crush
+    g.stepEyeN(1, DT); g.applyEyeNlSpm(-SOL_GAMMA, SOL_ISAT, DT); g.applyEyeEnergyCap(slot.e0);
+    slot.kv++;
+    return { indep, holdPin };
+  };
+
+  return {
+    nSlots,
+    advanceSlot,
+    parkToHome,
+    // step(k, slots, homeAtt, homeField) — the two-clock schedule. Returns true if a non-home slot owned k.
+    loaded: () => M.loaded,                                     // the app render reads this (the "ended mid-slice" desync fix)
+    step(k, slots, homeAtt) {
+      const nSl = nSlots(slots);
+      M.nSl = nSl;                                               // for advanceSlot's mux-rate compensation
+      if (nSl < 2) return false;
+      const sc = ctx.selfClk();
+      // watchdog (Q=7-aligned): force a beat if none in ≥84 steps → bounds source staleness (shared-k pure fn)
+      if (sc && (k % 7) === 0 && k - sc.lastK >= 84) { sc.beats++; sc.lastK = k; }
+      const { ph, capPh } = muxClocks(k, nSl, sc ? sc.beats : null);
+      // COUPLING-SOURCE CAPTURE — gated PURELY on the coarse-clock (capPh) change (the third-edge-fix law): read
+      // every slot's CANONICAL store (never the peer-local GPU buffer), freeze into K.src, BEFORE the park logic.
+      if (K.shouldCapture(capPh)) {
+        if (M.loaded === 0) slots[0].field = gpu().readEyePsi();   // home owns → flush its live field to its store
+        else parkToHome(slots, homeAtt, M.loaded);                 // some other slot owns → park it + restore home
+        K.capture(slots.map((s) => s.field), k, capPh);
+      }
+      if (ph === 0) { if (M.loaded !== 0) parkToHome(slots, homeAtt, M.loaded); return false; }   // home slot owns k → the drive runs (not here)
+      // a NON-home slot owns k: park the previously-loaded slot, load THIS slot's field + operator
+      if (M.loaded !== ph) { parkToHome(slots, homeAtt, M.loaded);
+        slots[0].field = gpu().readEyePsi();                    // stash home
+        const slot = slots[ph]; gpu().setEyePsi(slot.field); M.loaded = ph;
+        if (slot.att) { const chasing = slot.leash.state.go; gpu().setObjField(chasing ? slot.movAtt(slot.leash.state.gx, slot.leash.state.gy) : slot.att); }
+        else if (slot.mirror && homeAtt) gpu().setObjField(homeAtt);
+      }
+      const slot = slots[ph];
+      const { indep } = advanceSlot(slot, k, homeAtt);
+      // the slot's PROPER-STEP events (its own kv grid — pulled out of the global-Q block so interlacing can't starve it):
+      if (indep && ctx.leashDue(slot.leash.state, slot.kv, ctx.beatsOf ? ctx.beatsOf(slot.name) : null)) {
+        const qv = gpu().readEyePsi(); const nm = leashAdvance(slot.leash.state, qv, (gx, gy) => slot.movAtt(gx, gy), ctx.ampCorr); if (nm) gpu().setObjField(nm);
+      }
+      // the shared quantum boundary (coupling / boundary / selfClk-τ) — at (k+1)%Q, on the slot's own field:
+      if ((ctx.boundOpen() || slot.leak > 0 || ctx.selfClk() || K.edge) && ctx.Q > 0 && ((k + 1) % ctx.Q) === 0) {
+        const qv = gpu().readEyePsi();
+        if (slot.leak > 0 && slots[0].field) for (let j = 0; j < qv.length; j++) qv[j] += slot.leak * slots[0].field[j];   // home→slot leak
+        ctx.kApply(qv, slot.index);
+        if (ctx.boundOpen()) ctx.applyOpenBoundary(qv);
+        if (ctx.selfClk()) { const refAtt = slot.mirror ? homeAtt : (slot.leash.state.go && slot.att ? slot.movAtt(slot.leash.state.gx, slot.leash.state.gy) : slot.att); ctx.selfClkTick(qv, k + 1, refAtt, ph, slot.kv); ctx.tauAdv(k + 1); }
+        gpu().setEyePsi(qv);
+      }
+      if (ph >= 0 && ph < 4) engine.muxStepped[ph]++;
+      return true;
+    },
+  };
+}
+
+// makeSlotBank({ names, bank, engine, kinds }) — the N-slot array over ONE observer bank + ONE engine.
+// names = ['W','V','P1','P2']; kinds = per-name 'regenerable'|'plate' (default: W regenerable, rest plate).
+// The caller wires each slot's movAtt after construction (it needs the app's makeProbeField / stored atts).
+export function makeSlotBank({ names = ['W', 'V', 'P1', 'P2'], bank, engine, kinds = {} } = {}) {
+  const slots = names.map((name, index) => makeSlot({
+    name, index, bank, engine,
+    kind: kinds[name] || (name === 'W' ? 'regenerable' : 'plate'),
+    clockName: name,
+  }));
+  return {
+    slots,
+    byName: (nm) => slots[names.indexOf(nm)],
+    count: () => slots.length,
+    save: () => slots.map((s) => s.save()),
+    restore: (arr) => { if (Array.isArray(arr)) slots.forEach((s, i) => s.restore(arr[i])); },
+  };
 }

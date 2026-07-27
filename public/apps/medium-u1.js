@@ -10,14 +10,15 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 //   eye, perception, holography are BEHAVIORS OF SLOTS, not separate subsystems (the pre-U1 scopes/modes are
 //   gone — the tunnel/instanton arc is preserved dormant in medium-u1-oracle for later resurrection).
 //
-//   TRANSPORT = THE W SLOT'S LEASH (the unification, verified in test/medium-u1-slots.js): shiftX/Y → W.virtGo.
+//   TRANSPORT = THE W SLOT'S LEASH (the unification, verified in test/medium-u1-slots.test.mjs): shiftX/Y → W.virtGo.
 //   W's movAtt REGENERATES its attractor (makeProbeField at the eased leash position); a plate slot (V/P) ROLLS
 //   a stored plate — the SAME leashAdvance law drives both. So there is no special "transport drive": W is a slot
 //   whose attractor is regenerable, commanded by the same virtGo V/P use.
 //
 //   Built over the EXTRACTED substrate (imported, never copied): medium-gpu (_E: fields/stepSoliton/snapshot),
-//   medium-core (bank/muxClocks/coupling/chainMeter/step-clock), kwe-tau (worldline clocks), medium-u1-slots
-//   (the slot bank + mux), soliton-algebra (lensC1). World = hologram_world_u1 (node 'mediumU1').
+//   medium-core (bank/coupling/kuramoto/chain-meter/step-clock + the register ENGINE + HOLOGRAM bank + SLOT bank +
+//   regHash + register-readout + field-matter — the whole abstract-medium surface, consolidated), kwe-tau (worldline
+//   clocks), soliton-algebra (lensC1). World = hologram_world_u1 (node 'mediumU1').
 //
 //   BUILD STATUS: S3 (this) = the W-home transport chase over the slot bank (mux ready for V at S5/S6). The
 //   oracle (selo 'medium-u1-oracle') is the live PARITY WITNESS — diff the chase/lock against it.
@@ -28,9 +29,11 @@ import {
   hologramWorldProgram, REFLECTOR_MS, SUBTICK_MS, GRID, N_CELLS, DT, SRC_ALPHA, RENDER_SCALE,
 } from '../hologram_world_u1.js';
 import { makeProbeField, lensU1, lensC1 } from '../soliton-algebra.js';
-import { makeObserverBank, makeStepClock, makeCouplingStore, muxClocks, chainMeter, makeStampedInput, hashField as _hashField, hashNums as _hashNums, opNums as _opNums, ampCorr as _ampCorr, phaseCorr, syncClockRate, kernelABCD, kernelSymbol, packetD, qStep, qFixedPoint, qSpmRate, kernelPropagateSpectral, kernelLambdaGrid, fft2d, crossCorrScan, spectralShift, leapfrogStepX, coverStep, coverResidual, secondMoment, secondMomentTorus, virialRateX, virialSpec, slCasimir, regionStepX } from '../medium-core.js';
+import { makeObserverBank, makeStepClock, makeCouplingStore, kuramotoStep, regHash, makeRegisterReadout, muxClocks, chainMeter, makeStampedInput, hashField as _hashField, hashNums as _hashNums, opNums as _opNums, ampCorr as _ampCorr, phaseCorr, syncClockRate, kernelABCD, kernelSymbol, packetD, qStep, qFixedPoint, qSpmRate, kernelPropagateSpectral, kernelLambdaGrid, fft2d, crossCorrScan, spectralShift, leapfrogStepX, coverStep, coverResidual, secondMoment, secondMomentTorus, virialRateX, virialSpec, slCasimir, regionStepX,
+  makeSlotBank, makeSlotMux, leashAdvance, leashDue, leashGainPredicted, leashGainEnergy, makeRegisterEngine } from '../medium-core.js';   // the whole abstract-medium surface, one import (was 3 lines pre-consolidation). leashGainEnergy = the unpinned (ℂ*) coevo-gain twin of leashGainPredicted
 import { makeSolitonEngine } from '../medium-gpu.js';
-import { makeSlotBank, makeSlotMux, leashAdvance, leashDue, leashGainPredicted } from '../medium-u1-slots.js';
+import { makeHologramBank, occlude, keptFraction } from '../medium-core.js';   // occlude/keptFraction = the CPU/f64 occluder (the "break the plate" demo input, twin of ifs-gpu GLSL_EYE_HOLOGRAM)
+import { makeRng } from '../krestianstvo-wavefront-evaluator.js';   // the KWE core PRNG (xoshiro128**) — deterministic, seedable; used for the occlude-mask seed (NOT Math.random — replicated)
 
 const STEPS_PER_PHASE = 19, _MON_RATE = 3.0, Q = 7, SLOTN = ['W', 'V', 'P1', 'P2'];
 const _SOL_GAMMA = 20, _SOL_ISAT = 1;         // saturable-focusing (the soliton sustain)
@@ -57,7 +60,16 @@ function makeMediumU1Renderer(core) {
     const lbl = document.createElement('span'); const _txt = (v) => `${label} ${(+v).toFixed(2)}`; lbl.textContent = _txt(val);
     const s = document.createElement('input'); s.type = 'range'; s.min = min; s.max = max; s.step = step; s.value = val; s.style.width = '90px';
     s.addEventListener('input', () => { lbl.textContent = _txt(s.value); onInput(+s.value); });
-    const setVal = (v) => { if (document.activeElement === s) return; if (+s.value !== +v) s.value = v; lbl.textContent = _txt(v); };
+    // DRAG GUARD: suppress reflection only WHILE the user is actually dragging — NOT merely while the element holds
+    //   focus. A range input KEEPS focus after the pointer is released, so a focus-based guard silently froze the
+    //   slider forever after its first drag ("the model updates but the UI doesn't") — the bug for any slider you
+    //   drag and then WATCH (the damage slider). Pointer/key down→up (and blur) bracket a real interaction.
+    let _dragging = false;
+    const _down = () => { _dragging = true; }, _up = () => { _dragging = false; };
+    s.addEventListener('pointerdown', _down); s.addEventListener('keydown', _down);
+    s.addEventListener('pointerup', _up); s.addEventListener('keyup', _up);
+    s.addEventListener('blur', _up); window.addEventListener('pointerup', _up);   // pointerup can land outside the thumb
+    const setVal = (v) => { if (_dragging) return; if (+s.value !== +v) s.value = v; lbl.textContent = _txt(v); };
     wrap.appendChild(lbl); wrap.appendChild(s); return { wrap, input: s, setVal }; };
 
   return (world, peerId, containerId, sendCursorMove, _injectEvent) => {
@@ -84,6 +96,21 @@ function makeMediumU1Renderer(core) {
     const _sb = makeSlotBank({ bank: _bank, engine: _E });   // W (regenerable) + V/P (plate)
     const W = _sb.byName('W'), V = _sb.byName('V');
     let _driveMode = 'transport', _lensObj = 'letterA', _objExtras = {};   // a makeProbeField object (the cube path needs _cubeField — S5+); letterA/ring/point are the regenerable-att objects
+    // ── 'lightpts' — REAL light points: a 3×3 lattice of GAUSSIAN sources with a FINITE WAIST (σ=5px). The finite
+    //    waist is the physics (measured): the ring kernel has a low-pass knee kKnee = j₀,₁/rMax ≈ 0.22–0.27 rad/cell;
+    //    a hard 3×3 _pdot is nearly a delta whose spectrum lives ABOVE the knee, in the dispersive/chaotic band —
+    //    isolated hard dots CANNOT form a coherent lock there (measured: speckle ~1.1 = noise). A σ=5 Gaussian sits
+    //    BELOW the knee → coherent, oscillating, interfering (measured: speckle 0.78 ≈ letterA's 0.75, temporal
+    //    liveliness 0.44 = letterA's 0.43). A real optical point source has a waist; a delta is not a light point.
+    _objExtras.lightpts = (f, G2, { x0, y0, side }) => { const n = 3, sig = 5;
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const cx = x0 + side * (i + 0.5) / n, cy = y0 + side * (j + 0.5) / n;
+        for (let y = 0; y < G2; y++) for (let x = 0; x < G2; x++) { const w = 0.8 * Math.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * sig * sig));
+          if (w > 0.01) { const p = (y * G2 + x) * 2; if (w > f[p]) f[p] = w; } } } };
+    // the probe geometries the LOCK can hold (makeProbeField's vocabulary). letterA/cross are DENSE (drawn as a chain
+    // of dots along each stroke — that density is the on-screen "texture"); lightpts are SOFT Gaussian light points
+    // (below the kKnee → coherent); point/pair/grid are HARD dots (above the knee → they decohere; kept for contrast).
+    // Switching is a replicated verb (see 'lensobj') and passes through a DOOR (field re-seeded — see the handler).
+    const _PROBE_OBJS = ['ring', 'point', 'pair', 'grid', 'cross', 'blob', 'letterA', 'depthscene', 'lightpts'];
     let _solSeeded = false, _solLogBar = -1, _solE0 = -1;
     let _objOrbTheta = 0, _lastTgtX = NaN, _lastTgtY = NaN;   // last commanded transport target (virtGo only on CHANGE — re-arming every frame freezes the chase)
     let _muxOn = false;   // ⧉mux time-share (S7+); OFF (S6) → V runs in a parallel drive block (nSl=1 for W's clock)
@@ -127,6 +154,32 @@ function makeMediumU1Renderer(core) {
     // physics flips at the same shared step. Default OFF (the classic bilinear A is the verified reference); flip
     // live with mu1.exactAtt(true) and watch lock→A — the oracle protocol for a physics-affecting swap.
     let _xattOn = false;
+    // _liveAtt(i) — THE ONE ANSWER to "what is slot i actually pinned to right now?": the ψATT hold (rolled to the
+    //   current leash offset + rotated by the register angle) when adopted, else null so the caller falls back to its
+    //   own probe/plate regeneration. Used by store (the plate must bank the LIVE target, not the retired probe) and
+    //   by the residual/⊘ views, so those cannot drift from what the engine is really chasing.
+    const _liveAtt = (i) => { const s = _sb.slots[i]; if (!s || !s._attHold || s._digestLeft > 0) return null;
+      return _xattBuild(_holdOp(i, s), _holdDx(s), _holdDy(s), s._attHold); };
+    // ── THE HOLD IS ROTATED BY THE AGING ONLY — the descPhi0 convention, which ψATT was violating. A probe base is
+    //    phase-NEUTRAL (real-valued, global phase 0), so rotating it by the ABSOLUTE register angle is correct: the
+    //    register supplies the whole phase. A ψATT hold is a CAPTURED FIELD that ALREADY CARRIES the phase it had at
+    //    capture — rotating it by the absolute angle again DOUBLE-COUNTS that phase, so the pin target drifts away
+    //    from the very field it was cut from and the lock cannot settle. This is exactly why `descBase` is rotated by
+    //    ∠now − descPhi0 (see _descProject/_descPose) and never by ∠now. `_holdPhi0` records the register angle AT
+    //    capture, so the pin target = hold rotated by the AGING since then — and dop keeps governing the POSE (which
+    //    is the user's point: the register CAN lock a recalled hold, once it rotates by the delta, not the absolute).
+    const _holdOp = (i, s) => ({ ..._lensOp[i], phase: lensU1.wrap(lensU1.angle(_lensOp[i]) - (s._holdPhi0 || 0)), prec: 0 });
+    // ── THE HOLD SHIFT MUST BE INTEGER. MEASURED: spectralShift is EXACT for integer offsets (RMS deviation from a
+    //    plain index roll = 0.0000%), but a FRACTIONAL offset of a hard-edged object leaks 13–17% of its amplitude
+    //    OUTSIDE a generously-dilated support — real Gibbs ringing from the letter's sharp pixel edges, streaked along
+    //    the shift axes (the horizontal/vertical banding on screen). Under ψATT the hold is re-shifted EVERY BAR at
+    //    whatever fractional offset the leash sits at, so the PIN TARGET itself becomes 13–17% ringing — and a pin
+    //    target that noisy cannot cleanly pull the soliton to a new place: it fights it, which reads as "tries to
+    //    move, then re-locks back". Rounding the shift keeps the target CLEAN (exact roll) and costs at most half a
+    //    pixel of placement — far less than the sub-pixel accuracy the ringing was destroying. (A probe att does not
+    //    need this: it is REGENERATED at the position, never resampled.)
+    const _holdDx = (s) => Math.round(s.leash.state.gx - (s._attHoldPos?.[0] ?? 0));
+    const _holdDy = (s) => Math.round(s.leash.state.gy - (s._attHoldPos?.[1] ?? 0));
     const _xattBuild = (op, gx, gy, base) => { const sh = spectralShift(base, gx, gy, GRID);
       const ph = lensU1.angle(op); if (!ph) return sh;
       const c = Math.cos(ph), sn = Math.sin(ph);
@@ -201,6 +254,88 @@ function makeMediumU1Renderer(core) {
     // ψ←(1−leak)(ψ+βA) is ψ*≈βA(1−leak)/leak; ψ*≈A ⇒ leak≈β/(1+β). Under-damping (the old fixed 0.02) let the
     // pin over-accumulate → a dim broad blob indistinguishable from the dispersing free field (user-caught).
     const _linLeak = () => { const b = 0.15 * (_lensOp[0].beta || 1); return Math.max(0.02, Math.min(0.5, b / (1 + b))); };
+    // ── THE REGISTER ENGINE (extracted to medium-core.js): the pure meta-circular physics core. The app owns
+    //    and mutates the live state (ring cache, lens register, slots, edges, linear mode); the engine only READS
+    //    it through these getters, so replication/snapshot/verbs stay entirely app-side. See the module header for
+    //    the boundary. Byte-identical to the old inline functions — only their closure vars became ctx getters.
+    const _reg = makeRegisterEngine({
+      GRID, DT, N_CELLS, gamma: _SOL_GAMMA, isat: _SOL_ISAT,
+      ringCache: () => _E.ringCache, kernelVer: () => _E.kernelVer,
+      lensOp: (i) => _lensOp[i], slots: () => _sb.slots, edge: () => _K.edge,
+      linearMode: () => _linearMode, linLeak: _linLeak,
+      shardRing: () => _shardDemoRing || _E.ringCache, wSlot: () => W,
+      fieldMix: () => _fieldMix,   // the SECOND coupling layer's toggle (edge always couples PHASE; this gates the field-shape bleed)
+    });
+    const _lambda = _reg.lambda, _lambdaScale = _reg.lambdaScale, _rMid = _reg.rMid, _specLeg = _reg.specLeg;
+    const _declProject = _reg.declProject, _regStep1 = _reg.step, _coupledAtt = _reg.coupledAtt;
+    const _regStepRegion = _reg.stepRegion, _mkSl2 = _reg.mkSl2, _sl2Rekey = _reg.sl2Rekey;
+    // ── _holdDrift(i) — MEDIUM-SEMANTIC IDENTITY CHECK for a ψATT hold. After adoption the slot chases a copy of its
+    //    own captured field; `obj` is retired, so the only way to ask "is it still the same thing?" is in charges the
+    //    anchors cannot touch. V (second moment) and V̈ are invariant under translation + global phase — precisely the
+    //    two freedoms the hold is transported by (_holdDx integer roll, _holdOp aging rotation) — so any change in them
+    //    is REAL divergence of the state from what was adopted, not a pose difference. dV is the identity metric; dI is
+    //    the Casimir (sl(2)-work done by pin+cap: 0 on free flight, nonzero exactly when something is being forced).
+    //    Costs one FFT ⇒ called only on the _vptEvery bar cadence. TELEMETRY ONLY — never enters regH.
+    //    ── MEASURED CORRECTION (2026-07-26, live two-slot read): dV against the ADOPTION snapshot is NOT the identity
+    //    statistic. The adopted V₀ is an f32 byte-freeze of an instantaneous state; the pin+SPM+cap keep acting and the
+    //    state RELAXES to a slightly broader equilibrium. Live control: a slot with gap=0.00px drifted +6.63% while a
+    //    slot with gap=13.75px drifted +6.17% — the STATIONARY slot moved MORE. So the ~6% is common-mode relaxation,
+    //    not transport damage, and the transport contribution is the DIFFERENTIAL (here ≈0.5%, i.e. ~0). Two fixes:
+    //      (a) the reference is the SETTLED V (sampled until it CONVERGES — see _HOLD_TOL), never the byte-snapshot;
+    //      (b) the verdict is differential against a stationary control slot when one exists — common-mode cancels.
+    //    The band is read from the data (stationary spread), not invented: the old flat 2% sat BELOW the relaxation
+    //    floor and so reported every healthy hold as an identity failure.
+    //    MEASURED SETTLE CURVE (bench: letterA, β=0.3, pin=own byte-freeze, 8 steps/bar): V rises to +1.06% by bar 3,
+    //    then falls monotonically and ASYMPTOTES to ≈−3.0% by bar 20 (−2.89/−2.94/−2.99 at bars 20/22/24 — residual
+    //    creep <0.05% per 2 bars). At bar 8 the state is at −0.47% and still mid-transit, so an 8-bar window would
+    //    freeze a MOVING value into the reference. 20 bars is past the knee. The SIGN is regime-dependent — the live
+    //    two-slot read drifted +6% where this bench drifts −3% — which is exactly why the reference is measured per
+    //    hold rather than assumed, and why the verdict is differential against a stationary control.
+    //    ── SECOND CORRECTION (2026-07-26, the store→recall read): a fixed bar count is the WRONG settle trigger. It
+    //    assumes you know when the transient BEGAN, and recall restarts it (recall rebuilds descBase and re-pins), so
+    //    a window opened at recall time closed mid-transit and froze a reference ~6% below where the state was headed
+    //    (live: recalled V settled at 8.594e4 while its own live value and the untouched control both sat at ~9.09e4 —
+    //    the CONTENT was fine to 0.14%, only the reference was early). So the reference is now taken by CONVERGENCE,
+    //    not by clock: sample V each cadence bar and accept the reference only when successive samples agree to
+    //    _HOLD_TOL. Self-verifying — it cannot be fooled about when the transient started.
+    const _HOLD_MIN = 4;             // minimum bars before convergence may be declared (skip the initial rise)
+    const _HOLD_MAX = 80;            // give-up bound: accept the last sample and SAY it never converged
+    const _HOLD_TOL = 0.004;         // successive-sample agreement (0.4%) ⇒ settled; the bench's post-knee creep is <0.05%/2bars
+    const _HOLD_BAND = 0.03;         // differential band — applied to (dV − common-mode); covers the residual post-knee creep
+    const _HOLD_SPREAD = 0.03;       // if stationary controls disagree by more than this there is NO common mode (see _holdCommon)
+    // ── the stationary-slot common mode. Returns {com, spread, n, ok}. TWO measured defects fixed here:
+    //    (1) `st[st.length >> 1]` is NOT a median for even counts — it picks the upper-middle, i.e. the MAX at n=2, so
+    //        the WORST-drifting control silently defined the zero point (live: two stationary slots at 2.38%/5.15%
+    //        yielded com=5.15%, which then reported the STABLE slot as "DIVERGED −2.77% ⇒ IDENTITY failure").
+    //    (2) a common mode only EXISTS if the controls agree. When they disagree by more than _HOLD_SPREAD there is no
+    //        shared relaxation to subtract (live: one slot at 0.03% vs another at 5.95% — that 5.95% belonged to ONE
+    //        slot, not to the medium), and the honest output is "no common mode", not a confident wrong number.
+    const _holdCommon = (rows) => { const st = rows.filter((r) => r.gap != null && r.gap < 1 && r.dV != null).map((r) => r.dV).sort((a, b) => a - b);
+      if (!st.length) return { com: null, spread: null, n: 0, ok: false };
+      const h = st.length >> 1, med = st.length % 2 ? st[h] : 0.5 * (st[h - 1] + st[h]);   // TRUE median (even ⇒ mean of the two middles)
+      const spread = st[st.length - 1] - st[0];
+      return { com: med, spread, n: st.length, ok: st.length === 1 || spread <= _HOLD_SPREAD }; };
+    const _holdDrift = (i) => { const s = _sb.slots[i];
+      if (!s || !s._attHold || s._digestLeft > 0 || !s._holdSl2 || !s.descBase) return null;
+      const now = _mkSl2(s.descBase); if (!now) return null;
+      const ref = s._holdRef || s._holdSl2, settled = !!s._holdRef;   // settled ⇒ the relaxation transient is already in the reference
+      const h = s._holdSl2;
+      return { V: now.V, V0: h.V, Vref: ref.V, settled, refN: s._holdRefN | 0, refStuck: !!s._holdRefStuck, dV: ref.V ? (now.V / ref.V - 1) : null,
+        dV0: h.V ? (now.V / h.V - 1) : null,   // kept for the record: drift vs the adoption byte-freeze (relaxation INCLUDED)
+        I: now.I, I0: h.I, dI: now.I - h.I,
+        gap: (s._attHoldPos && s.descPos) ? Math.hypot(s.descPos[0] - s._attHoldPos[0], s.descPos[1] - s._attHoldPos[1]) : null }; };
+    // the verdict, differential when a TRUSTWORTHY stationary control exists. `cm` = the _holdCommon result object.
+    //   Three states, and the code must not blur them: controlled (subtract and judge), uncontrolled (no stationary
+    //   slot — absolute and provisional), and CONTRADICTED (controls disagree — refuse to judge, report the spread).
+    //   The last is new: it is what readings 2 and 3 actually were, and printing a hard verdict there was the bug.
+    const _holdVerdict = (d, cm) => { if (d.dV == null) return 'no reference yet';
+      const pre = !d.settled ? `(reference NOT settled yet — ${d.refN | 0} sample(s), still converging, so this reading includes the relaxation transient) `
+        : d.refStuck ? '(reference accepted WITHOUT convergence — the state never stopped moving within the give-up bound; treat as provisional) ' : '';
+      if (cm && cm.n > 0 && !cm.ok)   // controls exist but contradict each other ⇒ there is no common mode to subtract
+        return `${pre}NO VERDICT — the ${cm.n} stationary controls disagree by ${(100 * cm.spread).toFixed(2)}% (> ${(100 * _HOLD_SPREAD).toFixed(0)}%), so there is no shared relaxation mode to subtract. This slot's own drift is ${(100 * d.dV).toFixed(2)}%; a differential claim would be arithmetic on noise. Let the references settle, or reduce to ONE stationary control.`;
+      const com = cm && cm.ok ? cm.com : null, rel = com == null ? d.dV : d.dV - com, ctl = com != null;
+      if (Math.abs(rel) < _HOLD_BAND) return `${pre}${d.gap > 1 ? `SAME state, ${d.gap.toFixed(2)}px short ⇒ TRANSPORT failure — identity intact${ctl ? ' vs the stationary control' : ''}: the pin is not losing the symbol, it is losing the race against self-trapping` : `LOCKED — identity intact${ctl ? ' vs the stationary control' : ''} and in place`}`;
+      return `${pre}DIVERGED ${(100 * rel).toFixed(2)}%${ctl ? ' ABOVE the stationary common mode' : ' (UNCONTROLLED — no stationary slot to subtract the relaxation common mode; treat as provisional)'} ⇒ IDENTITY failure`; };
     // THE MEASURED WEAR CONSTANTS (2026-07-18, wearTest/wearGo — Law 7 quantified): betaStar = the capture
     // threshold (the Casimir-flow İ zero-crossing; independently matches the GR-probe locking threshold ≈0.1).
     // Past β* transport cost is ~LINEAR in speed (the ride: ×2.5 cost for ×3 vpx at β=0.6); below β* the walk
@@ -218,6 +353,24 @@ function makeMediumU1Renderer(core) {
     //      • UNPINNED (lensC1, gain free): gainOf = the FIELD-measured energy ratio (true matter energy back-reaction —
     //        the momentum channel opens, the honest v* becomes reachable) at the cost of a field read (determinism rides
     //        on the f32 Q-boundary quantization holding). An explicit, per-run choice — mu1.unpin(true).
+    // ── ⌛PIN HOLD (replicated): how long a LIVING recalled slot stays driven by its plate attractor. 0 = FOREVER
+    //    (the DEFAULT, and the right setting for normal use — leave it there).
+    //    ⚠ WHAT THIS DIAL ACTUALLY DOES, measured after an earlier WRONG diagnosis: the pin is NOT a "projector"
+    //    painting a texture over the medium — it is the medium's COHERENCE SOURCE. Fading it does not reveal a
+    //    hidden live soliton; the field DECOHERES INTO SPECKLE (spatial speckle-index 1.16 pinned → 1.49 unpinned:
+    //    per-cell noise, no symbol, no interference fringes). The interference ripples you want exist BECAUSE the
+    //    soliton is locked and coherent — the bright envelope and the fringes are not separable layers.
+    //    (The earlier "pin re-draws the clean symbol over damage" measurement was similarity-to-symbol, which cannot
+    //    tell DIFFERENT structure from NO structure — the same metric trap as ampCorr elsewhere in this file.)
+    //    So N > 0 is a DECOHERENCE EXPERIMENT, not a way to clean up the view. Replicated (it scales the pin → regH).
+    let _pinHold = 0;
+    const _pinFac = (s, k) => { if (!_pinHold) return 1;                       // 0 = drive forever (default, unchanged)
+      const born = s._pinK; if (born == null) return 1;                        // no birth stamp → full drive
+      const age = k - born; return age >= _pinHold ? 0 : (1 - age / _pinHold); };   // linear fade over _pinHold shared steps
+    let _fieldMix = true;   // the edge's SECOND coupling layer: attractor field-mixing (the soliton shape bleeds toward
+                            // a coupled neighbor). ON by default (an edge means "interact" fully). OFF → the edge still
+                            // couples PHASE (Kuramoto), but shapes stay pure — isolates the two layers. Replicated (it
+                            // gates descBase → in regH; a peer-local flag would fork the field). mu1.fieldMix(false).
     let _coevoOn = false;   // the Einstein loop (gain-gated). OFF by default — the baseline is the open-loop DOP replay
                             // (the target never waits for matter); mu1.coevo(true) opts INTO the back-reaction. Default-off
                             // keeps the plain-transport feel + the pure replay as the reference, and makes the loop a
@@ -225,7 +378,11 @@ function makeMediumU1Renderer(core) {
     let _unpinned = false;  // false = lensU1 (pinned, descriptor-predicted gain) · true = lensC1 (field-measured gain)
     let _coevoG = 1;        // the last gain observable (telemetry: 1 = matter kept up, →0 = lagging → target throttled)
     const _COEVO_MAXLAG = 4;   // px of target-lag at which the PINNED gain observable saturates to 0 (the target fully waits)
-    const _VIRT_T = 16;   // hologram depth (steps): linear round-trip → near-exact lift (the pure-wave case)
+    let _VIRT_T = 16;   // hologram depth (steps): the ±T spectral leg depth. Linear round-trip → near-exact lift (the
+                        // pure-wave case). TUNABLE (replicated verb 'virtt' + slider): larger T = the plate is more
+                        // DELOCALIZED (deeper spread). NOTE: a plate is stored with the T that was live AT STORE; the
+                        // leg closure reads the CURRENT _VIRT_T, so changing T then recalling an OLD plate mismatches
+                        // its store-leg — RE-STORE after changing T (the demo flow: set T → store → recall/damage).
     // the τ kernel (worldline clocks) — for the [RECALL-∠] aging readout (Δ∠ = ω·Δτ_W). Browser-loaded KWETau.
     const _tauK = (typeof globalThis !== 'undefined' && globalThis.KWETau) ? globalThis.KWETau({ monRate: _MON_RATE, stepsPerPhase: STEPS_PER_PHASE, flatL: 21 }) : null;
     // ── THE STAMPED-INPUT DRAIN (the general field-determinism law, finding_mux_determinism / gate-3): EVERY external
@@ -247,12 +404,15 @@ function makeMediumU1Renderer(core) {
       //    CPU spectral legs; births land in P1 as 𝔸-slots (the homogeneous slot type: every slot = a trapped-
       //    hologram lens; W is merely the one the drive acts on). The mirror queue survives only as the legacy
       //    path for a mirror-without-engine state (shouldn't occur post-v7, but honesty over deadcode-pruning).
-      if ((e.mode === 'record' || e.mode === 'recvia' || e.mode === 'store' || e.mode === 'recall' || e.mode === 'recallx') && W.desc) {
+      if ((e.mode === 'record' || e.mode === 'recvia' || e.mode === 'store' || e.mode === 'recall' || e.mode === 'recallx' || e.mode === 'recallo') && W.desc) {
         const mv = { mode: e.mode === 'recvia' ? 'record' : e.mode, amp: e.amp || 0, k, si, scale: e.scale || 'all',
-          dop: { ..._lensOp[0] }, gx: W.leash.state.gx, gy: W.leash.state.gy, bw: _tauK ? (_tauK.beatsOf('W') ?? 0) : 0 };
+          dop: { ..._lensOp[0] }, gx: W.leash.state.gx, gy: W.leash.state.gy, bw: _tauK ? (_tauK.beatsOf('W') ?? 0) : 0,
+          holoMode: e.holoMode | 0, frac: e.frac || 0, block: e.block | 0, seed: e.seed || 0,   // recallo: the occluder params (mode/frac/block/seed → occlude())
+          at: Array.isArray(e.at) ? [+e.at[0] || 0, +e.at[1] || 0] : null };   // explicit recall PLACEMENT (recallAt) — where the moment lands, overriding the plate's stored pos
         if (W.descBase) { if (_turboOn && _gpu) { _tbAdvanceAll(k); _tbSyncSlot(0); }   // advance the texture to the verb's stamped step, then read W's bytes back (CPU-mode semantics: the verb sees descBase at k)
           if (mv.mode === 'store') _storeFrom(mv, W.descBase);
           else if (mv.mode === 'recall' || mv.mode === 'recallx') _recallFrom(mv, W.descBase);
+          else if (mv.mode === 'recallo') _recallFrom(mv, W.descBase, true);   // occluded cue: bind the FRAGMENT, lift the WHOLE plate
           else _recordFrom(mv, W.descBase);
           return; }
         if (V.born && V.mirror) { _mirVerbQ.push(mv); return; }
@@ -331,7 +491,11 @@ function makeMediumU1Renderer(core) {
         }
         return; }
       if (e.mode === 'refamp') { if (si >= 0) { _lensOp[si].beta = (typeof e.amp === 'number') ? e.amp : 1; console.log(`[MU1] refAmp ${e.src} β=${_lensOp[si].beta.toFixed(2)} @step=${_E.solSteps}`); } }
-      else if (e.mode === 'lenstau') { const w = e.amp || 0; for (const o of _lensOp) o.omega = w; console.log(`[MU1] lensTau ω=${w.toFixed(3)} @step=${_E.solSteps}`); }
+      else if (e.mode === 'lenstau') { const w = e.amp || 0;
+        // PER-SLOT when a src is given (each worldline ages at its own ω — the twin experiment); GLOBAL fallback (all
+        // slots) when no src, for back-compat. si was resolved from e.src above (SLOTN.indexOf).
+        if (si >= 0 && e.src) { _lensOp[si].omega = w; console.log(`[MU1] lensTau ${e.src} ω=${w.toFixed(3)} @step=${_E.solSteps} — THIS worldline precesses at its own rate`); }
+        else { for (const o of _lensOp) o.omega = w; console.log(`[MU1] lensTau ω=${w.toFixed(3)} (ALL slots) @step=${_E.solSteps}`); } }
       // lensset (the extended readOp components): here the MOMENTUM tilt kx/ky — the linOp k·x term. On an 𝔸-slot
       // this makes the phase fronts FLOW through the envelope at ω/|k| (the travelling wave, per-pixel in the view
       // shader). kx/ky are in opNums → regH: a replicated register write like every other verb.
@@ -366,14 +530,123 @@ function makeMediumU1Renderer(core) {
         console.log(`[MU1] ⚡turbo ${_turboOn ? 'ON — the GPU executes the U1 ENGINE STEP (same five operators, same f32 grain, batched per Q block; array-in/array-out — no field-mode semantics). REPLICATED: every peer switches executor at this shared step. Caveat, declared: GPU f32 pipelines round differently across VENDORS — cross-device eH needs the CPU executor (universal); turbo trades that for ~10× speed.' : 'OFF — the universal CPU f64 executor resumes'} @step=${k}`); }
       else if (e.mode === 'coevo') { _coevoOn = !!e.amp; console.log(`[MU1] ⟲coevo ${_coevoOn ? 'ON' : 'OFF'} @step=${_E.solSteps} — the Einstein loop (matter throttles its own transport)`); }
       else if (e.mode === 'unpin') { _unpinned = !!e.amp; for (const o of _lensOp) o.gain = 1;   // re-pin resets gain to the U(1) slice; unpin lets it live
-        console.log(`[MU1] ${_unpinned ? 'UNPIN → lensC1 (gain FREE: the coevo gate reads TRUE field energy — honest matter back-reaction, momentum channel open; regH may fork)' : 'PIN → lensU1 (gain≡1: the coevo gate reads the descriptor-predicted lag — replay-safe)'} @step=${_E.solSteps}`); } };
+        console.log(`[MU1] ${_unpinned ? 'UNPIN → lensC1 (gain FREE: the coevo gate reads TRUE field energy — honest matter back-reaction, momentum channel open; regH may fork)' : 'PIN → lensU1 (gain≡1: the coevo gate reads the descriptor-predicted lag — replay-safe)'} @step=${_E.solSteps}`); }
+      else if (e.mode === 'fieldmix') { _fieldMix = !!e.amp; console.log(`[MU1] field-mixing ${_fieldMix ? 'ON — an edge couples BOTH layers: phase entrains (Kuramoto) AND the soliton shape bleeds toward the neighbor' : 'OFF — an edge couples PHASE ONLY (Kuramoto); the soliton shapes stay pure (the second layer is gated off)'} @step=${_E.solSteps} — replicated (gates descBase, in regH)`); }
+      // occludebank — DAMAGE THE STORED PLATE ITSELF (memory-side occlusion, the "can a corrupted memory still be
+      //   read?" test — distinct from recallo which occludes the CUE). Masks the target plate's `p` (the field image)
+      //   AND `w0` (the dressed profile) IN THE BANK, PERMANENTLY. Then a normal recall reads the damaged plate — and
+      //   a real hologram still argmaxes + lifts close to the original from what survives. Replicated: applied at the
+      //   shared step, occlude is deterministic (mode/frac/block/seed stamped), and the damaged plate bytes ride the
+      //   snapshot to joiners (regH hashes plate DOP not p-bytes → identical-damage-at-shared-step keeps peers in
+      //   lockstep; the corruption is in the shipped plate, not a per-peer read). gx = plate index (−1 = the last).
+      else if (e.mode === 'occludebank') { if (!_plates.length) { console.log('[MU1-BANK⊘] no plates to damage (store a moment first)'); return; }
+        const idx = (e.gx | 0) >= 0 ? Math.min(e.gx | 0, _plates.length - 1) : _plates.length - 1;
+        // SEED: a DETERMINISTIC per-press mask, derived from the SHARED drain step k via the KWE PRNG (makeRng) — NOT
+        //   Math.random(). The verb lands at the shared k on every peer, so makeRng(k,…).nextInt gives the identical
+        //   seed on all peers (replicated by construction, no shared-stream consumed). e.seed>0 overrides (explicit).
+        const pl = _plates[idx]; const hm = e.holoMode || 7, fr = e.frac || 0, bk = e.block || 8;
+        _occFrac = fr; _occMode = hm;   // REFLECT: the verb handler (runs on EVERY peer at the shared step) sets the UI vars — the SAME pattern as virtt→_VIRT_T, which is the one that provably works. The render then reflects _occFrac/_occMode.
+        let sd = e.seed | 0; if (sd <= 0) { const _r = makeRng(k, idx, hm, 0x5eed); _r.next(); _r.next(); sd = _r.nextInt(1e9); }   // shared-step-derived → deterministic + varies per press/plate/method (2 warm-up draws mix all inputs)
+        // NON-DESTRUCTIVE: occlude FROM the PRISTINE original (captured once as p0/w00), so damage is a LEVEL not a
+        //   cumulative wipe — dragging the slider re-damages from clean → frac maps monotonically, and frac=0 HEALS.
+        //   p0/w00 are live-only (not shipped); the joiner gets the resulting damaged p (which ships). The pristine
+        //   snapshot is idempotent (only set if absent) so a re-damage after restore keeps whatever bytes it has.
+        if (pl.p && !pl.p0) pl.p0 = Float64Array.from(pl.p);
+        if (pl.w0 && !pl.w00) pl.w00 = Float64Array.from(pl.w0);
+        if (pl.p0) pl.p = (fr > 0) ? occlude(pl.p0, { mode: hm, frac: fr, block: bk, seed: sd, G: GRID }) : Float64Array.from(pl.p0);   // fr=0 → restore pristine (heal)
+        if (pl.w00) pl.w0 = (fr > 0) ? occlude(pl.w00, { mode: hm, frac: fr, block: bk, seed: sd, G: GRID }) : Float64Array.from(pl.w00);
+        const before = pl.p0 || null;
+        // if a LIVE slot currently holds this plate (recalled), re-lift so its reconstruction DEGRADES with the damage
+        _reliftDamaged(idx);
+        const modeName = { 1: 'low-pass', 2: 'high-pass', 3: 'conjugate', 5: 'box', 6: 'half-plane', 7: 'rand-zero', 8: 'rand-noise' }[hm] || 'rand-zero';
+        const kept = before && pl.p ? keptFraction(before, pl.p) : 0; pl._dmg = kept;   // record kept-fraction for the plate-view label (local, not shipped)
+        console.log(`[MU1-BANK⊘] plate ${idx + 1}/${_plates.length} DAMAGED IN THE BANK (${modeName}, frac=${fr.toFixed(2)}${(hm === 7 || hm === 8) ? `, block=${bk}px` : ''}) → kept ${(kept * 100).toFixed(0)}% of the stored image · the memory is now CORRUPTED · recall@/recall⇄ to read it (a hologram recovers the whole from the survivor); mu1.plateView(${idx}) to SEE the damaged plate @step=${_E.solSteps}`); }
+      // platelive — lift a stored plate into a LIVING 𝔸-slot (register-stepped soliton, not a frozen image). gx =
+      //   plate index (−1 = last); the slot is the register-strip target (default P2, a spare demo slot). Replicated
+      //   (a normal 𝔸-slot birth at the shared step — same as recall). This is the "view plate as a live soliton" op.
+      else if (e.mode === 'platelive') {
+        const ti = (si >= 1 && si <= 3) ? si : 3;   // src decides the host; the : 3 is only a REPLICATION safety net (a malformed/legacy verb must still land somewhere DETERMINISTIC on every peer). The UI never sends an invalid src — it refuses at press time instead.
+        // gx < 0 = RELEASE the host link (the toggle's OFF): the slot keeps its field and keeps living, it simply
+        //   stops tracking that plate — so bank damage no longer re-lifts into it. gx ≥ 0 = HOST that plate.
+        if ((e.gx | 0) < 0) { const had = _recalledInto[ti]; _recalledInto[ti] = -1;
+          console.log(`[MU1-PLATELIVE] ${SLOTN[ti]} RELEASED${had >= 0 ? ` plate ${had + 1}` : ''} — the slot keeps its field and keeps living; bank damage no longer re-lifts into it @step=${_E.solSteps}`); return; }
+        if (!_plates.length) { console.log('[MU1-PLATELIVE] no plates (store first)'); return; }
+        const idx = Math.min(e.gx | 0, _plates.length - 1); _recallPlateLive(idx, ti, k, Array.isArray(e.at) ? e.at : null); }   // e.at = explicit placement
+      // virtt — set the HOLOGRAPHY DEPTH T (the ±T spectral-leg steps). Replicated (store/recall use it → forks if
+      //   per-peer). amp = T (clamped [1,256]). Larger T = more delocalized plate. RE-STORE after changing (old
+      //   plates were spread at the old T; the leg reads the current T at recall).
+      // pinhold — how long a living recalled slot stays DRIVEN by its plate attractor (0 = forever, the default).
+      //   Replicated: it scales the pin, which is in regH. See the _pinHold declaration for the measurement that
+      //   motivates it (a constant pin re-draws the clean symbol over a 90%-damaged field).
+      // lensobj — WHAT THE LOCK HOLDS. The pin target is lensC1.apply(op, makeProbeField(obj)); `obj` decides whether
+      //   the medium organizes around a DENSE GLYPH (letterA — a chain of dots along each stroke; that density is the
+      //   on-screen "texture") or around LIGHT POINTS. TWO measured requirements make a points-switch actually work
+      //   (each alone fails into noise — both were missing at first):
+      //   (1) THE DOOR — re-seed every living slot's field+budget from the new attractor (see below); and
+      //   (2) FINITE WAIST — use 'lightpts' (Gaussian σ=5, below the ring's kKnee), not hard 3×3 dots (deltas above
+      //       the knee, which sit in the dispersive band and can only decohere).
+      //   Replicated: the pin target is in regH, and every slot's att regenerates from obj.
+      else if (e.mode === 'lensobj') { const nm = String(e.obj || '');
+        if (!_PROBE_OBJS.includes(nm)) { console.log(`[MU1-OBJ] unknown object '${nm}' — one of: ${_PROBE_OBJS.join(', ')}`); return; }
+        _lensObj = nm; _baseCache.clear(); _rebuildBase();   // drop the cached probe fields so every att regenerates from the NEW object
+        for (const s2 of _sb.slots) if (s2.descAttG) s2.descAttG.obj = nm;   // living slots re-pin to the new geometry
+        _regAttC = W.movAtt ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : _regAttC;
+        // ── THE DOOR (measured essential — without it every object switch decays into noise): re-seed each LIVING
+        //    slot's FIELD + ENERGY BUDGET from its regenerated attractor. WHY: leaving the old object's field in place
+        //    turns it into a mismatched remainder; dispersion+SPM churn it into turbulence, and the energy cap
+        //    renormalizes UNIFORMLY (organized and turbulent parts alike) → the noise fraction NEVER decays — the pin
+        //    cannot drain it, only add its own pattern (measured: speckle 1.13 vs 0.75; re-seeding through the door →
+        //    0.78 ≈ letterA-clean, temporal liveliness preserved). Same idiom as recall/wabs: a state transition is a
+        //    DOOR that replaces descBase, not a fight against stale content. descE0 rescales to the new object's own
+        //    energy (the render normalizes by peak, so absolute brightness is unaffected; keeping the OLD budget
+        //    over-boosts a sparse target ~3× → SPM turbulence — also measured). f32-quantized like recall's births.
+        //    All inside the stamped drain at the shared k → byte-identical on every peer; descBase/descE0 ride snap.
+        const _door = (s2, att2) => { if (!att2 || !s2.descBase) return;
+          const nb2 = Float64Array.from(Float32Array.from(att2)); let e2 = 0; for (let j = 0; j < nb2.length; j++) e2 += nb2[j] * nb2[j];
+          s2.descBase = nb2; s2.descE0 = e2 || 1; s2._engE = e2; s2.descDisp = Float64Array.from(nb2); s2._texDirty = true;
+          s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; s2._digestLeft = 0; };   // an object switch retires any ψATT hold (the new probe is the pin again)
+        if (W.desc && W.descBase && _regAttC) { _door(W, _regAttC); W.sl2 = null; }
+        for (let li2 = 1; li2 <= 3; li2++) { const s2 = _sb.slots[li2]; if (!s2.desc || !s2.descLive || !s2.descAttG) continue;
+          const att2 = _plateAtt(s2.descAttG.dop, s2.descPos, nm); if (att2) { s2.descAtt = att2; _door(s2, att2); } }
+        console.log(`[MU1-OBJ] pin target → '${nm}' @step=${_E.solSteps} — switched THROUGH THE DOOR: every living slot re-seeded from the new attractor (field + energy budget), so the lock re-forms cleanly instead of fighting the old object's remainder as undamped turbulence.${nm === 'lightpts' ? ' lightpts = GAUSSIAN sources (σ=5px, BELOW the ring kKnee → coherent oscillating interference; a hard dot is a delta above the knee and can only decohere).' : (nm === 'point' || nm === 'pair' || nm === 'grid') ? ' NOTE: hard 3×3 dots live ABOVE the kernel kKnee (dispersive band) — expect them to stay noisy; use lightpts for coherent light points.' : ''}`); }
+      // selfatt — THE FIELD-AS-ATTRACTOR DOOR (the symbol's identity migrates from the OPERATOR into the FIELD).
+      //   amp = digest bars (0 = revert to probe pin). Sequence per living slot: DIGEST (unpin for amp bars — the
+      //   medium disperses/'digests' the injected pixels naturally) → ADOPT (the field's own f32 state at the shared
+      //   bar becomes the pin target; transport rolls it via spectralShift; the REGISTER's φ/ω rotate it — set lensTau
+      //   ω≠0 for the precession that keeps it alive). MEASURED: shape retained (~0.6 vs 0.72 probe), oscillation
+      //   register-driven at ~60% of the probe-beat's liveliness; the texture only PARTIALLY softens — by the Gate-D
+      //   law the letter's identity lives ABOVE kKnee (its sharp strokes ARE the symbol in this medium's optics), so
+      //   a field-borne symbol keeps sharp support, honestly. Replicated: digest countdown + adoption happen at shared
+      //   bars; the hold rides the snapshot.
+      else if (e.mode === 'selfatt') { const bars = Math.max(0, Math.min(64, Math.round(e.amp || 0)));
+        if (!bars) { for (const s2 of _sb.slots) { s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; s2._digestLeft = 0; }
+          console.log(`[MU1-ψATT] OFF @step=${_E.solSteps} — back to the probe pin (the operator re-asserts the injected symbol)`); return; }
+        let n2 = 0; for (const s2 of _sb.slots) if (s2.desc && s2.descBase && (s2 === W || s2.descLive)) { s2._digestLeft = bars; s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; n2++; }
+        console.log(`[MU1-ψATT] DIGEST ${bars} bars → ADOPT @step=${_E.solSteps} for ${n2} living slot(s): the pin lifts, the medium digests the injected pixels, then the FIELD'S OWN state becomes the attractor (rolled by the leash, rotated by the register φ/ω — set ω≠0 via lensTau for living precession). The symbol is then carried by MATTER, not by the operator.`); }
+      else if (e.mode === 'pinhold') { _pinHold = Math.max(0, Math.min(4000, Math.round(e.amp || 0)));
+        console.log(`[MU1-PINHOLD] ⌛ pin hold = ${_pinHold ? `${_pinHold} steps — DECOHERENCE EXPERIMENT: the drive fades and the soliton loses coherence, degenerating into per-cell SPECKLE (no symbol, no interference fringes). The pin is the medium's coherence source, not a texture painted over it. Set 0 to restore the live soliton.` : '0 = DRIVE FOREVER (the default and the right setting: the lock is what sustains the coherent soliton AND its interference)'} @step=${_E.solSteps}`); }
+      else if (e.mode === 'virtt') { const nt = Math.max(1, Math.min(500, Math.round(e.amp || 16))); _VIRT_T = nt;
+        console.log(`[MU1-VIRT_T] hologram depth T=${nt} @step=${_E.solSteps} — re-store to bank at this depth (old plates were spread at the previous T); larger T = deeper spread (mu1.sweepOcclusion to measure)`); } };
     // (the shift + reg cursors are now owned by _siShift / _siReg — makeStampedInput; see the pull sites)
     // ── DUAL-LAYER HOLOGRAPHY (S6): a stored moment = BOTH plates. FIELD plate = the 128KB ψ (the IMAGE, via the GPU
     //    forward/backward round-trip). DESCRIPTOR plate = the slot's (M,O) = its readOp copy ≈ 6 floats (the register
     //    MOMENT). The demo's HEADLINE is their EQUIVALENCE: [RECALL-∠] = ω·Δτ from the field round-trip AND from a
     //    pure lensC1 compose on the descriptor — the field is the ground-truth ORACLE proving the cheap path faithful.
-    const _plates = [];   // { p: fieldPlate, a: att, dop: descriptorPlate(readOp copy), bw: W-beats-at-record, k }
     const BANK_MAX = 8;
+    // ── THE HOLOGRAM BANK (extracted to medium-core.js): the abstract U1 memory — dual plates (field image +
+    //    descriptor algebra), content-address bind, ±T-leg lift, closed-form 𝔸-recall, and the dual-layer aging
+    //    readout. medium-u1 supplies its SPECTRAL leg (genuine optical holography); the app keeps the slot-birth +
+    //    logging. `_plates` IS the bank's array (same reference) so regH/snapshot/bankScan see identical bytes. The
+    //    plate's live-only `a` (att) is attached by the app after store() (the snapshot regenerates it via _plateAtt).
+    const _holo = makeHologramBank({
+      G: GRID, bankMax: BANK_MAX, sigma: 6, f32: true,
+      leg: (f, sign, scale) => _specLeg(f, _VIRT_T, sign * DT, scale),   // the ±T spectral leg = the propagation that makes it HOLOGRAPHY (not just correlation)
+      corr: _ampCorr, phaseCorr, shiftScan: (a, b) => crossCorrScan(a, b, GRID), shift: (f, dx, dy) => spectralShift(f, dx, dy, GRID),
+      angleOf: (op) => lensU1.angle(op), wrap: (x) => lensU1.wrap(x),
+      beatsOf: (nm) => (_tauK ? (_tauK.beatsOf(nm) ?? 0) : 0),
+    });
+    const _plates = _holo.plates;   // { p: fieldPlate, a: att(live-only), dop: descriptor copy, pos, obj, w0, bw, k }
+    const _recalledInto = [-1, -1, -1, -1];   // per-slot: which plate index it last recalled (−1 = none) → memory-damage re-lifts the live reconstruction so it DEGRADES
     // (the replicated-verb cursor is now _siReg.seen — makeStampedInput)
 
     // ── DOP-DRIVEN ATTRACTOR (the ℂ*-descriptor replay foundation, verified headless corr=1.0000): the attractor W
@@ -421,6 +694,15 @@ function makeMediumU1Renderer(core) {
       // cat1100) was descPos updating at BAR cadence while descDisp refreshed at Q — ox grew over a bar then
       // snapped; fixed by the Q-cadence descPos re-anchor in the drive loop (they now refresh together).
       const L = s.leash.state; let ox = L.gx - (s.descPos?.[0] ?? 0), oy = L.gy - (s.descPos?.[1] ?? 0);
+      // ψATT: the adopted pin target is a copy of the field ITSELF, so the pin drags the soliton far more effectively
+      //   than a probe does — MEASURED (integer-shifted hold, leash walked to 12px): the field's own centroid moves
+      //   6.81px for a 6px command and 10.74px for 12px, i.e. it very nearly ARRIVES on its own. The residual above
+      //   assumes the field still lags its target by the FULL (leash − descPos), which is true for a probe pin but a
+      //   large over-estimate here — adding it in full over-translates, and the bar-boundary descPos re-anchor then
+      //   snaps it back ("tries to move, re-locks"). The hold is also INTEGER-rolled (see _holdDx), so the render must
+      //   not re-introduce a sub-pixel offset the pin target itself does not have. Quarter-weight the residual for an
+      //   adopted slot: enough to interpolate the genuine ~1px lag between refreshes, not enough to double-translate.
+      if (s._attHold && !s._digestLeft) { ox *= 0.25; oy *= 0.25; }
       // THE LEASH-LEAN (anticipation toward the target) — a render translation of the WHOLE envelope toward
       // L.tx. It belongs ONLY to a STATIC descriptor slot (recalla: the field can't move itself, so the render
       // MUST translate it to show transport). For a LIVE-engine slot the field carries its OWN transport (the
@@ -488,7 +770,20 @@ function makeMediumU1Renderer(core) {
       const a = _attForSlot(si); if (!a || a.length !== f.length) return f;
       const out = new Float64Array(f.length);
       if (_fieldView === 'bare') { for (let j = 0; j < f.length; j++) out[j] = a[j]; return out; }   // bare = A alone
-      for (let j = 0; j < f.length; j++) out[j] = f[j] - a[j]; return out; };   // residual = ψ − A (the medium's own contribution)
+      // residual = ψ with the SYMBOL PROJECTED OUT: ψ − (⟨A,ψ⟩/⟨A,A⟩)·A, the COMPLEX orthogonal projection (the field
+      //   is re/im interleaved, so the coefficient is complex: ⟨A,ψ⟩ = Σ conj(A)·ψ). NOT ψ−1·A: at the pin equilibrium
+      //   the injected symbol sits at a SMALL, PHASE-ROTATED amplitude (|coeff| ≈ 0.07, not 1), so subtracting the full
+      //   A overshoots ~15× and leaves an inverted symbol ghost — and a REAL coefficient leaves the phase-quadrature of
+      //   A behind. The complex projection removes EXACTLY the A subspace → the remainder is ORTHOGONAL to the symbol =
+      //   the medium's own oscillating dressing (halo/wake). Honest: a component decomposition, coefficient MEASURED
+      //   from the live state (an inner product), not a mask.
+      let par = 0, pai = 0, aa = 0;   // ⟨A,ψ⟩ = Σ (Ar−iAi)(ψr+iψi) ; ⟨A,A⟩ = Σ|A|²
+      for (let j = 0; j < f.length; j += 2) { const ar = a[j], ai = a[j + 1], fr = f[j], fi = f[j + 1];
+        par += ar * fr + ai * fi; pai += ar * fi - ai * fr; aa += ar * ar + ai * ai; }
+      const cr = aa > 0 ? par / aa : 0, ci = aa > 0 ? pai / aa : 0;   // complex coeff c = ⟨A,ψ⟩/⟨A,A⟩
+      for (let j = 0; j < f.length; j += 2) { const ar = a[j], ai = a[j + 1];   // ψ − c·A (complex)
+        out[j] = f[j] - (cr * ar - ci * ai); out[j + 1] = f[j + 1] - (cr * ai + ci * ar); }
+      return out; };   // residual = ψ − proj_A(ψ) (symbol removed exactly, only the oscillating remainder)
     const _ampFor = (isDesc) => _colorMode === 'auto' ? true : _colorMode === 'amp';   // auto = AMP in BOTH modes (user: the register view must default to the physical look; ∠φ stays one toggle away)
     const _drawField = (cell, f) => { if (!f || !_gpu || !_gpuCanvas) { cell.ctx.clearRect(0, 0, RW, RH); return; }
       const saved = _gpu.readEyePsi();                         // preserve the shared eye buffer
@@ -511,7 +806,11 @@ function makeMediumU1Renderer(core) {
       // display source = the BAR-GRID buffer when the register engine is live (descDisp — the shared film;
       // the live descBase is mid-bar at a peer-local frame end and would paint DIFFERENT steps on peers)
       const baseArr = s.descDisp || s.descBase;
-      if (_descTexKey !== baseArr) { _gpu.setDescBase(baseArr); _descTexKey = baseArr; _descPeak = _peakSq(baseArr); }
+      // upload only when the buffer OBJECT changed (descDisp is rebuilt each refresh → new identity), but ALWAYS
+      // recompute the peak the colormap normalizes by: it is a property of the CONTENT, and a stale peak crushes or
+      // blows out the visible dynamic range (worst for SPARSE targets, whose peak is one small spot that moves).
+      if (_descTexKey !== baseArr) { _gpu.setDescBase(baseArr); _descTexKey = baseArr; }
+      _descPeak = _peakSq(baseArr);
       const op = _lensOp[si], px = (s.descPos?.[0] ?? 0), py = (s.descPos?.[1] ?? 0);
       _gpu.renderDescField({ ox: P.ox, oy: P.oy, cx: GRID / 2 + px + P.ox, cy: GRID / 2 + py + P.oy,
         kx: op.kx || 0, ky: op.ky || 0, phi: P.dphi, ampView: _ampFor(true) ? 1 : 0 }, _descPeak * _GLOW);
@@ -522,6 +821,8 @@ function makeMediumU1Renderer(core) {
     //    own readOp (lensU1.apply — the ψ_out = Op·ψ_in read primitive) when lensView is on; raw ψ otherwise. This
     //    dissolves the old two-scope UI: "which scope" becomes "which slot", and "the eye" is just viewing V. ──
     let _viewSlot = 0;                                       // which slot the outCell shows (0=W, 1=V, 2=P1, 3=P2)
+    let _plateView = -1;                                     // ≥0 = draw stored plate `p` directly (see the MEMORY itself, incl. damage); −1 = off. Local display, no replicated state.
+    let _occView = false;                                    // LOCAL toggle: when viewing a slot that holds a damaged plate, draw the DAMAGED PLATE (pre-lift — the occluded regions visible) instead of the reconstructed result. Peer-local view, no replicated state (like _plateView / _fieldView / frameLock).
     // view modes: 'raw' ψ · 'lens' ψ through the slot's readOp · 'desc' 𝔸 = the ℂ* DESCRIPTOR rendered (the same A the
     // pin chases — the register's PREDICTION of the slot, labeled as such, never passed off as the field). 𝔸 is the
     // visual form of lock→A: the raw and 𝔸 views converge exactly as lock→1. Local display choice, no replicated state.
@@ -540,59 +841,9 @@ function makeMediumU1Renderer(core) {
     //    on the new version). CONSEQUENCES: record/store/recall make ZERO GPU calls — pure CPU f64 on the shared
     //    f32 W.field ⇒ plate/lift bytes are byte-identical across peers BY CONSTRUCTION (stronger than the old GPU
     //    path), and the eye-buffer save/restore churn (the 31ms recordV stall) is gone.
-    let _lamCache = { ver: -9999, lam: null };
-    const _lambda = () => { const rc = _E.ringCache; if (!rc?.r?.length) return null;
-      if (_lamCache.ver !== _E.kernelVer) _lamCache = { ver: _E.kernelVer, lam: kernelLambdaGrid(rc.r, rc.w, rc.o, GRID) };
-      return _lamCache.lam; };
-    // ── SCALE-SELECTIVE λ (the tier-decomposition theorem cashed): the propagator is EXACTLY additive over the
-    //    ring scale-tiers (λ_merged = Σ_d λ_tier − (n−1)·lap9, f64-pinned). So a λ built from a RADIUS BAND of
-    //    the rings propagates ONLY that scale's structure — coarse (large radius = the smooth skeleton) or fine
-    //    (small radius = the speckle detail). Exact by the theorem, not an approximation. The band λ = lap9 +
-    //    only the in-band rings' contribution. Cached per (kernelVer, band). rMid splits at the geometric mean.
-    let _lamScaleCache = { key: '' };
-    const _rMid = () => { const rc = _E.ringCache; if (!rc?.r?.length) return 0; const r = rc.r; return Math.sqrt(Math.max(...r) * Math.min(...r)); };
-    const _lambdaScale = (band) => { const rc = _E.ringCache; if (!rc?.r?.length) return null; if (band === 'all') return _lambda();
-      const key = `${_E.kernelVer}:${band}`; if (_lamScaleCache.key === key) return _lamScaleCache.lam;
-      const mid = _rMid(); const keep = [], kw = [], ko = [];
-      for (let d = 0; d < rc.r.length; d++) { const inBand = band === 'coarse' ? rc.r[d] >= mid : rc.r[d] < mid;
-        if (inBand) { keep.push(rc.r[d]); kw.push(rc.w[d]); ko.push(rc.o[d]); } }
-      const lam = kernelLambdaGrid(keep, kw, ko, GRID);   // lap9 + only the in-band rings (kernelLambdaGrid always includes lap9)
-      _lamScaleCache = { key, lam }; return lam; };
-    const _specLeg = (f, T, dt, band) => { const lam = band && band !== 'all' ? _lambdaScale(band) : _lambda(); if (!lam || !f) return null;
-      return kernelPropagateSpectral(f, null, null, null, { T, dt, G: GRID, lam }).field; };
-    // the BAR-EXACT declaration of W (register state only — no render frac): the boundary source for a REGIONAL
-    // witness and the seam-glue reference (same math as the mirror seed / materialize).
-    const _declProject = () => { if (!W.desc || !W.descBase) return null;
-      const dphi = lensU1.wrap(lensU1.angle(_lensOp[0]) - (W.descPhi0 || 0));
-      const L0 = W.leash.state, ox = L0.gx - (W.descPos?.[0] ?? 0), oy = L0.gy - (W.descPos?.[1] ?? 0);
-      try { return (ox || oy) ? lensC1.apply({ mode: 'metric', phase: dphi, beta: 1, omega: 0, prec: 0, gain: 1, tx: ox, ty: oy }, W.descBase, GRID)
-                              : lensU1.apply({ mode: 'id', phase: dphi, beta: 1, omega: 0, prec: 0 }, W.descBase, GRID); } catch (e) { return null; } };
-    // ── THE REGISTER ENGINE'S ONE-STEP KERNEL (shared by every LIVING slot): pin superpose (β replicated) →
-    //    exact spectral linear step (gate D, λ-grid cache) → engine SPM phase → cap at the slot's own descE0 →
-    //    f32 grain (the wire lattice = the original engine's grain). Pure fn of (slot state, shared step).
-    //    FAST PATH (the GC-lag fix): the spectral call runs on a per-G scratch pool (reuse:true — zero
-    //    allocation), and each slot keeps a ping-pong spare (s._eng) the result is copied into, fused with the
-    //    SPM pass. Op ORDER is preserved exactly (superpose → linear → SPM → energy → cap → fround), so the
-    //    bytes are identical to the allocating path — only the garbage is gone (~6 × 128 KB/step before).
-    const _regStep1 = (s, att, bfac) => { const lamS = _lambda(); if (!lamS || !s.descBase || !s.descE0) return;
-      const psi = s.descBase;
-      // PIN (linear injection lock): ON in the full medium AND in the linear SHARP TRAP (mode 2 — the pin IS the
-      // linear trap); OFF only in FREE-linear (mode 1) to show the dispersing free field.
-      if (att && _linearMode !== 1) { const b = 0.15 * (bfac || 1); for (let j = 0; j < psi.length; j++) psi[j] += b * att[j]; }
-      const ev = kernelPropagateSpectral(psi, null, null, null, { T: 1, dt: DT, G: GRID, lam: lamS, reuse: true }).field;
-      const nb = (s._eng && s._eng !== psi && s._eng.length === ev.length) ? s._eng : new Float64Array(ev.length);
-      if (_linearMode) { const damp = _linearMode === 2 ? (1 - _linLeak()) : 1;   // mode 2: LINEAR damping balances the pin (driven-damped oscillator → sharp fixed point at A); mode 1: none (free dispersal)
-        for (let j = 0; j < ev.length; j++) nb[j] = ev[j] * damp; }
-      else for (let j = 0; j < N_CELLS; j++) { const re = ev[j * 2], im = ev[j * 2 + 1], I2 = re * re + im * im;   // nonlinear SPM (full medium)
-        const th = _SOL_GAMMA * I2 / (1 + I2 / _SOL_ISAT) * DT, c = Math.cos(th), sn = Math.sin(th);
-        nb[j * 2] = re * c - im * sn; nb[j * 2 + 1] = re * sn + im * c; }
-      let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];
-      // the CAP (nonlinear energy renormalization) runs ONLY in the full medium; the linear modes use their own
-      // linear energy handling (mode 1: none, conserves; mode 2: the linear leak above balances the pin).
-      const sc = Math.sqrt(s.descE0 / (e2 || 1)); if (!_linearMode && e2 > 1e-9) for (let j = 0; j < nb.length; j++) nb[j] *= sc;
-      for (let j = 0; j < nb.length; j++) nb[j] = Math.fround(nb[j]);
-      s._engE = e2;   // pre-cap energy (pure fn of shared k) — the UNPINNED coevo gate's field reading in ⌀PDE
-      s._eng = psi; s.descBase = nb; };
+    // ── the symbol λ(k) grid + scale-selective λ + spectral leg + the bar-exact declaration projection + THE
+    //    REGISTER ENGINE's one-step kernel: all EXTRACTED to medium-core.js (bound above as _lambda /
+    //    _lambdaScale / _rMid / _specLeg / _declProject / _regStep1). Byte-identical; the app owns the state.
     // ── ⚡TURBO v3 — BAR-CHUNK advance with a global cursor (the profile's verdict on v2: per-Q readbacks =
     //    3 stalls/bar/slot, 78% of frame in readEyePsi). One readback per BAR per living slot; between
     //    advances descBase lawfully LAGS solSteps by <1 bar, and every reader syncs on demand at its own
@@ -617,15 +868,7 @@ function makeMediumU1Renderer(core) {
     //    letter bleeds toward W's). Driven by the SAME edge κ as the Kuramoto phase law (consistent: an edge
     //    means "these slots interact"), so it rides regH via _K.edge — deterministic, byte-replicated. κ>0
     //    attracts (blend), κ<0 repels (anti-blend). Returns a fresh composite att, or the bare att if uncoupled.
-    const _coupledAtt = (i, baseAtt, snap) => { if (!_K.edge || !baseAtt) return baseAtt;
-      let any = false; for (let jc = 0; jc < 4; jc++) if (jc !== i && _K.edge[i][jc]) any = true;
-      if (!any) return baseAtt;
-      const out = Float64Array.from(baseAtt);
-      for (let jc = 0; jc < 4; jc++) { const kk = _K.edge[i][jc]; if (!kk || jc === i) continue;
-        const sj = _sb.slots[jc]; if (!sj.desc || (jc > 0 && !sj.descLive)) continue;
-        const fj = snap ? snap[jc] : sj.descBase; if (!fj) continue;   // snap = the same-step frozen field (turbo); descBase (CPU, per-step current) otherwise
-        for (let n2 = 0; n2 < out.length; n2++) out[n2] += kk * fj[n2]; }
-      return out; };
+    // _coupledAtt (cross-slot attractor/Kuramoto coupling) EXTRACTED to medium-core.js (bound above).
     // upload descBase → the slot's resident texture (only when the CPU side was mutated externally: a verb, a
     // fresh recall, or first prime); after this the texture and descBase agree at _tbCur.
     const _tbPrime = (i) => { const sl = _sb.slots[i]; _gpu.selectEyeSlot(i);
@@ -656,10 +899,11 @@ function makeMediumU1Renderer(core) {
         let ring = _tbFrameRing; for (const ks of _kernApplied) if (ks.atStep <= cur && ks.r?.length) ring = ks;
         if (ring && ring.r?.length && _tbFrameRingCur !== ring) { _gpu.setRings(ring.r, ring.w, ring.o); _tbFrameRingCur = ring; }
         const att4 = _coupledAtt(si4, si4 === 0 ? _regAttC : sl.descAtt, _coupSnap); if (att4) _gpu.setObjField(att4);
-        const b4 = 0.15 * (_lensOp[si4].beta || 1);
+        const b4base = 0.15 * (_lensOp[si4].beta || 1);
         for (let kk2 = cur; kk2 < upTo; kk2++) {
+          const b4 = si4 === 0 ? b4base : b4base * _pinFac(sl, kk2);   // ⌛pinHold fades per STEP → recompute inside the loop so turbo matches the CPU executor exactly (W never fades)
           for (const ks of _kernApplied) if (ks.atStep === kk2 && ks.r?.length && _tbFrameRingCur !== ks) { const qv = _gpu.readEyePsi(); _gpu.setRings(ks.r, ks.w, ks.o); _gpu.setEyePsi(qv); _tbFrameRingCur = ks; if (att4) _gpu.setObjField(att4); }
-          if (att4 && _linearMode !== 1) _gpu.applyEyeSuperpose(b4);   // pin ON in full + linear TRAP (mode 2); OFF only in free-linear (mode 1)
+          if (att4 && _linearMode !== 1 && b4 > 0) _gpu.applyEyeSuperpose(b4);   // pin ON in full + linear TRAP (mode 2); OFF only in free-linear (mode 1), or once pinHold has faded to 0
           _gpu.stepEyeN(1, DT);   // the LINEAR spectral step (gate D) always runs
           if (!_linearMode) { _gpu.applyEyeNlSpm(-_SOL_GAMMA, _SOL_ISAT, DT); (_gpu.applyEyeEnergyCapNS || _gpu.applyEyeEnergyCap).call(_gpu, sl.descE0); }   // nonlinear SPM+cap: full medium only
           else if (_linearMode === 2 && _gpu.applyEyeScale) _gpu.applyEyeScale(1 - _linLeak());   // linear SHARP TRAP: LINEAR damping balances the pin (driven-damped → sharp fixed point)
@@ -676,6 +920,14 @@ function makeMediumU1Renderer(core) {
     //    the ONE GLOBAL datum (summed over the whole field), the scale touches only R (the outside is never
     //    renormalized — the GPU-shard scissor discipline, inherited).
     let _viewAllOn = false, _viewAllCache = { bar: -1, f: null };   // Σ VIEW: linear superposition of the slots' declarations — a labeled VIEW (slots do not interact); per-bar cached CPU composite
+    // _edgeTag(i) — the COUPLING readout for the render label: which slots slot i shares a LIVE edge κ with (both the
+    //   Kuramoto phase law AND the attractor field-mixing are driven by this same _K.edge). Distinguishes REAL
+    //   interaction (an edge → the viewed slot's phase entrains + its field bleeds toward the neighbor) from a mere
+    //   overlay (Σ VIEW with no edges). '' when slot i is uncoupled. So the canvas itself says "coupled to …" vs silent.
+    const _edgeTag = (i) => { if (!_K.edge) return ''; const parts = [];
+      for (let j = 0; j < 4; j++) { const kap = _K.edge[i]?.[j]; if (j !== i && kap) parts.push(`${SLOTN[j]}${kap > 0 ? '+' : '−'}${Math.abs(kap).toFixed(2)}`); }
+      return parts.length ? ` · ⇄COUPLED ${parts.join(' ')} (κ: ${_fieldMix ? 'phase entrains + field bleeds — both layers' : 'PHASE only — field-mix OFF, shapes pure'}, in eH)` : ''; };
+    const _anyEdge = () => { if (!_K.edge) return false; for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) if (a !== b && _K.edge[a][b]) return true; return false; };
     let _turboOn = false, _turboArmed = true, _tbCur = -1, _tbSteps = 0, _tbLogBar = -1;   // _turboArmed: fire the GPU executor once at boot; disarmed by any explicit toggle or a join (adopt the world's state)
     let _tbFrameRing = null, _tbFrameRingCur = null, _regAttC = null;   // turbo frame context (ring-at-frame-start; the shared pin target)   // ⚡turbo: the GPU as EXECUTOR of the register-engine step (replicated dial; _tbRingStep = atStep of the ring currently on the GPU)
     let _shardRef = null, _shardLogBar = -1, _kurLogBar = -1, _shardActive = false, _shardEconKv = -9999, _shardEconOk = false, _shardEconInfo = null, _shardWarned = false, _shardXspace = false, _shardDemoRing = null;
@@ -688,22 +940,7 @@ function makeMediumU1Renderer(core) {
     const _shardFreezeOutside = () => { if (!_mirRegion || !_shardRef || !W.descBase) return; const reg = _mirRegion;
       for (let y = 0; y < GRID; y++) for (let x = 0; x < GRID; x++) { if (x >= reg.x0 && x < reg.x1 && y >= reg.y0 && y < reg.y1) continue;
         const j = (y * GRID + x) * 2; W.descBase[j] = _shardRef[j]; W.descBase[j + 1] = _shardRef[j + 1]; } };
-    const _regStepRegion = (s, att, bfac, reg) => { const rc = _shardRing(); if (!rc?.r?.length || !s.descBase || !s.descE0) return;
-      const psi = s.descBase;
-      if (att) { const b = 0.15 * (bfac || 1);
-        for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; psi[j] += b * att[j]; psi[j + 1] += b * att[j + 1]; } }
-      const nb = (s._eng && s._eng !== psi && s._eng.length === psi.length) ? s._eng : new Float64Array(psi.length);
-      regionStepX(psi, rc.r, rc.w, rc.o, DT, GRID, reg, { out: nb });
-      for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2;
-        const re = nb[j], im = nb[j + 1], I2 = re * re + im * im;
-        const th = _SOL_GAMMA * I2 / (1 + I2 / _SOL_ISAT) * DT, c = Math.cos(th), sn = Math.sin(th);
-        nb[j] = re * c - im * sn; nb[j + 1] = re * sn + im * c; }
-      let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];
-      const sc = Math.sqrt(s.descE0 / (e2 || 1));
-      if (e2 > 1e-9) for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] *= sc; nb[j + 1] *= sc; }   // both directions (the true engine cap), inside R only (scissor discipline)
-      for (let y = reg.y0; y < reg.y1; y++) for (let x = reg.x0; x < reg.x1; x++) { const j = (y * GRID + x) * 2; nb[j] = Math.fround(nb[j]); nb[j + 1] = Math.fround(nb[j + 1]); }
-      s._eng = psi; s.descBase = nb; s._texStepSynced = -1;   // sharded W is CPU-stepped → mark texture-desync (a later _tbSyncSlot re-reads correctly if unsharded); descDisp refreshed at display cadence by the caller
-    };
+    // _regStepRegion (the region/shard engine step) EXTRACTED to medium-core.js (bound above as _regStepRegion).
     // ── THE REGISTER-RESIDENT sl(2) TIER (the gate-F meta-circular rung): V and V̈ are INVARIANT under the
     //    anchors (translation + global phase), so they are pure functions of descBase + the stencil — REGISTER
     //    content. W.sl2 = {V, vdd, I, kv} is captured at every compile door (wabs/autoc), RE-KEYED lazily when
@@ -712,17 +949,8 @@ function makeMediumU1Renderer(core) {
     //    slide). The witness verifies per bar in [VPT] (the lock→A analog for the sl(2) charges). Derived data:
     //    NOT in regH (a pure fn of hashed content + kernelVer adds fork surface, no information) and NOT in the
     //    snapshot (joiners lazily recompute — same bytes by construction).
-    const _mkSl2 = (env) => { const rc = _E.ringCache; if (!rc?.r?.length || !env) return null;
-      const sm = secondMomentTorus(env, GRID);
-      const sE = Math.min(48, Math.max(2, Math.sqrt(sm.V / (2 * (sm.P || 1)))));
-      const Dq = packetD(rc.r, rc.w, rc.o, sE);
-      const spec = virialSpec(env, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT });   // ONE FFT, at the door — the spectrum IS compile content
-      const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT, Dq, spec, lam: _lambda() });   // FD-on-λ v_g (≈1.7% bias, telemetry-grade — the analytic sum is ~190 sin-terms/mode on the live ring, 120ms/call; instruments keep the exact path)
-      return { V: sm.V, vdd, I: vdd * sm.V, kv: _E.kernelVer, m: sm.m, spec, Dq }; };
-    // RE-KEY = a pure stencil re-sum over the cached spectrum (FFT-free): V, m, spec are stencil-independent.
-    const _sl2Rekey = (sl2) => { const rc = _E.ringCache; if (!rc?.r?.length || !sl2?.spec) return null;
-      const vdd = virialRateX(null, rc.r, rc.w, rc.o, GRID, { gamma: _SOL_GAMMA, isat: _SOL_ISAT, Dq: sl2.Dq, spec: sl2.spec, lam: _lambda() });   // FD-on-λ (the analytic sum was 120ms/re-key on the live ring — profiled)
-      return { V: sl2.V, vdd, I: vdd * sl2.V, kv: _E.kernelVer, m: sl2.m, spec: sl2.spec, Dq: sl2.Dq }; };
+    // _mkSl2 (the sl(2)/Casimir charge builder) and _sl2Rekey (the FFT-free stencil re-key) EXTRACTED to medium-core.js
+    // (bound above). The witness/verifier (_vptRead below) stays app-side.
     // ── THE LIVE GROUP LEDGER (the virial law WIRED TO THE MEDIUM): H and V of W's current field, from the
     //    engine's own operators (kinetic via the λ grid, potential via the closed-form saturable F). W is pinned
     //    AND capped, so H is NOT conserved here — the reading is the REGIME INDICATOR: H<0 = "this state, if
@@ -792,56 +1020,38 @@ function makeMediumU1Renderer(core) {
       V.leash.release();
       console.log(`[MU1-VIRT] recorded+lifted V atStep=${k}${phi ? ` · THROUGH LENS φ=${phi.toFixed(3)}` : ''} · lift fidelity vs W = ${_ampCorr(lift, W.field).toFixed(4)} (T=${_VIRT_T}, spectral) · V BORN (dual plate: field + descriptor ∠${lensU1.wrap(lensU1.angle(_lensOp[1])).toFixed(3)})`); };
     const _storeMoment = (k) => { if (!W.field) return;
-      // f32-quantize the plate AT CREATION (the saveEngine discipline applied to the spectral leg): the plate rides
-      // the wire as f32 — a leader keeping f64 while a joiner restores f32 would split recall's argmax at the margin.
-      const p64 = _specLeg(W.field, _VIRT_T, DT); if (!p64) return;
-      const plate = Float64Array.from(Float32Array.from(p64));
-      _plates.push({ p: plate, a: W.movAtt(W.leash.state.gx, W.leash.state.gy), dop: { ..._lensOp[0] },
-        pos: [W.leash.state.gx, W.leash.state.gy], obj: _lensObj,   // the COMPLETE collective coordinates: readOp scalars (dop) + leash position + object identity — with these the descriptor plate is self-sufficient (𝔸-recall reads it with no field)
-        w0: Float64Array.from(W.field),   // the DRESSED profile — the medium's OWN locked soliton at the stored moment (f32 GPU readback → peer-identical bytes). This is the holographic PLATE proper: captured ONCE here; 𝔸-recall reconstructs+ages it by pure descriptor rotation, never re-simulating (the bare probe ψ_base shows the injected symbol; the dressing — saturable focusing through the ring kernel — is what the 6 floats alone don't carry)
-        bw: _tauK ? (_tauK.beatsOf('W') ?? 0) : 0, k });   // BOTH plates: field (p) + descriptor (dop = W's (M,O) copy)
-      if (_plates.length > BANK_MAX) _plates.shift();
-      console.log(`[MU1-VIRT] STORE atStep=${k} — plate ${_plates.length}/${BANK_MAX} banked (dual: field + descriptor ∠${lensU1.wrap(lensU1.angle(_plates[_plates.length - 1].dop)).toFixed(3)}, bw=${_tauK ? (_tauK.beatsOf('W') ?? 0) : 0})`); };
+      // the hologram bank owns the plate math (f32-quantized ±T leg + descriptor copy + w0 dressed profile). The
+      // f32 discipline (leader f64 vs joiner f32 splits recall's argmax at the margin) is the bank's f32:true default.
+      const pl = _holo.store(W.field, _lensOp[0], { pos: [W.leash.state.gx, W.leash.state.gy], obj: _lensObj,
+        w0: W.field, bw: _tauK ? (_tauK.beatsOf('W') ?? 0) : 0, k });   // COMPLETE collective coords: dop + pos + obj (self-sufficient for 𝔸-recall); w0 = the DRESSED profile (the medium's own locked soliton, the plate proper)
+      if (!pl) return;
+      // the plate's attractor = WHATEVER THE SLOT IS ACTUALLY PINNED TO at the store step. Under ψATT that is the
+      //   adopted FIELD hold, not the probe — storing the probe would silently re-inject the injected symbol on every
+      //   later recall (the plate would carry a texture the live slot had already retired). `selfAtt` marks such a
+      //   plate so recall re-enters ψATT instead of the probe pin, and the att bytes must SHIP (a field hold cannot be
+      //   regenerated from dop+obj the way a probe att can — that is why `a` is normally omitted from the snapshot).
+      pl.a = _liveAtt(0) || W.movAtt(W.leash.state.gx, W.leash.state.gy);
+      pl.selfAtt = !!W._attHold;   // the moment was captured in FIELD-CARRIED form
+      console.log(`[MU1-VIRT] STORE atStep=${k} — plate ${_plates.length}/${BANK_MAX} banked (dual: field + descriptor ∠${lensU1.wrap(lensU1.angle(pl.dop)).toFixed(3)}, bw=${pl.bw})`); };
     const _recallMoment = (k, xshift = false) => { if (!_plates.length || !W.field) return;
-      // cue = W now, propagated to plate space (SPECTRAL leg — zero GPU); bind against the bank; best = argmax overlap.
-      // xshift (recallx): score SHIFT-INVARIANTLY (crossCorrScan — all N offsets in one dual pass) and RELOCATE the
-      // lift to where the cue actually sits — recall that finds a moment the soliton has moved away from.
-      const cue = _specLeg(W.field, _VIRT_T, DT); if (!cue) return;
-      let best = 0, bc = -1, bestD = [0, 0];
-      const scores = _plates.map((pl, i) => { let c, d = [0, 0];
-        if (xshift) { const r = crossCorrScan(cue, pl.p, GRID); c = r.corrMax; d = [r.dx, r.dy]; } else c = _ampCorr(cue, pl.p);
-        if (c > bc) { bc = c; best = i; bestD = d; } return +c.toFixed(3); });
-      const pl = _plates[best];
-      // FIELD-PLATE lift (the IMAGE): the exact backward leg on the stored plate → V's field (relocated if xshift)
-      V.field = _specLeg(pl.p, _VIRT_T, -DT);
-      if (xshift && (bestD[0] || bestD[1])) { V.field = spectralShift(V.field, -bestD[0], -bestD[1], GRID);
-        console.log(`[MU1-RECALLX] shift-invariant match: plate ${best + 1} at δ=(${bestD[0]},${bestD[1]}) → lift RELOCATED to the cue's position (the duality recall: zero-lag would have scored it ${_ampCorr(cue, pl.p).toFixed(3)})`); }
+      // BIND + LIFT via the hologram bank: cue = W now, propagated to plate space (the bank's spectral leg — zero GPU);
+      // argmax overlap (xshift → shift-invariant crossCorrScan + relocate). The bank owns the correlation/lift math;
+      // the app owns V's slot-birth + the readout logging.
+      const bd = _holo.bind(W.field, { xshift }); if (!bd) return;
+      const { plate: pl, index: best, scores, shift: bestD, cueLeg: cue } = bd;
+      V.field = _holo.lift(pl, { shift: bestD }); _recalledInto[1] = best;   // remember V holds plate `best` → memory-damage re-lifts it
+      if (xshift && (bestD[0] || bestD[1])) console.log(`[MU1-RECALLX] shift-invariant match: plate ${best + 1} at δ=(${bestD[0]},${bestD[1]}) → lift RELOCATED to the cue's position (zero-lag would have scored it ${_ampCorr(cue, pl.p).toFixed(3)})`);
       let ve = 0; for (let j = 0; j < V.field.length; j++) ve += V.field[j] * V.field[j]; V.e0 = ve || 1;
       V.att = (xshift && (bestD[0] || bestD[1])) ? (_plateAtt(pl.dop, [(pl.pos?.[0] ?? 0) - bestD[0], (pl.pos?.[1] ?? 0) - bestD[1]], pl.obj) || pl.a) : (pl.a || V.att);
       V.born = true; V.hold = true; V.desc = false; V.mirror = false;
       _lensOp[1].phase = _lensOp[1].prec = 0;
-      // THE DUAL-LAYER EQUIVALENCE (the headline): the observer's aging shift comes TWO independent ways —
-      // (A) FIELD-derived — measured from the 128 KB FIELD BYTES, no descriptor: phaseCorr(plate, cue) = arg⟨plate, cue⟩,
-      //     the phase W's field ACTUALLY rotated between store and now. cue = W-now propagated by stepEyeN(+DT) to plate
-      //     space; pl.p = W-at-store propagated the SAME way → both live in identical plate space, so their overlap phase
-      //     is PURELY the aging (the common propagation cancels). This is the true field round-trip, not a descriptor read.
-      const dField = lensU1.wrap(phaseCorr(pl.p, cue));
-      // (B) DESCRIPTOR-only — the 6-float algebraic PREDICTION, computed with NO field at all. THE EXACT form is the
-      //     difference of two STORED register phases: pl.dop.phase froze W's register angle at store (= the accumulated
-      //     Σω up to store); _lensOp[0]'s angle is the accumulated Σω up to now. Their difference IS the aging, and it
-      //     handles a CHANGING ω correctly (the register accumulates ω PER BEAT — the "W AGES" loop), which the naive
-      //     ω·Δτ does NOT. This is lensC1.compose(plate, invert(W-now)) read as an angle — a pure 6-float op, no field.
-      const dDesc = _tauK ? lensU1.wrap(lensU1.angle(_lensOp[0]) - lensU1.angle(pl.dop)) : null;
-      // ω·Δτ is the CLOSED-FORM special case — EXACT only if ω was CONSTANT since store (then Σω = ω·N). Shown alongside
-      // as the "if ω never changed" prediction; it DIVERGES from dDesc (and the field) when ω was changed mid-flight —
-      // NOT a bug, an honest signal that the constant-ω closed form doesn't apply (live-caught: ω set late → ω·Δτ=37 rad
-      // over 186 beats while the field only aged 1.2 rad, because ω was 0 for 180 of those beats).
-      const dN = (pl.bw != null && _tauK) ? (_tauK.beatsOf('W') ?? 0) - pl.bw : null;
-      const dOmegaTau = (dN != null && _lensOp[0].omega) ? lensU1.wrap(_lensOp[0].omega * dN) : null;
+      // THE DUAL-LAYER AGING READOUT (the headline) via the bank: (A) FIELD-measured Δφ = arg⟨plate, cue⟩ (both in
+      // plate space → the common propagation cancels, leaving pure aging) vs (B) DESCRIPTOR Δ∠ = ∠now − ∠stored (the
+      // exact Σω difference, correct even under a CHANGING ω). |A−B|≈0 is the field-vs-equation proof; ω·Δτ is the
+      // constant-ω closed form shown alongside (diverges honestly when ω changed mid-flight).
+      const ag = _holo.agingReadout(pl, cue, _lensOp[0], { name: 'W' });
       console.log(`[MU1-RECALL] cue⊗bank=[${scores.join(', ')}] → plate ${best + 1} (stored atStep=${pl.k}) lifted into V`);
-      // the HEADLINE: measured field aging (A) vs the EXACT descriptor Δφ (B). |A−B|≈0 is the field-vs-equation proof.
-      const eqErr = (dDesc != null) ? Math.abs(lensU1.wrap(dField - dDesc)) : null;
-      console.log(`[RECALL-∠] Δ(field measured, 128KB)=${dField.toFixed(3)} rad${dDesc != null ? ` · Δ(descriptor Σω, 6 floats)=${dDesc.toFixed(3)} rad` : ''} · Δτ_W=${dN ?? '—'} beats${eqErr != null ? ` · EQUIVALENCE |field−equation|=${eqErr.toFixed(4)} rad ${eqErr < 0.15 ? '✓ AGREE (the macro-law describes the micro-physics)' : '✗ DISAGREE (field structure the 6 floats miss, or a non-global phase)'}` : ''}${dOmegaTau != null ? ` · [ω·Δτ closed-form=${dOmegaTau.toFixed(3)} rad — exact only if ω constant since store]` : ''} — the dual-layer readout`); };
+      console.log(`[RECALL-∠] Δ(field measured, 128KB)=${ag.dField.toFixed(3)} rad${ag.dDesc != null ? ` · Δ(descriptor Σω, 6 floats)=${ag.dDesc.toFixed(3)} rad` : ''} · Δτ_W=${ag.dTau ?? '—'} beats${ag.eqErr != null ? ` · EQUIVALENCE |field−equation|=${ag.eqErr.toFixed(4)} rad ${ag.agree ? '✓ AGREE (the macro-law describes the micro-physics)' : '✗ DISAGREE (field structure the 6 floats miss, or a non-global phase)'}` : ''}${ag.dOmegaTau != null ? ` · [ω·Δτ closed-form=${ag.dOmegaTau.toFixed(3)} rad — exact only if ω constant since store]` : ''} — the dual-layer readout`); };
 
     // ── 𝔸-RECALL (recalla) — ABSTRACTIVE HOLOGRAPHY: recall as a PURE ℂ*-DESCRIPTOR OPERATOR, zero simulation. The
     //    field path (_recallMoment) content-addresses by propagating W through the kernel (stepEyeN ±T) and correlating
@@ -854,13 +1064,13 @@ function makeMediumU1Renderer(core) {
     //    independent ORACLE — run both and compare plate choice + aging Δ∠ (the honest dual-layer check; per the
     //    no-tricks law the view is labeled PREDICTIVE, never passed off as ψ). All arithmetic CPU f64 at the shared
     //    drain step → in regH → byte-identical across peers by construction.
-    const _RECALL_SIG = 6;   // px — the closed-form content-address width (≈ the probe autocorrelation radius)
     const _recallDop = (k) => { if (!_plates.length) return;
-      const cx = W.leash.state.gx, cy = W.leash.state.gy;   // cue = W's DESCRIPTOR now (leash coords; no field read)
-      let best = 0, bc = -1; const scores = _plates.map((pl, i) => { const dx = (pl.pos?.[0] ?? 0) - cx, dy = (pl.pos?.[1] ?? 0) - cy;
-        const c = (pl.obj && pl.obj !== _lensObj) ? 0 : Math.exp(-(dx * dx + dy * dy) / (2 * _RECALL_SIG * _RECALL_SIG));
-        if (c > bc) { bc = c; best = i; } return +c.toFixed(3); });
-      const pl = _plates[best];
+      // 𝔸-RECALL bind via the bank: closed-form content-address on W's DESCRIPTOR position (leash coords, no field
+      // read) — the Gaussian exp(−|Δpos|²/2σ²) with object-identity gating. The bank owns the bind; V's descriptor
+      // birth stays here. (σ = the ctx sigma:6 — the probe autocorrelation radius.)
+      const cx = W.leash.state.gx, cy = W.leash.state.gy;
+      const bd = _holo.bindDesc([cx, cy], _lensObj); if (!bd) return;
+      const { plate: pl, index: best, scores } = bd;
       // V born in DESCRIPTOR MODE: re-instantiate the REMEMBERED operator (the stored dop) at its stored position; it
       // then lives FORWARD in ω-time from that moment. No V.field/att → the V field-drive block never runs for it.
       _lensOp[1].phase = pl.dop.phase; _lensOp[1].prec = pl.dop.prec || 0; _lensOp[1].omega = pl.dop.omega; _lensOp[1].beta = pl.dop.beta;
@@ -875,10 +1085,12 @@ function makeMediumU1Renderer(core) {
     // ── MIRROR-SOURCED VERB EXECUTORS (⌀PDE): mv = the queue entry (register context AT the drain step — shared-
     //    exact); mf = the mirror's live buffer AT the same shared step (deterministic). All CPU f64 from there
     //    (spectral legs, plate codec) — identical results on every peer by construction. Births → P1 as 𝔸-slots.
-    const _storeFrom = (mv, mf) => { const p64 = _specLeg(mf, _VIRT_T, DT); if (!p64) return;
-      _plates.push({ p: Float64Array.from(Float32Array.from(p64)), a: _plateAtt(mv.dop, [mv.gx, mv.gy], _lensObj),
-        dop: { ...mv.dop }, pos: [mv.gx, mv.gy], obj: _lensObj, w0: Float64Array.from(Float32Array.from(mf)), bw: mv.bw, k: mv.k });
-      if (_plates.length > BANK_MAX) _plates.shift();
+    const _storeFrom = (mv, mf) => {   // ⌀PDE store: the witness field mf at the shared step → the bank (spectral leg + f32, owned by the bank)
+      const pl = _holo.store(mf, mv.dop, { pos: [mv.gx, mv.gy], obj: _lensObj, w0: mf, bw: mv.bw, k: mv.k }); if (!pl) return;
+      // bank the LIVE pin target (see _storeMoment): under ψATT the slot is pinned to its adopted FIELD, so the plate
+      //   must carry that — otherwise recall re-injects the probe symbol the slot had already retired.
+      pl.a = _liveAtt(mv.si >= 0 ? mv.si : 0) || _plateAtt(mv.dop, [mv.gx, mv.gy], _lensObj);
+      pl.selfAtt = !!_sb.slots[mv.si >= 0 ? mv.si : 0]?._attHold;
       console.log(`[MU1-VIRT] STORE (⌀register-sourced) atStep=${mv.k} — plate ${_plates.length}/${BANK_MAX} banked (field from the WITNESS at the shared step + descriptor ∠${lensU1.wrap(lensU1.angle(mv.dop)).toFixed(3)}, bw=${mv.bw})`); };
     const _recordFrom = (mv, mf) => { const ti = (mv.si >= 1 && mv.si <= 3) ? mv.si : 2, P1 = _sb.slots[ti], phi = mv.amp || 0;   // slot-TARGETED (the register-strip selector; default P1)
       const rvOp = { mode: 'id', phase: phi, beta: 1, omega: 0, prec: 0 };
@@ -888,32 +1100,89 @@ function makeMediumU1Renderer(core) {
       P1.field = null; P1.att = null; P1.hold = false; P1.mirror = false; P1.born = true;
       P1.leash.release(); P1.leash.state.gx = mv.gx; P1.leash.state.gy = mv.gy;
       console.log(`[MU1-VIRT] RECORD (⌀register-sourced) atStep=${mv.k}${phi ? ` · THROUGH LENS φ=${phi.toFixed(3)}` : ''} — ${SLOTN[ti]} born as an 𝔸-SLOT (the moment DECLARED: envelope from the witness, descriptor ∠${P1.descPhi0.toFixed(3)} · view:${SLOTN[ti]}, mu1.descGo(x,y,'${SLOTN[ti]}') to transport it)`); };
-    const _recallFrom = (mv, mf) => { if (!_plates.length) return;
-      const cue = _specLeg(mf, _VIRT_T, DT); if (!cue) return;
+    const _recallFrom = (mv, mf, occ = false) => { if (!_plates.length) return;
       const xshift = mv.mode === 'recallx';
-      let best = 0, bc = -1, bestD = [0, 0];
-      const scores = _plates.map((pl, i) => { let c, d = [0, 0];
-        if (xshift) { const r = crossCorrScan(cue, pl.p, GRID); c = r.corrMax; d = [r.dx, r.dy]; } else c = _ampCorr(cue, pl.p);
-        if (c > bc) { bc = c; best = i; bestD = d; } return +c.toFixed(3); });
-      const pl = _plates[best]; let lift = _specLeg(pl.p, _VIRT_T, -DT, mv.scale); if (!lift) return;   // scale-selective lift: the ±T backward leg run with the coarse/fine tier-λ (exact by the tier-decomposition theorem)
-      if (xshift && (bestD[0] || bestD[1])) lift = spectralShift(lift, -bestD[0], -bestD[1], GRID);
+      // OCCLUSION (recallo): mask the cue to a PARTIAL image BEFORE binding — the classic "break the hologram, still
+      // reconstruct the whole scene" test. The bank is UNTOUCHED (full plates); only what W presents as the cue is a
+      // fragment. bind still argmaxes correctly from the fragment (ampCorr normalizes by the KEPT energy of both),
+      // and lift returns the WHOLE plate. All CPU f64 at the shared step (occlude is deterministic: mode/frac/block/
+      // seed are stamped in mv) → in regH, byte-identical across peers. Shift-invariant bind so a fragment that also
+      // MOVED is still found+relocated. The readout reports fragment-in (keptFraction) vs whole-out fidelity.
+      const cue = occ ? occlude(mf, { mode: mv.holoMode || 7, frac: mv.frac, block: mv.block || 8, seed: mv.seed, G: GRID }) : mf;
+      const bd = _holo.bind(cue, { xshift: xshift || occ }); if (!bd) return;
+      const { plate: pl, index: best, scores, shift: bestD } = bd;
+      const lift = _holo.lift(pl, { scale: mv.scale, shift: bestD }); if (!lift) return;
+      if (occ) { const kept = keptFraction(mf, cue), fid = _ampCorr(lift, mf);   // fragment-in vs whole-out — the occlusion signature
+        const modeName = { 1: 'low-pass', 2: 'high-pass', 3: 'conjugate', 5: 'box', 6: 'half-plane', 7: 'rand-zero', 8: 'rand-noise' }[mv.holoMode || 7] || 'rand-zero';
+        console.log(`[MU1-RECALL⊘] OCCLUDED cue (${modeName}, frac=${(mv.frac || 0).toFixed(2)}${(mv.holoMode === 7 || mv.holoMode === 8 || !mv.holoMode) ? `, block=${mv.block || 8}px` : ''}) → kept ${(kept * 100).toFixed(0)}% of the image · cue⊗bank=[${scores.join(', ')}] → plate ${best + 1} (score ${(bd.corr).toFixed(3)}) · WHOLE reconstruction fidelity vs unoccluded W = ${fid.toFixed(3)} — a real hologram lifts the FULL scene from a fragment (fidelity degrades gracefully as frac↑)`); }
       // the moment is resurrected ALIVE into V (field mode's recall semantics, register-resident): a LIVING
       // 𝔸-slot — the register engine steps it, held toward its plate's regenerated attractor (the pin),
       // transportable via descgo (the pin chase). The mirror role, if V held it, is released — a slot is one
       // thing at a time; every slot is the same TYPE, modes differ.
       const ti = (mv.si >= 1 && mv.si <= 3) ? mv.si : 1, V1 = _sb.slots[ti];   // slot-TARGETED living birth (default V)
+      _recalledInto[ti] = best;   // remember this slot holds plate `best` → memory-damage re-lifts the live reconstruction
       _lensOp[ti].phase = 0; _lensOp[ti].prec = 0; _lensOp[ti].omega = mv.dop.omega;
       V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = 0; V1._texDirty = true;   // fresh CPU bytes → turbo re-primes the texture on the next advance
-      V1.descPos = pl.pos ? [pl.pos[0] - bestD[0], pl.pos[1] - bestD[1]] : [mv.gx, mv.gy]; V1.descObj = pl.obj || _lensObj; V1.descBar = Math.floor(mv.k / 21);
+      // WHERE THE RECALLED MOMENT LANDS — three cases, in priority order:
+      //   1. mv.at  → an EXPLICIT commanded position (recallAt / the at:[x,y] option): place it THERE. Without this
+      //      every recall could only land at the plate's stored pos (recall@) or at the cue's pos (recall⇄) — there
+      //      was no way to say "bring that moment HERE, to this spot".
+      //   2. pl.pos − bestD → the stored pos, relocated by the shift-scan offset (recall⇄ finds a MOVED moment and
+      //      brings it to where the cue now is; bestD is [0,0] for zero-lag recall@, so that lands at the stored pos).
+      //   3. mv.gx/gy → the verb's carried coords (a plate with no stored pos).
+      const _atPos = Array.isArray(mv.at) ? [+mv.at[0] || 0, +mv.at[1] || 0] : null;
+      V1.descPos = _atPos || (pl.pos ? [pl.pos[0] - bestD[0], pl.pos[1] - bestD[1]] : [mv.gx, mv.gy]); V1.descObj = pl.obj || _lensObj; V1.descBar = Math.floor(mv.k / 21);
       V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(mv.k / 21); V1.descHold = null;
       let eL = 0; for (let j = 0; j < V1.descBase.length; j++) eL += V1.descBase[j] * V1.descBase[j]; V1.descE0 = eL || 1;
-      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj };
-      V1.descAtt = _plateAtt(pl.dop, V1.descPos, pl.obj || _lensObj);
+      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj }; V1._pinK = mv.k;   // birth step → the ⌛pinHold fade clock (shared k, so the decay is identical on every peer)
+      V1.descAtt = _plateAtt(pl.dop, V1.descPos, pl.obj || _lensObj); V1._digestLeft = 0;
+      // ψATT INHERITANCE: a plate banked in FIELD-CARRIED form (selfAtt) re-enters ψATT on recall — its stored att IS
+      //   a captured field, so the recalled slot is pinned to that, not to a regenerated probe. Otherwise the probe
+      //   symbol would reappear in every recalled copy, which is exactly the leak ψATT exists to close. The hold is
+      //   anchored at the plate's own position so the leash rolls it from there (same convention as adoption).
+      if (pl.selfAtt && pl.a) { V1._attHold = Float64Array.from(pl.a); V1._attHoldPos = [...V1.descPos]; V1._holdPhi0 = lensU1.angle(_lensOp[ti]); V1._holdSl2 = _mkSl2(V1._attHold); V1._holdRef = null; V1._holdRefBar = (_E?.frameBar | 0) + _HOLD_MIN; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // the recalled hold keeps its medium-semantic identity (sl(2) is anchor-invariant, so the banked charges survive the relocation)
+      else { V1._attHold = null; V1._attHoldPos = null; V1._holdPhi0 = 0; V1._holdSl2 = null; V1._holdRef = null; V1._holdRefBar = -1; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // a recall birth retires any ψATT hold (the plate att is the pin)
       V1.descDisp = Float64Array.from(V1.descBase);
       V1.field = null; V1.att = null; V1.hold = false; V1.mirror = false; V1.born = true;
       V1.leash.release(); V1.leash.state.gx = V1.descPos[0]; V1.leash.state.gy = V1.descPos[1];
       const dDesc = (pl.bw != null) ? lensU1.wrap(lensU1.angle(mv.dop) - lensU1.angle(pl.dop)) : null;
       console.log(`[MU1-RECALL${xshift ? 'X' : ''}] (⌀register-sourced) cue⊗bank${xshift ? ' (SHIFT-INVARIANT)' : ''}=[${scores.join(', ')}] → plate ${best + 1} (stored atStep=${pl.k})${(mv.scale && mv.scale !== 'all') ? ` · SCALE=${mv.scale} (${mv.scale === 'coarse' ? 'smooth skeleton — large-radius tiers only' : 'speckle detail — small-radius tiers only'}, exact by the tier theorem; rMid=${_rMid().toFixed(1)})` : ''}${xshift ? ((bestD[0] || bestD[1]) ? ` · δ=(${bestD[0]},${bestD[1]}) → lift RELOCATED to the cue's position` : ' · δ=(0,0) — no relocation needed') : ''} → ${SLOTN[ti]} born LIVING (the register engine steps it; held toward its plate attractor; mu1.descGo(x,y,'${SLOTN[ti]}') to walk it)${dDesc != null ? ` · descriptor aging Δ∠=${dDesc.toFixed(3)} rad over Δτ_W=${(mv.bw - pl.bw) | 0} beats` : ''} · view:${SLOTN[ti]}`); };
+
+    // _recallPlateLive(idx, ti, k) — lift a SPECIFIC plate (by index, no bind) into slot ti as a LIVING 𝔸-slot: the
+    //   register engine steps it every frame, held toward its plate attractor → a LIVE SOLITON (not a frozen image).
+    //   This is "view plate" done honestly: the memory brought back to life. Damage to the plate re-lifts here
+    //   (_recalledInto), so the living soliton degrades as you drag. Same birth as _recallFrom, minus the cue/bind.
+    const _recallPlateLive = (idx, ti, k, at = null) => { const pl = _plates[idx]; if (!pl?.p) return;   // at = [x,y] explicit placement (else the plate's stored pos)
+      const lift = _holo.lift(pl, { scale: 'all' }); if (!lift) return;
+      const V1 = _sb.slots[ti]; _recalledInto[ti] = idx;
+      _lensOp[ti].phase = lensU1.angle(pl.dop); _lensOp[ti].prec = 0; _lensOp[ti].omega = pl.dop.omega || 0;
+      V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = lensU1.angle(pl.dop); V1._texDirty = true;
+      V1.descPos = at ? [+at[0] || 0, +at[1] || 0] : (pl.pos ? [...pl.pos] : [0, 0]); V1.descObj = pl.obj || _lensObj; V1.descBar = Math.floor(k / 21);   // explicit placement wins over the plate's stored pos
+      V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(k / 21); V1.descHold = null;
+      let eL = 0; for (let j = 0; j < V1.descBase.length; j++) eL += V1.descBase[j] * V1.descBase[j]; V1.descE0 = eL || 1;
+      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj }; V1._pinK = k;   // birth step → the ⌛pinHold fade clock (shared k → identical decay on every peer)
+      V1.descAtt = _plateAtt(pl.dop, V1.descPos, pl.obj || _lensObj); V1._digestLeft = 0;
+      // ψATT INHERITANCE: a plate banked in FIELD-CARRIED form (selfAtt) re-enters ψATT on recall — its stored att IS
+      //   a captured field, so the recalled slot is pinned to that, not to a regenerated probe. Otherwise the probe
+      //   symbol would reappear in every recalled copy, which is exactly the leak ψATT exists to close. The hold is
+      //   anchored at the plate's own position so the leash rolls it from there (same convention as adoption).
+      if (pl.selfAtt && pl.a) { V1._attHold = Float64Array.from(pl.a); V1._attHoldPos = [...V1.descPos]; V1._holdPhi0 = lensU1.angle(_lensOp[ti]); V1._holdSl2 = _mkSl2(V1._attHold); V1._holdRef = null; V1._holdRefBar = (_E?.frameBar | 0) + _HOLD_MIN; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // the recalled hold keeps its medium-semantic identity (sl(2) is anchor-invariant, so the banked charges survive the relocation)
+      else { V1._attHold = null; V1._attHoldPos = null; V1._holdPhi0 = 0; V1._holdSl2 = null; V1._holdRef = null; V1._holdRefBar = -1; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; } V1.descDisp = Float64Array.from(V1.descBase);   // a recall birth retires any ψATT hold
+      V1.field = null; V1.att = null; V1.hold = false; V1.mirror = false; V1.born = true;
+      V1.leash.release(); V1.leash.state.gx = V1.descPos[0]; V1.leash.state.gy = V1.descPos[1];
+      console.log(`[MU1-PLATELIVE] plate ${idx + 1}/${_plates.length} lifted into ${SLOTN[ti]} as a LIVING soliton (register-stepped, held toward its attractor) — damage the plate to watch it degrade LIVE · view:${SLOTN[ti]}`); };
+
+    // _reliftDamaged(idx) — after a stored plate is damaged, re-lift it into every LIVE slot that recalled it, so the
+    //   slot's RECONSTRUCTION visibly DEGRADES with the damage (the "corrupted memory read live" demo). Uses the SAME
+    //   lift the recall used (bank ±T leg), writing the slot the same way recall did — field-mode (V.field) or ⌀PDE
+    //   (descBase). Pure re-read of the (now damaged) plate; no re-bind (the slot already knows which plate it holds).
+    const _reliftDamaged = (idx) => { const pl = _plates[idx]; if (!pl?.p) return;
+      for (let ti = 0; ti < _sb.slots.length; ti++) { if (_recalledInto[ti] !== idx) continue; const s = _sb.slots[ti];
+        const lift = _holo.lift(pl, { scale: 'all' }); if (!lift) continue;
+        if (s.desc && s.descLive) { s.descBase = Float64Array.from(Float32Array.from(lift)); s._texDirty = true;   // ⌀PDE 𝔸-slot: refresh the envelope (register keeps stepping it)
+          let e = 0; for (let j = 0; j < s.descBase.length; j++) e += s.descBase[j] * s.descBase[j]; s.descE0 = e || 1; s.descDisp = Float64Array.from(s.descBase); }
+        else if (s.field) { s.field = lift; let e = 0; for (let j = 0; j < lift.length; j++) e += lift[j] * lift[j]; s.e0 = e || 1; }   // field-mode
+      } };
 
     // ── S7: JOIN SNAPSHOT (the medium.js idiom, user-preferred: snapshot AT JOIN, not a periodic checkpoint). The
     //    platform asks a live peer for a state snapshot via world.ps.app._snapHook, ships it OFF the render path, and
@@ -949,13 +1218,22 @@ function makeMediumU1Renderer(core) {
       slotFields: _sb.slots.map((s) => s.field ? _b64f(s.field) : null),   // each slot's canonical ψ (the plate/live fields)
       slotAtt: _sb.slots.map((s) => s.att ? _b64f(s.att) : null),
       K: { edge: _K.edge ? _K.edge.map((r) => [...r]) : null, capPh: _K.capPh, capStep: _K.capStep, src: _K.src.map((s) => s ? _b64f(s) : null) },
-      plates: _plates.map((pl) => ({ p: _b64f(pl.p), dop: { ...pl.dop }, pos: pl.pos ? [...pl.pos] : null, obj: pl.obj || null, w0: pl.w0 ? _b64f(pl.w0) : null, bw: pl.bw, k: pl.k })),   // a NOT shipped (regenerated: _plateAtt)
-      descSlots: _sb.slots.map((s) => s.desc ? { pos: s.descPos ? [...s.descPos] : null, obj: s.descObj || null, bar: s.descBar | 0, base: s.descBase ? _b64f(s.descBase) : null, hold: s.descHold ? _b64f(s.descHold) : null, posCap: s.descPosCap ? [...s.descPosCap] : null, capBar: s.descCapBar ?? null, e0: s.descE0 ?? null, live: s.descLive ? 1 : 0, attg: s.descAttG ? { dop: { ...s.descAttG.dop }, obj: s.descAttG.obj || null } : null, phi0: s.descPhi0 || 0 } : null),   // 𝔸-slot state (desc mode + coords + ω-time cursor + the dressed base/birth angle) — a joiner must resume the identical precession AND reconstruction
+      plates: _holo.save({ serialize: _b64f }).map((raw, i) => { const lp = _plates[i]; if (!lp) return raw;
+        // ψATT plate: its `a` is a CAPTURED FIELD, so it CANNOT be regenerated from dop+obj at restore the way a probe
+        //   att can (that regeneration is why `a` is normally omitted). Ship it, with the selfAtt marker, or the
+        //   joiner's recall would fall back to the probe and re-inject the retired symbol.
+        const _self = lp.selfAtt ? { selfAtt: 1, a: lp.a ? _b64f(lp.a) : null } : null;
+        if (lp._dmg == null) return _self ? { ...raw, ..._self } : raw;   // undamaged plate → ship as-is (no pristine to carry)
+        // a DAMAGED plate ships its PRISTINE (p0/w00) + the damage marker _dmg so a JOINER can re-damage/heal NON-
+        // DESTRUCTIVELY from the SAME clean bytes as the leader (else the joiner's re-drag would occlude from the
+        // already-damaged p → its future damage forks the field). The current damaged p ships as `raw.p` (unchanged).
+        return { ...raw, ...(_self || {}), _dmg: lp._dmg, p0: lp.p0 ? _b64f(lp.p0) : null, w00: lp.w00 ? _b64f(lp.w00) : null }; }),   // pristine rides ONLY for damaged plates
+      descSlots: _sb.slots.map((s) => s.desc ? { pos: s.descPos ? [...s.descPos] : null, obj: s.descObj || null, bar: s.descBar | 0, base: s.descBase ? _b64f(s.descBase) : null, hold: s.descHold ? _b64f(s.descHold) : null, posCap: s.descPosCap ? [...s.descPosCap] : null, capBar: s.descCapBar ?? null, e0: s.descE0 ?? null, live: s.descLive ? 1 : 0, attg: s.descAttG ? { dop: { ...s.descAttG.dop }, obj: s.descAttG.obj || null } : null, phi0: s.descPhi0 || 0, selfHold: s._attHold ? _b64f(s._attHold) : null, selfHoldPos: s._attHoldPos ? [...s._attHoldPos] : null, selfPhi0: s._holdPhi0 || 0, selfDigest: s._digestLeft | 0 } : null),   // + the ψATT hold/digest (the PIN TARGET — a joiner without it forks the field)   // 𝔸-slot state (desc mode + coords + ω-time cursor + the dressed base/birth angle) — a joiner must resume the identical precession AND reconstruction
       tauK: _tauK ? _tauK.save() : null,
       turboOn: _turboOn ? 1 : 0,   // (the pre-capture sync ran at the top of _takeSnap — descSlots above already hold the synced bytes)
       linearMode: _linearMode | 0,
       shiftSeen: _siShift.saveCursor(), regSeen: _siReg.saveCursor(),   // the shift + register-verb cursors (+ pending stamped entries ride tauK.save via the 'shift'/'reg' queues — a mid-slide joiner applies them at their startSteps)
-      lastTgt: [_lastTgtX, _lastTgtY], driveMode: _driveMode, autoCompN: _autoCompN, tempoDiv: _tempoDiv, xatt: _xattOn,
+      lastTgt: [_lastTgtX, _lastTgtY], driveMode: _driveMode, autoCompN: _autoCompN, tempoDiv: _tempoDiv, xatt: _xattOn, fieldMix: _fieldMix ? 1 : 0, virtT: _VIRT_T, occFrac: _occFrac, occMode: _occMode, livePlate: _recalledInto[3], recalledInto: [..._recalledInto], pinHold: _pinHold, lensObj: _lensObj, pinK: _sb.slots.map((s) => (s._pinK == null ? null : s._pinK)),   // lensObj = WHAT the pin holds (the probe geometry; every slot's att regenerates from it — a joiner must match or its pin target differs)   // pinHold + each slot's birth step: the pin fade must resume IDENTICALLY on a joiner (it scales the pin → in regH)   // fieldMix rides the snap (defaults ON → a joiner must adopt a leader that turned it OFF, else the edge-mixed field forks); virtT = the hologram depth (leg must match the leader's for recall); occFrac/occMode = the damage dial + method (so a JOINER's slider shows the real level); livePlate = which plate lives in P2 (the live-plate button state)
       // THE IFS KERNEL THE LEADER WAS STEPPING THROUGH AT THE SNAPSHOT STEP — version-matched to the shipped field. The
       // joiner MUST step through THIS ring, NOT the node's live ring: if the fractal clock advanced the ring version between
       // the leader's capture and the joiner's apply (a join landing at/after a kernel bump), the node's ring is a DIFFERENT
@@ -980,13 +1258,14 @@ function makeMediumU1Renderer(core) {
       W.field = _E.psiLensed;   // the engine slice restored psiLensed = W's field (they are the same store)
       _K.edge = s.K?.edge ? s.K.edge.map((r) => [...r]) : null; _K.capPh = s.K?.capPh ?? -1; _K.capStep = s.K?.capStep ?? -1;
       for (let i = 0; i < 4; i++) _K.src[i] = s.K?.src?.[i] ? _f64b(s.K.src[i]) : null;
-      _plates.length = 0; for (const pl of (s.plates || [])) _plates.push({ p: _f64b(pl.p),
-        a: pl.a ? _f64b(pl.a) : _plateAtt(pl.dop, pl.pos, pl.obj),   // legacy snapshots carry a; new wire REGENERATES it (pure register fn — bit-identical to what _storeMoment built)
-        dop: { ...pl.dop }, pos: pl.pos ? [...pl.pos] : null, obj: pl.obj || null, w0: pl.w0 ? _f64b(pl.w0) : null, bw: pl.bw, k: pl.k });
+      _holo.restore(s.plates, { deserialize: _f64b });   // the bank rebuilds the plate SHAPE; the app decodes the f32-base64 wire
+      (s.plates || []).forEach((raw, i) => { const pl = _plates[i]; if (pl) { pl.a = raw.a ? _f64b(raw.a) : _plateAtt(pl.dop, pl.pos, pl.obj); pl.selfAtt = !!raw.selfAtt; if (raw._dmg != null) pl._dmg = raw._dmg;   // selfAtt: this plate's `a` is a captured FIELD (shipped), so recall re-enters ψATT instead of the probe pin
+        if (raw.p0) pl.p0 = _f64b(raw.p0); if (raw.w00) pl.w00 = _f64b(raw.w00); } });   // regenerate the live-only att + carry the damage marker + restore the PRISTINE (p0/w00) so the joiner re-damages/heals from the SAME clean bytes as the leader (byte-identical future damage)
       for (let i = 0; i < _sb.slots.length; i++) { const d = s.descSlots?.[i], sl = _sb.slots[i];   // 𝔸-slot restore: desc mode + coords + ω-time cursor + the dressed base (its 6 floats ride the bank)
         sl.desc = !!d; sl.descPos = d?.pos ? [...d.pos] : null; sl.descObj = d?.obj || null; sl.descBar = d?.bar | 0;
         sl.descBase = d?.base ? _f64b(d.base) : null; sl.descPhi0 = d?.phi0 || 0;
         sl.descHold = d?.hold ? _f64b(d.hold) : (d?.base ? _f64b(d.base) : null);   // the living-declaration ANCHOR (legacy snapshots: anchor = base)
+        sl._attHold = d?.selfHold ? _f64b(d.selfHold) : null; sl._attHoldPos = d?.selfHoldPos ? [...d.selfHoldPos] : null; sl._holdPhi0 = d?.selfPhi0 || 0; sl._digestLeft = d?.selfDigest | 0; sl._holdSl2 = sl._attHold ? _mkSl2(sl._attHold) : null; sl._holdRef = null; sl._holdRefBar = sl._attHold ? ((_E?.frameBar | 0) + _HOLD_MIN) : -1; sl._holdRefPrev = null; sl._holdRefN = 0; sl._holdRefStuck = false;   // a joiner re-settles its own reference (relaxation is a local transient, not shared state)   // identity RECOMPUTED, not shipped: sl2 is a pure fn of the hold bytes + the live stencil, so a joiner derives the same charges without wire cost   // ψATT: the field-borne pin target resumes identically on the joiner
         sl.descPosCap = d?.posCap ? [...d.posCap] : (d?.pos ? [...d.pos] : null); sl.descCapBar = d?.capBar ?? null;
         sl.descE0 = d?.e0 ?? (sl.descBase ? (() => { let e = 0; for (let j = 0; j < sl.descBase.length; j++) e += sl.descBase[j] * sl.descBase[j]; return e || 1; })() : null);   // the register engine's cap level (legacy: recompute from the shipped base — same f32 bytes ⇒ same sum)
         sl.descDisp = sl.descBase ? Float64Array.from(sl.descBase) : null;   // display buffer seeded from the shipped state (bar-grid film from frame one)
@@ -997,7 +1276,13 @@ function makeMediumU1Renderer(core) {
       _linearMode = Math.max(0, Math.min(2, s.linearMode | 0));   // adopt the world's linear mode
       _siShift.restoreCursor(s.shiftSeen | 0); _siReg.restoreCursor(s.regSeen | 0);
       _lastTgtX = s.lastTgt?.[0] ?? NaN; _lastTgtY = s.lastTgt?.[1] ?? NaN; if (typeof s.driveMode === 'string') _driveMode = s.driveMode;
-      _autoCompN = s.autoCompN | 0; _tempoDiv = Math.max(1, s.tempoDiv | 0); _autoClose = false; _xattOn = !!s.xatt;   // adopt the world's mode + replicated dials
+      _autoCompN = s.autoCompN | 0; _tempoDiv = Math.max(1, s.tempoDiv | 0); _autoClose = false; _xattOn = !!s.xatt; _fieldMix = (s.fieldMix == null) ? true : !!s.fieldMix; _VIRT_T = (s.virtT | 0) || 16;
+      if (typeof s.occFrac === 'number') _occFrac = s.occFrac; if (s.occMode) _occMode = s.occMode | 0;   // the damage dial + method (joiner's slider shows the leader's real damage level)
+      _pinHold = (s.pinHold | 0) || 0;   // the ⌛pin-fade dial (replicated: it scales the pin, which is in regH)
+      if (s.lensObj && _PROBE_OBJS.includes(s.lensObj)) { _lensObj = s.lensObj; _baseCache.clear(); _rebuildBase(); }   // WHAT the pin holds — a joiner must regenerate every att from the SAME probe geometry
+      if (Array.isArray(s.pinK)) for (let i = 0; i < _sb.slots.length; i++) { const v = s.pinK[i]; if (v != null) _sb.slots[i]._pinK = v | 0; }   // each slot's birth step → the fade resumes at the identical phase on the joiner
+      if (Array.isArray(s.recalledInto)) for (let i = 0; i < 4; i++) _recalledInto[i] = (s.recalledInto[i] ?? -1) | 0;   // which plate EACH slot holds (any slot can host a live plate) — so a joiner's damage-relift + button state are right
+      else if (typeof s.livePlate === 'number' && s.livePlate >= 0) _recalledInto[3] = s.livePlate | 0;   // legacy snapshots carried only P2's   // adopt the world's mode + replicated dials (fieldMix defaults ON for pre-toggle snapshots; virtT defaults 16)
       // THE REGISTER IS THE DEFAULT even across a physics-mode excursion (user request): a world restored in
       // FIELD mode re-arms the close — it fires 1 bar after restore (the state is already dressed, so the
       // capture is immediate and good). mu1.autoClose(false) right after load keeps classic. Idempotent under
@@ -1052,7 +1337,7 @@ function makeMediumU1Renderer(core) {
       _lvBtn.textContent = _VIEWLBL[_dials.view]; _lvBtn._on = _dials.view !== 'raw'; }); bar1.appendChild(_lvBtn);
     // FIELD-VIEW cycle (LOCAL): full ψ → residual (ψ−A, the medium's own dressing alone) → bare (A, the injected
     // symbol alone). A display decomposition of the state into its injected + medium-produced parts. Peer-local.
-    const _FVLBL = { full: 'ψ:full', residual: 'ψ−A:medium', bare: 'A:symbol' };
+    const _FVLBL = { full: 'ψ:full', residual: 'ψ⊥A:medium', bare: 'A:symbol' };   // residual = ψ with the symbol PROJECTED OUT (ψ ⊥ A) → the oscillating dressing only
     const _fvBtn = mkBtn('ψ:full', false, () => { _fieldView = _FVIEWS[(_FVIEWS.indexOf(_fieldView) + 1) % _FVIEWS.length];
       _fvBtn.textContent = _FVLBL[_fieldView]; _fvBtn._on = _fieldView !== 'full'; }); bar1.appendChild(_fvBtn);
     // color cycle (LOCAL): auto (field→amp, 𝔸→∠φ) → amp → ∠φ — force one colormap on both render paths.
@@ -1066,6 +1351,7 @@ function makeMediumU1Renderer(core) {
     bar1.appendChild(mkBtn('recall⇄', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'recallx', src: _verbSlot() })));  // shift-aware recall: finds a MOVED moment and RELOCATES the reconstruction to the cue's (current) position — "bring that moment HERE"
     bar1.appendChild(mkBtn('recall@', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'recall', src: _verbSlot() })));   // zero-lag in-place recall: the reconstruction lands at the plate's STORED position — "show me where it WAS" (the two answer different questions; both honest)
     bar1.appendChild(mkBtn('recall𝔸', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'recalla', src: _verbSlot() })));  // 𝔸-recall: descriptor-only (abstractive holography — closed-form read, 0 grid steps; 'recall' is its oracle)
+    bar1.appendChild(mkBtn('recall⊘', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'recallo', src: _verbSlot(), holoMode: 7, frac: 0.5, block: 8, seed: 0 })));  // OCCLUDED recall: knock out 50% of W in random blocks, bind the fragment, lift the WHOLE plate — "break the hologram, reconstruct the whole scene" (mu1.recallo({mode,frac,block,seed}) for a sweep)
     const _absBtn = mkBtn('⌀PDE', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'wabs', amp: W.desc ? 0 : 1 }));   // the meta-circular closure: close the WHOLE register into abstract holography ⇄ materialize back (the oracle test)
     bar1.appendChild(_absBtn);
     bar1.appendChild(mkBtn('mirror', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'mirror' })));   // toggle the LIVE PDE mirror of the register (field mode: Lyapunov; ⌀PDE: the medium as a view of the abstract model)
@@ -1084,6 +1370,8 @@ function makeMediumU1Renderer(core) {
     bar1.appendChild(_coevoBtn);
     const _unpinBtn = mkBtn('unpin', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'unpin', amp: _unpinned ? 0 : 1 }));   // U(1)⇄ℂ*: pinned = descriptor-predicted lag (replay-safe) · unpinned = TRUE field energy (v7: works in ⌀PDE — the register engine IS the field)
     bar1.appendChild(_unpinBtn);
+    const _fmixBtn = mkBtn('⇄mix', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'fieldmix', amp: _fieldMix ? 0 : 1 }));   // the edge's SECOND coupling layer: ON = phase entrains AND shapes bleed · OFF = an edge couples PHASE only (Kuramoto), shapes stay pure — isolates the two layers
+    bar1.appendChild(_fmixBtn);
     const _turboBtn = mkBtn('gpu', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'turbo', amp: _turboOn ? 0 : 1 }));   // executor toggle: 'gpu' = turbo (GPU executes the U1 engine step) · 'cpu' = the universal CPU executor (label reflects state)
     bar1.appendChild(_turboBtn);
     const _LIN_LABELS = ['nonlin', 'lin:free', 'lin:trap'];   // the linear-mode cycle: full · free-linear (disperses) · sharp linear trap
@@ -1096,13 +1384,106 @@ function makeMediumU1Renderer(core) {
     const _regLbl = document.createElement('span'); _regLbl.textContent = 'register:'; _regLbl.style.fontWeight = 'bold'; bar2.appendChild(_regLbl);
     const _regSel = document.createElement('select'); Object.assign(_regSel.style, { background: '#222', color: '#9cf', border: '1px solid #0004', borderRadius: '4px', padding: '3px 4px', fontSize: '9px', fontFamily: 'ui-monospace,monospace', cursor: 'pointer' });
     for (const nm of SLOTN) { const o = document.createElement('option'); o.value = nm; o.textContent = nm; _regSel.appendChild(o); } _regSel.onchange = () => { _regSlot = _regSel.value; }; bar2.appendChild(_regSel);
+    // β = pin gravity (refAmp). NOTE ITS MEANING INVERTS UNDER ψATT: with a PROBE pin, β sets how hard the medium is
+    //   driven toward a DIFFERENT shape, so the probe↔medium mismatch beat (the visible oscillation) survives well
+    //   past β=1. Once ψATT has adopted, the target IS the field's own state, so the pin no longer drives a mismatch —
+    //   it CLAMPS the field to a rotating copy of itself, i.e. it is pure DAMPING. Measured liveliness vs β under
+    //   ψATT(ω=0.3): 0.51 @0.2 · 0.27 @0.4 · 0.14 @0.6 · 0.12 @0.7 · 0.11 @1.0 · 0.08 @3.0 — monotone decay, and by
+    //   ~0.7 it is already so flat that further travel looks static (that is the "stops working at 0.70" effect: not
+    //   a cliff, a saturated tail). Injection-per-step/|field| grows 0.03→0.11→0.30 across β 0.2→0.7→2.0 and the
+    //   field's tracking of the hold rises 0.73→0.87→0.95 — the clamp tightening. UNDER ψATT USE LOW β (0.2–0.4) AND
+    //   RAISE ω FOR LIFE: ω is the oscillator now (liveliness ≈0.37·ω), β only decides how tightly it is held.
     const _sBeta = mkSlider('β', 0, 3, 0.05, 1, (v) => injectEvent?.({ type: 'mediumVirt', mode: 'refamp', src: _regSlot, amp: v }));   // pin gravity (refAmp)
     bar2.appendChild(_sBeta.wrap);
     bar2.appendChild(mkBtn('att−', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'aphase', src: _regSlot, amp: -0.2 })));   // rotate the register phase (attPhase)
     bar2.appendChild(mkBtn('att+', false, () => injectEvent?.({ type: 'mediumVirt', mode: 'aphase', src: _regSlot, amp: +0.2 })));
-    const _sOm = mkSlider('ω', -0.5, 0.5, 0.01, 0, (v) => injectEvent?.({ type: 'mediumVirt', mode: 'lenstau', amp: v }));   // GLOBAL precession (lensTau) — the register-clock comparator
+    const _sOm = mkSlider('ω', -0.5, 0.5, 0.01, 0, (v) => injectEvent?.({ type: 'mediumVirt', mode: 'lenstau', amp: v, src: _regSlot }));   // per-SLOT precession (lensTau, targets the register-slot dropdown) — each worldline ages at its own ω, the register-clock comparator
     bar2.appendChild(_sOm.wrap);
     const _regReadout = document.createElement('span'); _regReadout.style.color = '#7a8'; bar2.appendChild(_regReadout);   // live per-slot ∠/β/ω
+
+    // ── MEMORY-OCCLUSION strip (⊘memory): DAMAGE a stored plate and watch the living memory degrade — the "corrupted
+    //    memory" demo, visually. Method dropdown + a LIVE damage slider (drag = apply, non-destructive from pristine →
+    //    0 heals) drive an `occludebank` verb (replicated). 'live plate' lifts the plate into a LIVING soliton (P2);
+    //    dragging damage then degrades that soliton in real time. (The slider is the only damage control — no button.)
+    // ── WHAT THE LOCK HOLDS: the probe geometry the pin drives the medium toward. letterA/cross are DENSE (a chain of
+    //    dots along each stroke — that density IS the on-screen "texture"); point/pair/grid are SPARSE LIGHT POINTS and
+    //    the medium builds its own interference between them (measured MORE coherent than letterA). The LOCK itself is
+    //    untouched — coherence, oscillation and fringes all remain; only the target geometry changes. Replicated verb.
+    const _objSep = document.createElement('span'); _objSep.textContent = '│ pin holds:'; _objSep.style.color = '#7a9'; _objSep.style.fontWeight = 'bold'; bar2.appendChild(_objSep);
+    const _objSel = document.createElement('select'); Object.assign(_objSel.style, { background: '#222', color: '#9cf', border: '1px solid #0004', borderRadius: '4px', padding: '3px 4px', fontSize: '9px', fontFamily: 'ui-monospace,monospace', cursor: 'pointer' });
+    for (const nm of _PROBE_OBJS) { const o = document.createElement('option'); o.value = nm; o.textContent = nm === 'lightpts' ? 'lightpts ·coherent ✦' : (nm === 'point' || nm === 'pair' || nm === 'grid') ? `${nm} ·hard (noisy)` : nm; _objSel.appendChild(o); }   // lightpts = Gaussian sources below the kKnee (the working light points); hard dots decohere
+    _objSel.value = _lensObj; _objSel.onchange = () => injectEvent?.({ type: 'mediumVirt', mode: 'lensobj', obj: _objSel.value });
+    bar2.appendChild(_objSel);
+    const _occSep = document.createElement('span'); _occSep.textContent = '│ ⊘memory:'; _occSep.style.color = '#a77'; _occSep.style.fontWeight = 'bold'; bar2.appendChild(_occSep);
+    const _OCC_METHODS = [[7, 'rand-zero'], [8, 'rand-noise'], [6, 'half'], [5, 'box'], [1, 'low-pass'], [2, 'high-pass'], [3, 'conjugate']];
+    let _occMode = 7;
+    const _occSel = document.createElement('select'); Object.assign(_occSel.style, { background: '#222', color: '#c99', border: '1px solid #0004', borderRadius: '4px', padding: '3px 4px', fontSize: '9px', fontFamily: 'ui-monospace,monospace', cursor: 'pointer' });
+    for (const [m, nm] of _OCC_METHODS) { const o = document.createElement('option'); o.value = String(m); o.textContent = nm; _occSel.appendChild(o); }
+    _occSel.onchange = () => { _occMode = _occSel.value | 0; }; bar2.appendChild(_occSel);
+    // T slider: the ±T HOLOGRAPHY DEPTH (spectral-leg steps). Replicated verb 'virtt'. Larger T = deeper spread; the
+    //   plate delocalizes (mu1.sweepOcclusion measures it). Fires on release (change) — re-store after to bank at the new T.
+    const _sVirtT = mkSlider('T', 1, 500, 1, 16, () => {});   // apply on release only (a step-change; not a live drag)
+    _sVirtT.input.addEventListener('change', () => injectEvent?.({ type: 'mediumVirt', mode: 'virtt', amp: +_sVirtT.input.value }));
+    bar2.appendChild(_sVirtT.wrap);
+    // ⌛pin slider: how long a recalled slot stays DRIVEN by its plate attractor. 0 (default) = forever — the pin then
+    //   re-draws the clean symbol over any damage (measured: a 90%-damaged field ends 0.73 like the SYMBOL, 0.13 like
+    //   the damaged data). Raise it and the drive FADES after birth, so what you see is the medium's own state and
+    //   damage stays visible. Replicated (the pin is in regH). Applies on release.
+    // ⌛pin slider REMOVED (2026-07-26): it dialled a DECOHERENCE EXPERIMENT, not a normal control — 0 (drive forever)
+    // is the correct setting for every ordinary use, so a live slider mostly offered a way to dissolve the soliton by
+    // accident. The mechanism is untouched and still replicated (_pinHold / _pinFac / the `pinhold` verb / the snap
+    // field): run it deliberately from the console with mu1.pinHold(n), mu1.pinHold(0) to restore.
+    // LIVE damage slider (the ONLY damage control): fires occludebank AS YOU DRAG (throttled ~100ms) + commits on
+    //   release, with a FIXED mask seed for the drag so frac grows smoothly (the pattern doesn't reshuffle mid-drag).
+    //   The handler occludes from the PRISTINE original, so dragging DOWN heals (0 = pristine) and UP re-damages —
+    //   non-destructive. Seed chosen once per drag (a stable pattern). Press 'live plate' first to watch a recalled
+    //   soliton degrade in real time; the damage also rides into any slot that recalled the plate (_reliftDamaged).
+    let _occFrac = 0.5, _occSeed = 0, _occLast = 0, _occDragN = 0;   // _occFrac/_occMode are SET BY THE occludebank VERB HANDLER on every peer (+ restored on join) → the render reflects them (the _VIRT_T pattern)
+    const _fireDamage = (fr, seed) => injectEvent?.({ type: 'mediumVirt', mode: 'occludebank', gx: -1, holoMode: _occMode, frac: fr, block: 8, seed: seed | 0 });
+    const _occDmg = mkSlider('damage', 0, 1, 0.05, 0.5, (v) => { _occFrac = v;   // LIVE: apply as you drag (throttled)
+      // one FIXED seed per drag so frac grows without the mask reshuffling. Derived from a monotonic drag counter via
+      // the KWE PRNG (makeRng) — NO Math.random / Date.now (no wall-clock nondeterminism). The seed VALUE is then
+      // stamped into the replicated verb → identical on every peer; the noise generator (occlude's _occHash) is a
+      // pure fn of that seed → the SAME mask everywhere. (Throttle timing IS wall-clock but only gates HOW OFTEN the
+      // replicated verb fires on THIS peer — the applied result is a pure fn of the last stamped {frac,seed}.)
+      if (!_occSeed) { const _r = makeRng(++_occDragN, _occMode, 0xda11a9e, 0x5eed); _r.next(); _r.next(); _occSeed = 1 + _r.nextInt(9998); }
+      const now = Date.now(); if (now - _occLast > 100) { _occLast = now; _fireDamage(v, _occSeed); } });
+    bar2.appendChild(_occDmg.wrap);
+    _occDmg.input.addEventListener('change', () => { _fireDamage(_occFrac, _occSeed); _occSeed = 0; });   // release: final apply + clear the drag seed (next drag picks a new pattern) — the slider IS the damage control (no separate button; dragging live-applies + release commits)
+    // 'live plate' — TOGGLE, SLOT-TARGETED (the same _verbSlot() rule as the memory buttons: the VIEWED slot wins when
+    //   it is V/P1/P2, else the register-strip target; default P2). ON lifts the last stored plate into that slot as a
+    //   LIVING 𝔸-slot and views it (the memory as an evolving soliton — damage it → degrades live); OFF returns the
+    //   view to W. The view switch is local; the platelive recall is replicated. Slot-targeting lets you put the SAME
+    //   plate into two slots (e.g. compare it at two T's, or watch one memory degrade in two reconstructions at once).
+    //   NOTE damage reacts to ANY slot holding the plate — a plain store+recall@ into V/P1 registers the same way
+    //   (_recalledInto is written by every recall path, not just this button), which is why the slider already
+    //   degraded V/P1/P2 without ever pressing this.
+    //   NO SILENT DEFAULT: the target is exactly the SELECTED slot (_verbSlot). W cannot host a live plate (it is the
+    //   driven world), so with W selected the button DISABLES and says so — it never quietly invents P2. Pick V/P1/P2
+    //   in the register strip (or view one) and the button follows it.
+    const _plvSlotIdx = () => { const i = SLOTN.indexOf(_verbSlot()); return (i >= 1 && i <= 3) ? i : -1; };   // −1 = W selected → no valid target
+    //   THE TOGGLE IS ABOUT THE PLATE, NOT THE VIEW: ON = the selected slot HOSTS the live plate (so bank damage
+    //   re-lifts into it and you watch it degrade); OFF = RELEASE it (the slot stops tracking that plate, so damage
+    //   no longer touches it). The VIEW STAYS on the selected slot either way — toggling never jumps you to W.
+    const _plvBtn = mkBtn('live plate', false, () => {
+      const ti = _plvSlotIdx();
+      if (ti < 0) { console.log('[MU1-PLATELIVE] W is the driven world — it cannot host a live plate. Select V / P1 / P2 in the register strip (or view one) and press again.'); return; }
+      if (_recalledInto[ti] >= 0) {   // ON → OFF: release the plate link (replicated); the slot keeps its field, the view stays here
+        injectEvent?.({ type: 'mediumVirt', mode: 'platelive', gx: -1, src: SLOTN[ti] }); _viewSlot = ti; _plateView = -1; return; }
+      const idx = _plates.length - 1; if (idx < 0) return;
+      injectEvent?.({ type: 'mediumVirt', mode: 'platelive', gx: idx, src: SLOTN[ti] }); _viewSlot = ti; _plateView = -1; });   // OFF → ON: host the last plate in the SELECTED slot (REPLICATED) + view it
+    bar2.appendChild(_plvBtn);
+    // '⊘view' — LOCAL toggle: show the hosted STORED PLATE (the memory itself + its damage — STATIC, a frozen record)
+    //   vs the slot's LIVE RECONSTRUCTION (register-stepped, moving). Static-vs-moving IS the contrast: the memory is
+    //   a record, the recall is alive. At T=1 the raw holes show in the reconstruction too; at high T the −T lift
+    //   fills them — so toggling with/without shows how much the hologram recovered from the damage you can see here.
+    const _ocvBtn = mkBtn('⊘view', false, () => { _occView = !_occView; });
+    bar2.appendChild(_ocvBtn);
+    // 'ψatt' — the FIELD-AS-ATTRACTOR door (selfatt): digest 3 bars then the field's own state becomes the pin
+    //   target; press again (when any hold is live) to revert to the probe pin. Set ω≠0 (lensTau) for living precession.
+    const _psaBtn = mkBtn('ψatt', false, () => { const held = _sb.slots.some((s) => s._attHold || s._digestLeft > 0);
+      injectEvent?.({ type: 'mediumVirt', mode: 'selfatt', amp: held ? 0 : 3 }); });
+    bar2.appendChild(_psaBtn);
 
     // ── console meters (the register readouts, over the slot array) ──
     // ── S4: THE REGISTER METERS over the slot array (the observer readouts — chainRead/chainSee/lensOps/regPhase).
@@ -1118,13 +1499,13 @@ function makeMediumU1Renderer(core) {
     //    across peers BY CONSTRUCTION. This is the ℂ*-descriptor payoff: the register (what computes/ages/remembers) is
     //    deterministic for free; the field (fieldH) is a peer-local image that MAY drift. regH✗ = a real fork; fieldH✗
     //    alone = benign float noise (the physics agrees — the register is intact).
-    const _regH = () => _hashNums([
-      _E.solSteps, _stepClk.rate,
-      ..._lensOp.flatMap((op) => _opNums(op)),
-      ..._sb.slots.flatMap((s) => [s.born ? 1 : 0, _tauK ? (_tauK.beatsOf(s.name) ?? 0) : 0, s.leash.state.go ? 1 : 0, Math.round(s.leash.state.gx * 100), Math.round(s.leash.state.gy * 100), s.desc ? 1 : 0, s.descBar | 0]),   // desc mode + its ω-time cursor ARE the 𝔸-slot's whole dynamics → in the contract
-      ...(_K.edge ? _K.edge.flat() : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-      _plates.length, ..._plates.flatMap((pl) => [..._opNums(pl.dop), pl.bw | 0]),
-    ]);
+    // the whole determinism contract — EXTRACTED to medium-core.regHash (byte-identical: the flat number order is
+    // load-bearing, reproduced exactly there). The app supplies only the accessors; the contract SHAPE is now shared.
+    const _regH = () => regHash({ step: _E.solSteps, rate: _stepClk.rate, ops: _lensOp, slots: _sb.slots,
+      edge: _K.edge, plates: _plates, beatsOf: _tauK ? ((nm) => _tauK.beatsOf(nm)) : null });
+    // the SHARED full register introspection (same as the thin apps — medium-u1 is the full-fidelity demo of it):
+    // per-slot ∠/ω/β/beats/τ/born + step + kH. medium-u1 adds its field-specific extras (regH, lock, Wpos, fieldH).
+    const _rout = makeRegisterReadout({ tauK: _tauK, names: SLOTN, op: (i) => _lensOp[i], born: (i) => !!_sb.slots[i].born, step: () => _E.solSteps });
     if (typeof window !== 'undefined') {
       window.mu1 = {
         // poseCheck() — THE HONESTY TEST for the shift render. It measures WHERE THE FIELD ACTUALLY IS (the
@@ -1176,10 +1557,22 @@ function makeMediumU1Renderer(core) {
           tick(); return `[SETTLE] sampling fieldLag for ${nBars} bars — keep the leash parked…`; },
         lensOps: () => { const o = _lensOp.map((l, i) => ({ slot: SLOTN[i], ...l, angle: +lensU1.angle(l).toFixed(4) }));
           console.log(`[LENSOPS] ${o.map((l) => `${l.slot}:{∠${l.angle} β=${l.beta} ω=${l.omega} g=${(l.gain ?? 1).toFixed(2)}}`).join(' · ')} step=${_E.solSteps}`); return o; },
-        regPhase: () => ({ step: _E.solSteps, regH: _regH(), lock: +_E.lockNow.toFixed(3), born: _sb.slots.map((s) => s.born ? s.name : null).filter(Boolean),
-          angle: SLOTN.map((nm, i) => +lensU1.wrap(lensU1.angle(_lensOp[i])).toFixed(3)),
-          beats: SLOTN.map((nm) => _tauK ? (_tauK.beatsOf(nm) ?? 0) : 0), Wpos: [+W.leash.state.gx.toFixed(2), +W.leash.state.gy.toFixed(2)],
-          fieldH: _sb.slots.map((s) => s.field ? _hashField(s.field) : null) }),
+        regPhase: () => _rout.phase({   // the shared universal register fields (step/kH/born/angle/omega/beta/beats/tau) + medium-u1's field extras
+          regH: _regH(), lock: +_E.lockNow.toFixed(3),
+          Wpos: [+W.leash.state.gx.toFixed(2), +W.leash.state.gy.toFixed(2)],
+          // fieldH — the LIVING state's digest. In ⌀PDE the state is descBase (s.field is null there), so hash whichever
+          //   exists: descBase for a register-resident slot, field for a classic PDE slot. (It used to hash s.field
+          //   only, which reported null for every slot in ⌀PDE — a blind meter exactly when you need it to tell you
+          //   whether the field is still evolving.) Peer-local telemetry; a pure fn of shared state at a shared step.
+          fieldH: _sb.slots.map((s) => (s.descBase ? _hashField(s.descBase) : (s.field ? _hashField(s.field) : null))),
+          fieldSrc: _sb.slots.map((s) => (s.descBase ? '𝔸' : (s.field ? 'ψ' : null))),   // which store fieldH read (𝔸 = descBase / ψ = field)
+          // ψATT: WHAT each slot's pin is holding — 'probe' (the injected symbol, the operator asserts it), 'digest…'
+          //   (pin lifted, the medium is dispersing the pixels), or 'FIELD' (adopted: the slot's own captured state is
+          //   the target, precessing at ω — the symbol is carried by MATTER). 'FIELD ω0' warns the target is static
+          //   (a fixed point: after adoption the register clock is the ONLY oscillator).
+          pinSrc: _sb.slots.map((s, i) => (!s.desc && !s.field) ? null
+            : s._digestLeft > 0 ? `digest${s._digestLeft}`
+            : s._attHold ? (_lensOp[i].omega ? 'FIELD' : 'FIELD ω0⚠') : 'probe') }),
         chainRead: () => { const c = _chainSlots(); if (c.length < 2) return '[MU1] need ≥2 born slots'; const m = chainMeter(c);
           console.log(`[CHAIN] ${m.links.map((l) => `${l.a}→${l.b}:Δφ=${l.dphi}(vis ${l.vis} pred ${l.pred} mdl ${l.mdl})`).join(' · ')} · ε=${m.defect} (alg ${m.algDefect}) step=${_E.solSteps}`); return m; },
         chainSee: () => { const c = _chainSlots(); if (c.length < 2) return '[MU1] need ≥2 born slots'; const m = chainMeter(c, { G: GRID, through: true });
@@ -1193,6 +1586,30 @@ function makeMediumU1Renderer(core) {
         // approximation — the ±T lift leg runs with the banded λ. Replicated (V's field is in eH).
         recall: (scale) => injectEvent?.({ type: 'mediumVirt', mode: 'recall', scale: (scale === 'coarse' || scale === 'fine') ? scale : 'all' }),
         recalla: () => injectEvent?.({ type: 'mediumVirt', mode: 'recalla' }),   // 𝔸-recall (descriptor-only; compare its [RECALL-𝔸] against recall's [RECALL-∠])
+        // recallAt(x, y, opts) — RECALL AND PLACE. The classic verbs can only land a moment at the position it was
+        //   STORED at (recall@) or wherever the cue currently is (recall⇄) — neither lets you say "bring that moment
+        //   HERE". This passes an explicit at:[x,y] (leash coords, ±24) that overrides both. opts.mode picks which
+        //   recall does the binding ('recall' zero-lag · 'recallx' shift-invariant · 'recallo' occluded-cue), and
+        //   opts.slot targets the host. The placement is REPLICATED (it rides the verb entry) and the recalled slot's
+        //   leash is seeded there, so descgo walks it on from that point.
+        recallAt: (x = 0, y = 0, { mode = 'recall', slot, scale, frac, holoMode, block, seed } = {}) =>
+          injectEvent?.({ type: 'mediumVirt', mode: ['recall', 'recallx', 'recallo'].includes(mode) ? mode : 'recall',
+            at: [+x, +y], ...(slot ? { src: slot } : {}), ...(scale ? { scale } : {}),
+            ...(frac != null ? { frac: +frac, holoMode: holoMode | 0, block: block | 0, seed: seed | 0 } : {}) }),
+        // livePlateAt(i, x, y, slot) — the plate-lift path with explicit placement (mu1.livePlate + a position).
+        livePlateAt: (i = -1, x = 0, y = 0, slot) => { const idx = (i | 0) >= 0 ? Math.min(i | 0, _plates.length - 1) : (_plates.length - 1); if (idx < 0) return '[LIVEPLATE] no plates (store first)';
+          const ti = slot != null ? SLOTN.indexOf(String(slot)) : _plvSlotIdx();
+          if (!(ti >= 1 && ti <= 3)) return '[LIVEPLATE] pick a host slot: V, P1 or P2';
+          injectEvent?.({ type: 'mediumVirt', mode: 'platelive', gx: idx, src: SLOTN[ti], at: [+x, +y] }); _viewSlot = ti; _plateView = -1;
+          return `[LIVEPLATE] plate ${idx + 1} → ${SLOTN[ti]} at (${x},${y}) — placed, not at its stored position`; },
+        // recallo({mode, frac, block, seed}) — OCCLUDED recall: mask W to a PARTIAL image, bind the FRAGMENT against
+        // the full bank, lift the WHOLE plate. The "break the hologram, still reconstruct the whole scene" demo — the
+        // one property a hologram has that a literal photograph does not. mode: 7 rand-zero (default) · 8 rand-noise ·
+        // 6 half-plane · 5 box · 1 low-pass · 2 high-pass · 3 conjugate. frac = how much is removed (0..1); block =
+        // random-block px (7/8); seed = reshuffle. Sweep frac and watch [MU1-RECALL⊘]: reconstruction fidelity stays
+        // high, degrading GRACEFULLY (the holographic signature). All replicated (occluded cue → V's field is in eH).
+        recallo: ({ mode = 7, frac = 0.5, block = 8, seed = 0, src } = {}) =>
+          injectEvent?.({ type: 'mediumVirt', mode: 'recallo', holoMode: mode | 0, frac: +frac, block: block | 0, seed: +seed, ...(src ? { src } : {}) }),
         mirror: () => injectEvent?.({ type: 'mediumVirt', mode: 'mirror' }),   // toggle the live PDE mirror (V injection-locked to the register's attractor; works in field AND ⌀PDE modes)
         // lagTrace(on) — the JOIN-LAG BISECTOR (see _lagTick): run on BOTH peers, baseline 10s, join, read the flag:
         // CLOCK DELIVERY (reflector/ws layer) vs LOCAL COMPUTE (this peer) vs BURSTY BACKLOG (clock clumping).
@@ -1332,6 +1749,93 @@ function makeMediumU1Renderer(core) {
           _plates.forEach((pl, i) => { const r = crossCorrScan(cue, pl.p, GRID);
             console.log(`  plate ${i + 1} (atStep=${pl.k}, pos ${(pl.pos?.[0] ?? 0).toFixed(1)},${(pl.pos?.[1] ?? 0).toFixed(1)}) · corr0=${r.corr0.toFixed(3)} · corrMax=${r.corrMax.toFixed(3)} @ δ=(${r.dx},${r.dy})${r.corrMax > r.corr0 + 0.1 ? ' ← a MOVED moment found (zero-lag recall would miss it)' : ''}`); });
           return '[BANKSCAN] done'; },
+        // sweepOcclusion({T, block, seed, mode, fracs}) — THE HOLOGRAPHIC-REDUNDANCY CURVE (the oracle's
+        //   sweepOcclusion, on the ABSTRACT spectral leg). For each occlusion fraction, run W's CURRENT field through
+        //   the SAME sandwich the plate/lift use, with the occluder BETWEEN the legs:
+        //       ψ →(+T spread)→ HOLOGRAM →(occlude frac)→ →(−T converge)→ reconstruction
+        //   and log corr(reconstruction, ψ). Reports SPREAD = corr(holo,ψ) (how delocalized T made the plate — the
+        //   thing that WOULD buy redundancy) and the score curve. THE SHAPE IS THE ANSWER:
+        //     • falloff tracking `kept` → PHOTO-like: partial loss = partial image
+        //     • graceful/sublinear      → HOLOGRAPHIC: the fragment still carries the whole
+        //   T is the SPREAD DEPTH — the exact abstract twin of the oracle's tSteps. HONEST FINDING (measured G=128,
+        //   DT=0.12): raising T DELOCALIZES the plate (spread corr 0.97→0.10, participation ratio 6%→46% by T~350),
+        //   and the reconstruction improves with it — exactly the oracle's behavior.
+        //   ⚠ THE METRIC IS THE TRAP (a real bug this diagnostic used to have): judging by ampCorr alone made high-T
+        //   recovery look like FAILURE and produced a string of wrong conclusions ("flat in T", "needs nonlinearity",
+        //   "spread ≠ redundancy"). ampCorr is a NORMALIZED inner product: it punishes the energy the mask removed and
+        //   the speckle it added even when the SHAPE is perfectly recovered. MEASURED at frac=0.90, T=350: ampCorr
+        //   0.246 (reads as failure) but the object's strokes are 2.04× brighter than background — the letter is
+        //   plainly VISIBLE, just dim (energy ≈ kept ≈ 6%, exactly as a 90% mask implies). HOLOGRAPHIC RECOVERY
+        //   RESTORES STRUCTURE, NOT ENERGY. So this reports CONTRAST (on-strokes ÷ off-strokes) as the primary score,
+        //   with ampCorr alongside for reference. >1.5 VISIBLE · ~1.15 faint · ~1 lost.
+        //   NOTE both legs here are LINEAR — so is the oracle's (`stepEyeN is LINEAR: no SPM in the round-trips`);
+        //   the linear ±T propagation IS the holographic mechanism, no nonlinearity required.
+        //   `nl:true` adds a SECOND, different mechanism on top: the −T leg becomes recall's own step (pin→−1→SPM→cap),
+        //   so the ATTRACTOR pulls a fragment back onto the stored soliton (basin convergence) — extra robustness at
+        //   the cost of clean fidelity (it relaxes to the DRESSED attractor, not the exact input). Target attractor:
+        //   `att` opt, else the plate the cue BINDS to, else the clean spread hologram. Pure CPU; MUTATES NOTHING.
+        sweepOcclusion: ({ T, block = 8, seed = 0, mode = 7, nl = false, att = null, fracs = [0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9] } = {}) => {
+          const src = W.field || W.descBase || ((V.born && V.mirror) ? V.field : null);
+          if (!src) return '[SWEEP⊘] no field (⌀PDE: start a mirror, or record W first)';
+          if (!_lambda()) return '[SWEEP⊘] no λ grid yet (let the ring settle)';
+          const Ts = (T != null) ? [T | 0] : [_VIRT_T, Math.max(_VIRT_T * 8, 128)];   // default: the recall depth vs a DEEP spread
+          const modeName = { 1: 'low-pass', 2: 'high-pass', 3: 'conjugate', 5: 'box', 6: 'half-plane', 7: 'rand-zero', 8: 'rand-noise' }[mode] || 'rand-zero';
+          // STRUCTURE metric (the one that matches WHAT YOU SEE): mean |recon| ON the object's strokes vs OFF them.
+          //   ampCorr alone is MISLEADING here — it is a NORMALIZED inner product, so it punishes the energy the mask
+          //   removed and the speckle it added even when the object's SHAPE is perfectly recovered. A 90%-occluded
+          //   plate can reconstruct a clearly VISIBLE letter (contrast ≈2) while ampCorr reads ~0.25 and looks like
+          //   failure. Holographic recovery is about restoring STRUCTURE, not energy — so report both.
+          //   contrast > 1 = the object is visible above background; ~1 = indistinguishable (true failure).
+          // STRUCTURE SCORE = the normalized correlation of the AMPLITUDE patterns, |rec| vs |ref| (Pearson, mean-
+          //   removed). This is what the eye judges: "is the object's SHAPE there?", independent of overall brightness
+          //   and of the phase speckle a mask introduces. 1 = the shape is perfectly recovered, 0 = no relation.
+          //   WHY NOT an on/off contrast RATIO (the previous attempt, now discarded): the object is SPARSE (~3% of
+          //   cells on-stroke) and a clean reconstruction has an EXACTLY-ZERO background, so the ratio blows up (1e14)
+          //   and had to be floored — making the clean row an artifact. Worse, a ratio is SCALE-FREE: at low T the
+          //   surviving speckle is faint but sits on the strokes, so the ratio stays huge while the image fades toward
+          //   nothing — which is why T=16 looked "better" than T=350 when it is not. Pearson on |ψ| has neither flaw.
+          const _struct = (rec, ref) => { if (!rec || !ref) return 0;
+            let ma = 0, mb = 0; const a = new Float64Array(N_CELLS), b = new Float64Array(N_CELLS);
+            for (let p = 0; p < N_CELLS; p++) { a[p] = Math.hypot(rec[p * 2], rec[p * 2 + 1]); b[p] = Math.hypot(ref[p * 2], ref[p * 2 + 1]); ma += a[p]; mb += b[p]; }
+            ma /= N_CELLS; mb /= N_CELLS;
+            let num = 0, da = 0, db = 0;
+            for (let p = 0; p < N_CELLS; p++) { const x = a[p] - ma, y = b[p] - mb; num += x * y; da += x * x; db += y * y; }
+            const den = Math.sqrt(da * db); return den > 0 ? num / den : 0; };
+          // the NONLINEAR backward leg = recall's own _regStep1 run T times: pin toward `tgt` (0.15·att, the injection
+          //   lock) → linear −1 step → SPM phase → cap at e0. Identical primitive to the engine's live step (no fakery).
+          const nlBack = (f, Td, tgt, e0) => { let p = Float64Array.from(f); const b = 0.15;
+            for (let s = 0; s < Td; s++) {
+              if (tgt) for (let j = 0; j < p.length; j++) p[j] += b * tgt[j];                    // pin (injection lock)
+              const ev = _specLeg(p, 1, -DT); if (!ev) return null;                              // linear −1
+              const nb = new Float64Array(ev.length);
+              for (let j = 0; j < N_CELLS; j++) { const re = ev[j * 2], im = ev[j * 2 + 1], I = re * re + im * im, th = _SOL_GAMMA * I / (1 + I / _SOL_ISAT) * DT, c = Math.cos(th), sn = Math.sin(th); nb[j * 2] = re * c - im * sn; nb[j * 2 + 1] = re * sn + im * c; }   // SPM
+              let e2 = 0; for (let j = 0; j < nb.length; j++) e2 += nb[j] * nb[j];               // cap at e0
+              if (e0 > 0 && e2 > 0) { const g = Math.sqrt(e0 / e2); for (let j = 0; j < nb.length; j++) nb[j] *= g; }
+              p = nb;
+            }
+            return p; };
+          for (const Td of Ts) {
+            const holo = _specLeg(src, Td, DT); if (!holo) continue;   // +T: spread ψ into the hologram (the plate)
+            const spread = _ampCorr(holo, src);
+            let e0 = 0; for (let j = 0; j < holo.length; j++) e0 += holo[j] * holo[j];
+            // the nl target: an explicit att, else the plate the CLEAN cue binds to (recall's real target = pl.a), else holo
+            const tgt = nl ? (att || (() => { const bd = _plates.length ? _holo.bind(src) : null; return (bd?.plate?.a) || (bd?.plate && _plateAtt(bd.plate.dop, bd.plate.pos || [0, 0], bd.plate.obj)) || holo; })()) : null;
+            const legName = nl ? `NONLINEAR pinned (recall's step, pin→−1→SPM→cap)${att ? ' · att=given' : _plates.length ? ' · att=bound plate' : ' · att=self-holo'}` : 'linear (control)';
+            const rows = fracs.map((fr) => {
+              const occ = fr > 0 ? occlude(holo, { mode, frac: fr, block, seed, G: GRID }) : holo;   // break the spread hologram
+              const kept = keptFraction(holo, occ);
+              const recon = nl ? nlBack(occ, Td, tgt, e0) : _specLeg(occ, Td, -DT);   // −T: converge back → the reconstruction
+              const score = recon ? _ampCorr(recon, src) : 0;
+              const st = recon ? _struct(recon, src) : 0;   // STRUCTURE: is the object's SHAPE recovered? (what the eye judges)
+              const vis = st >= 0.5 ? 'VISIBLE' : st >= 0.2 ? 'faint' : 'lost';
+              return `  frac=${fr.toFixed(2)} (kept ${(kept * 100).toFixed(0).padStart(3)}%): structure ${st.toFixed(3)} ${vis.padEnd(7)} · ampCorr ${score.toFixed(3)}  ${'█'.repeat(Math.round(Math.max(0, st) * 40))}`;
+            });
+            console.log(`[SWEEP⊘] ${modeName} occlusion @ T=${Td}${Ts.length > 1 ? (Td === Ts[0] ? ' (LOW spread depth)' : ' (HIGH spread depth)') : ''} · spread corr(holo,ψ)=${spread.toFixed(2)} (lower = more delocalized plate) · leg=${legName} (1=perfect recon):\n` + rows.join('\n'));
+          }
+          console.log(`→ READ THE STRUCTURE COLUMN. structure = Pearson correlation of the AMPLITUDE patterns |recon| vs |ψ| — "is the object's SHAPE recovered?", which is what the eye judges. ≥0.5 VISIBLE · ≥0.2 faint · ~0 lost. ampCorr (the complex normalized inner product) is shown alongside but is MISLEADING alone: it punishes the energy the mask removed and the phase speckle it added even when the shape is intact. HOLOGRAPHIC RECOVERY RESTORES STRUCTURE, NOT ENERGY — a heavily occluded plate legitimately yields a DIM image whose SHAPE is still right. Compare T values: more spread (lower spread corr) = the object is delocalized over more of the plate = a fragment carries more of the whole.`);
+          if (nl) console.log(`→ nl leg = recall's own step (pin→−1→SPM→cap): the ATTRACTOR pulls a fragment back onto the stored soliton (basin convergence) — a SECOND recovery mechanism on top of the propagation, at the cost of clean fidelity (it relaxes to the DRESSED attractor, not the exact input).`);
+          return '[SWEEP⊘] done';
+        },
         // autoClose(on) — the boot-default arm: ON (default) = a fresh leader closes the register after dressing;
         // OFF (call it early, e.g. from the console right after load) = classic physics stays the default.
         autoClose: (on = true) => { _autoClose = !!on; if (!on) _turboArmed = false; return `[MU1-BOOT] auto-close ${on ? 'ARMED' : 'OFF (classic physics default; GPU-executor auto-arm also disabled)'}`; },
@@ -1358,10 +1862,11 @@ function makeMediumU1Renderer(core) {
         fieldView: (mode = 'residual') => { _fieldView = _FVIEWS.includes(mode) ? mode : 'residual';
           const a = _attForSlot(_viewSlot), f = _sb.slots[_viewSlot]?.descDisp || _sb.slots[_viewSlot]?.descBase || _sb.slots[_viewSlot]?.field;
           let diag = '';
-          if (a && f && a.length === f.length) { let dA = 0, dF = 0, dR = 0; for (let j = 0; j < f.length; j++) { dA += a[j] * a[j]; dF += f[j] * f[j]; dR += (f[j] - a[j]) ** 2; }
-            diag = ` · |A|²=${dA.toFixed(1)} |ψ|²=${dF.toFixed(1)} |ψ−A|²=${dR.toFixed(1)} (residual ${dR > 0.01 * dF ? 'HAS content ✓' : '≈0 — ψ≈A, nothing to see (raise β / let it dress)'})`; }
-          else diag = ` · ⚠ A=${a ? 'ok' : 'NULL'} ψ=${f ? 'ok' : 'NULL'}${a && f ? ` len ${a.length}≠${f.length}` : ''} — subtraction can't run`;
-          return `[FIELD-VIEW] ${_fieldView} — ${_fieldView === 'full' ? 'the whole field ψ' : _fieldView === 'residual' ? 'ψ − A: ONLY the medium\'s own dressing (halo/wake/SPM; symbol subtracted)' : 'A: the injected symbol alone'} · local display (not in eH)${diag}`; },
+          if (a && f && a.length === f.length) { let dA = 0, dF = 0, pa = 0; for (let j = 0; j < f.length; j++) { dA += a[j] * a[j]; dF += f[j] * f[j]; pa += f[j] * a[j]; }
+            const c = dA > 0 ? pa / dA : 0; let dR = 0; for (let j = 0; j < f.length; j++) dR += (f[j] - c * a[j]) ** 2;   // projected residual = ψ − (⟨ψ,A⟩/⟨A,A⟩)·A
+            diag = ` · symbol coeff ⟨ψ,A⟩/⟨A,A⟩=${c.toFixed(3)} · |ψ|²=${dF.toFixed(1)} |ψ−proj_A(ψ)|²=${dR.toFixed(1)} (oscillating residual ${dR > 0.01 * dF ? 'HAS content ✓' : '≈0 — ψ∥A, no dressing yet (raise β / let it dress)'})`; }
+          else diag = ` · ⚠ A=${a ? 'ok' : 'NULL'} ψ=${f ? 'ok' : 'NULL'}${a && f ? ` len ${a.length}≠${f.length}` : ''} — projection can't run`;
+          return `[FIELD-VIEW] ${_fieldView} — ${_fieldView === 'full' ? 'the whole field ψ' : _fieldView === 'residual' ? 'ψ − proj_A(ψ): the symbol PROJECTED OUT → only the medium\'s own oscillating dressing (halo/wake/SPM)' : 'A: the injected symbol alone'} · local display (not in eH)${diag}`; },
         descGo: (x = 0, y = 0, slot = 'V') => injectEvent?.({ type: 'mediumVirt', mode: 'descgo', src: slot, gx: +x, gy: +y }),   // 𝔸-transport: chase (x,y) with the descriptor leash — the recalled hologram MOVES, 0 grid steps
         descK: (kx = 0.3, ky = 0, slot = 'V') => injectEvent?.({ type: 'mediumVirt', mode: 'lensset', src: slot, kx: +kx, ky: +ky }),   // the linOp momentum tilt (rad/cell): with ω≠0 the 𝔸-slot's phase fronts FLOW — the travelling wave, pure register
         // ⌀PDE — the meta-circular closure: abstract(true) compiles EVERY born slot (W included) to envelope+descriptor
@@ -1702,6 +2207,28 @@ function makeMediumU1Renderer(core) {
           const r = _vptRead();
           console.log(`[SL2] REGISTER: V=${W.sl2.V.toExponential(3)} V̈=${W.sl2.vdd.toExponential(3)} I=${W.sl2.I.toExponential(3)} (kv=${W.sl2.kv}, m=${W.sl2.m.toFixed(2)}) · aging law: HELD ⇒ stationary (arrest, measured) · freed ⇒ ${W.sl2.vdd > 0 ? 'spreads (V̈>0)' : 'focuses/collapses (V̈<0)'}${r ? ` · WITNESS: V=${r.V.toExponential(3)} Δ=${(100 * (r.V / W.sl2.V - 1)).toFixed(1)}%` : ' · no witness (pure ⌀PDE — the assertion stands unverified, by design)'}`);
           return { reg: W.sl2, wit: r ? { V: r.V, I: r.I } : null }; },
+        // holdId(slot) — MEDIUM SEMANTICS for a ψATT hold. After adoption `obj` is retired (that was the foreign
+        // name); this asks the medium itself what it is carrying, in the charges the anchors cannot move. Use it to
+        // separate the two failure modes of a stalled recall: dV≈0 + gap>0 = the same state, transport short;
+        // dV moving = the pin+SPM built something else. Identity CHECK only — ~3 invariants cannot regenerate a field.
+        holdId: (slot) => { const raw = [];
+          for (let i = 0; i < _sb.slots.length; i++) { const s2 = _sb.slots[i];
+            if (!s2?._attHold) continue;
+            if (s2._digestLeft > 0) { console.log(`[\u03c8ATT-ID] ${SLOTN[i]}: DIGESTING (${s2._digestLeft} bars left) \u2014 the pin is lifted, nothing adopted yet`); continue; }
+            if (_turboOn && _gpu && !(i === 0 && _shardXspace)) _tbSyncSlot(i);   // TURBO: the GPU holds truth — read back BEFORE _mkSl2, else this reports stale bytes for any slot that isn't on screen
+            const d = _holdDrift(i); if (!d) { console.log(`[\u03c8ATT-ID] ${SLOTN[i]}: held, but no charges yet (needs a live descBase + ring)`); continue; }
+            raw.push({ slot: SLOTN[i], ...d }); }
+          // the common mode is measured over ALL holds (a stationary slot is the control), then each row is judged
+          // differentially \u2014 even when the caller asked about one slot, because the control must not be filtered out.
+          const cm = _holdCommon(raw), com = (cm.ok ? cm.com : null);
+          const rows = slot ? raw.filter((r) => r.slot === slot) : raw;
+          for (const r of rows) console.log(`[ψATT-ID] ${r.slot}: V=${r.V.toExponential(3)} (settled ref ${r.Vref.toExponential(3)}, dV=${(100 * r.dV).toFixed(2)}%${com != null ? `, common-mode ${(100 * com).toFixed(2)}% → differential ${(100 * (r.dV - com)).toFixed(2)}%` : ''}) · I=${r.I.toExponential(3)} (ΔI=${r.dI.toExponential(2)} — the sl(2)-work pin+cap spend to hold it; 0 would be free flight)${r.gap != null ? ` · gap=${r.gap.toFixed(2)}px` : ''} → ${_holdVerdict(r, cm)}`);
+          if (cm.n > 1 && !cm.ok) console.log(`[ψATT-ID] control CONTRADICTED: ${cm.n} stationary slots span ${(100 * cm.spread).toFixed(2)}% (> ${(100 * _HOLD_SPREAD).toFixed(0)}%). Stationary slots holding the same content should relax ALIKE — when they do not, one of them has not settled (its reference was taken mid-transient) and there is no shared mode to subtract. No differential verdict is issued.`);
+          else if (cm.ok && cm.n > 1) console.log(`[ψATT-ID] control: ${cm.n} stationary slot(s) agree to ${(100 * cm.spread).toFixed(2)}%, common mode ${(100 * cm.com).toFixed(2)}% — that much drift is RELAXATION (the state settling off its f32 byte-freeze), not identity loss. Only the differential is transport/identity information.`);
+          else if (cm.ok && cm.n === 1) console.log(`[ψATT-ID] control: 1 stationary slot sets the common mode at ${(100 * cm.com).toFixed(2)}% — a single control cannot be cross-checked, so the subtraction is taken on trust. A second stationary hold would test it.`);
+          else if (raw.length) console.log('[ψATT-ID] no stationary control (every hold is displaced) — verdicts are absolute and provisional: the relaxation common mode cannot be subtracted. Adopt a second, un-shifted slot to calibrate.');
+          if (!raw.length) console.log('[\u03c8ATT-ID] no slot is holding \u2014 press \u03c8att to adopt (in probe mode the symbol is the foreign object, and `obj` already names it)');
+          return rows; },
         // grip() — the wear constants applied to the CURRENT drive (Law 7's verdict, from the measured curves).
         grip: () => { const b = _pinBeta, bs = _WEAR.betaStar;
           const verdict = b < bs ? `SHED regime (β=${b.toFixed(2)} < β*≈${bs}): a moving target radiates the state instead of carrying it — transport is ~50–380× dearer here; hold is also below capture (the state slides)` : `RIDE regime (β=${b.toFixed(2)} ≥ β*≈${bs}): holding ≈ free (arrest), transport cost ~linear in speed (torque·v)`;
@@ -1815,7 +2342,7 @@ function makeMediumU1Renderer(core) {
           console.log(`[SPECTEST] TRUNCATED @kCut=${kc.toFixed(3)}${kCut ? '' : ' (state-adaptive k99)'}: ampCorr=${corrCut.toFixed(6)} · modes kept ${sCut.kept}/${sCut.total} = ${(100 * sCut.kept / sCut.total).toFixed(1)}% → descriptor-plate compression ×${(sCut.total / Math.max(1, sCut.kept)).toFixed(0)}`);
           return { corrFull, corrCut, dphi, maxDiff: md, k50, k90, k99, knee, kept: sCut.kept, total: sCut.total, ms: tMs }; },
         aphase: (a = 0.1, slot = 'W') => injectEvent?.({ type: 'mediumVirt', mode: 'aphase', amp: +a, src: slot }),
-        lensTau: (w = 0.1) => injectEvent?.({ type: 'mediumVirt', mode: 'lenstau', amp: +w }),
+        lensTau: (w = 0.1, slot = 'W') => injectEvent?.({ type: 'mediumVirt', mode: 'lenstau', amp: +w, src: slot }),   // per-slot ω (each worldline ages at its own rate); defaults to W
         // regTrace(on) — the DETERMINISM GATE instrument: log [REGH] step=… regH=… fieldH=… on a SHARED cadence (every
         // 200 steps, a pure fn of the shared step so both peers log at the SAME step= values). Compare the two consoles:
         // regH MUST match line-for-line at equal step= (the contract); fieldH may differ (benign). Off by default.
@@ -1838,6 +2365,100 @@ function makeMediumU1Renderer(core) {
         // solitons pull toward each other's shape (amount>0 blend, <0 repel). Same replicated edge verb, named
         // for the visual result (the old medium's slot-mixing, U1-honest: the fields genuinely interact, in regH).
         mix: (a = 'W', b = 'V', amount = 0.3) => window.mu1.edge(a, b, amount),
+        // fieldMix(on) — GATE the edge's SECOND coupling layer (attractor field-mixing) WITHOUT removing the edge.
+        //   An edge drives TWO couplings from one κ: (1) the Kuramoto PHASE law (θ_i entrains) and (2) attractor
+        //   FIELD-mixing (the soliton SHAPE bleeds toward the neighbor). This toggle governs ONLY (2): fieldMix(false)
+        //   keeps the edges and their phase coupling live, but the shapes stay PURE — so you can SEE which of the two
+        //   effects an edge is producing. Replicated (it gates descBase → in regH); default ON. Differs from mu1.mix
+        //   (which CREATES an edge); this leaves the edge and switches its field-layer off/on.
+        fieldMix: (on = true) => { injectEvent?.({ type: 'mediumVirt', mode: 'fieldmix', amp: on ? 1 : 0 }); return `[FIELDMIX] attractor field-mixing → ${on ? 'ON (an edge couples BOTH: phase entrains + shape bleeds)' : 'OFF (an edge couples PHASE only — Kuramoto; shapes stay pure)'} (replicated: lands at the shared step; gates descBase, in regH)`; },
+        // occludeBank({idx, mode, frac, block, seed}) — MEMORY-SIDE occlusion: DAMAGE a STORED plate in the bank
+        //   (permanent), the "can a corrupted memory still be read?" test — the mirror of recallo (which occludes the
+        //   CUE, leaving memory intact). idx = plate index (default −1 = the last). mode: 7 rand-zero · 8 rand-noise ·
+        //   6 half · 5 box · 1/2/3 LP/HP/conj. frac = fraction removed. After damaging, recall@ / recall⇄ reads it —
+        //   a real hologram recovers the whole from what survived; mu1.plateView(idx) to SEE the corruption directly.
+        //   Replicated (the damaged plate rides regH's snapshot to joiners; deterministic at the shared step).
+        occludeBank: ({ idx = -1, mode = 7, frac = 0.5, block = 8, seed = 0 } = {}) =>
+          injectEvent?.({ type: 'mediumVirt', mode: 'occludebank', gx: idx | 0, holoMode: mode | 0, frac: +frac, block: block | 0, seed: seed | 0 }),   // seed:0 (default) → the handler derives a deterministic seed from the shared drain step (KWE PRNG); pass an explicit seed to fix the mask
+        // livePlate(i) — lift stored plate i into a LIVING 𝔸-slot (P2) and view it: the memory as an EVOLVING SOLITON
+        //   (register-stepped, held toward its attractor), NOT a frozen image. Damage the plate → the soliton degrades
+        //   live. i≥0 = that plate; default -1 = the last. The recall is REPLICATED (a normal 𝔸-slot birth); the view
+        //   switch is local. This is the honest "see the memory alive". (mu1.plateView = the frozen-image alternative.)
+        // virtT(T) — set the ±T HOLOGRAPHY DEPTH (spectral-leg steps, 1–256). Replicated. Larger T = deeper spread /
+        //   more delocalized plate. RE-STORE after changing (old plates were spread at the previous T). mu1.sweepOcclusion measures the curve.
+        virtT: (T = 16) => { injectEvent?.({ type: 'mediumVirt', mode: 'virtt', amp: +T }); return `[VIRT_T] hologram depth → T=${Math.max(1, Math.min(500, Math.round(+T)))} (replicated) — re-store to bank at this depth`; },
+        // dispTrace(n) — WHY does the canvas look frozen while fieldH keeps changing? Samples, n times ~1s apart, the
+        //   THREE things between the physics and the pixels for the viewed slot: the live state (descBase), the
+        //   DISPLAY buffer the renderer actually uploads (descDisp — refreshed only at the BAR boundary, k%21), and
+        //   whether the GPU texture key changed. If descBase moves but descDisp doesn't → the display buffer is not
+        //   being refreshed. If both move but the canvas is static → the upload/render is stale. Peer-local probe.
+        dispTrace: (n = 6) => { let i = 0; const tick = () => { const s = _sb.slots[_viewSlot];
+            const hb = s?.descBase ? _hashField(s.descBase) : null, hd = s?.descDisp ? _hashField(s.descDisp) : null;
+            console.log(`[DISP] ${SLOTN[_viewSlot]} step=${_E.solSteps} descBase=${hb} descDisp=${hd} sameObj=${s?.descDisp === _descTexKey ? 'TEX-KEY-MATCHES(no re-upload)' : 'key differs'} live=${s?.descLive ? 1 : 0} desc=${s?.desc ? 1 : 0}`);
+            if (++i < n) setTimeout(tick, 1000); };
+          tick(); return `[DISP] tracing the viewed slot for ${n}s — compare descBase (physics) vs descDisp (what the canvas uploads)`; },
+        // lensObj(name) — WHAT THE LOCK HOLDS. The pin target is makeProbeField(obj) through the readOp; `obj` alone
+        //   decides whether the medium organizes around a DENSE GLYPH or SPARSE LIGHT POINTS. 'letterA' is drawn as a
+        //   chain of dots along each stroke — that density IS the on-screen texture, not the medium. 'point'/'pair'/
+        //   'grid' are isolated light points and the medium builds its own interference between them (MEASURED more
+        //   coherent than letterA: speckle 0.86 grid / 0.92 cross vs 1.04 letterA). THE LOCK IS UNCHANGED — this is the
+        //   right way to lose the texture while KEEPING the oscillating soliton (unlike pinHold, which dissolves it).
+        //   One of: ring · point · pair · grid · cross · blob · letterA · depthscene. Replicated (pin target is in regH).
+        lensObj: (name = 'lightpts') => { if (!_PROBE_OBJS.includes(String(name))) return `[MU1-OBJ] one of: ${_PROBE_OBJS.join(', ')}`;
+          injectEvent?.({ type: 'mediumVirt', mode: 'lensobj', obj: String(name) });
+          return `[MU1-OBJ] pin target → '${name}' (replicated) — the switch passes THROUGH THE DOOR: every living slot's field+budget re-seeds from the new attractor (leaving the old field = undamped turbulence, the uniform cap never drains it). Use 'lightpts' for coherent light points (Gaussian σ=5 below the ring kKnee); hard dots (point/pair/grid) are deltas above the knee and stay noisy.`; },
+        // selfAtt(bars) — ψATT: THE FIELD-AS-ATTRACTOR DOOR. After the lock, DIGEST `bars` bars (pin lifted — the
+        //   medium disperses the injected pixels), then ADOPT: the field's own f32 state becomes the pin target
+        //   (rolled by the leash, rotated by the register φ/ω). The symbol's identity migrates from the OPERATOR into
+        //   the FIELD — "use the field itself that holds the injection". Set lensTau ω≠0 first: after adoption the
+        //   oscillation is REGISTER-driven (the probe-mismatch beat is gone by construction; ω is the living clock).
+        //   HONEST LIMITS (measured): shape ≈0.6 of probe-pinned; texture only PARTIALLY softens (Gate-D law: the
+        //   letter's identity lives ABOVE kKnee — its sharp strokes ARE the symbol in this medium). 0 = revert to probe.
+        // pinBeta(v, slot) — β, the pin gravity (refAmp), per slot. Its MEANING DEPENDS ON WHAT THE PIN HOLDS:
+        //   · probe pin  → β drives the medium toward a DIFFERENT shape; the mismatch beat IS the oscillation, so
+        //                  higher β keeps it lively well past 1.
+        //   · ψATT (adopted) → the target is the field's OWN rotating state, so β is pure DAMPING. Measured liveliness
+        //                  (ω=0.3): 0.51@0.2 · 0.27@0.4 · 0.14@0.6 · 0.12@0.7 · 0.11@1.0 · 0.08@3.0 — monotone, and
+        //                  flat past ~0.7 (why the slider "stops doing anything" there). Use 0.2–0.4 and raise ω.
+        pinBeta: (v = 1, slot) => { const nm = slot || _regSlot; injectEvent?.({ type: 'mediumVirt', mode: 'refamp', src: nm, amp: +v });
+          const held = _sb.slots[Math.max(0, SLOTN.indexOf(nm))]?._attHold;
+          return `[REFAMP] β(${nm}) → ${(+v).toFixed(2)}${held ? ' · ψATT is ADOPTED on this slot, so β is DAMPING (target = the field itself): low β + higher ω is the lively regime' : ''}`; },
+        selfAtt: (bars = 3) => { injectEvent?.({ type: 'mediumVirt', mode: 'selfatt', amp: +bars });
+          const v = Math.max(0, Math.min(64, Math.round(+bars)));
+          return `[ψATT] → ${v ? `digest ${v} bars then ADOPT the field as the attractor (set ω via mu1.lensTau(0.1..0.3) for living precession)` : 'OFF — the probe pin re-asserts the injected symbol'} (replicated)`; },
+        // pinHold(n) — ⌛ a DECOHERENCE EXPERIMENT (not a display cleanup). 0 = default: the plate attractor drives a
+        //   living slot forever, and that lock is what SUSTAINS the coherent soliton and its interference fringes.
+        //   n>0 fades the drive after n shared steps → the field DECOHERES into per-cell speckle (measured spatial
+        //   speckle-index 1.16 → 1.49: no symbol, no fringes). The bright envelope and the ripples are NOT separable
+        //   layers — the ripples exist because the soliton is locked. Replicated (the pin is in regH).
+        pinHold: (n = 300) => { injectEvent?.({ type: 'mediumVirt', mode: 'pinhold', amp: +n });
+          const v = Math.max(0, Math.min(4000, Math.round(+n)));
+          return `[PINHOLD] ⌛ → ${v ? `${v} steps: DECOHERENCE — the drive fades and the soliton dissolves into speckle (no symbol, no fringes). mu1.pinHold(0) to restore.` : '0 = drive FOREVER (default, correct for normal use) — the lock sustains the coherent soliton AND its interference'} (replicated)`; },
+        // livePlate(i, slot) — HOST plate i (default: the last) in `slot` (V/P1/P2; default = the SELECTED slot) as a
+        //   LIVING soliton: bank damage then re-lifts into it and you watch it degrade. Slot-targeted, so the SAME
+        //   plate can live in two slots at once (compare it, or watch one memory degrade in two reconstructions).
+        //   Replicated birth; the view switch is local. mu1.releasePlate(slot) is the inverse (stop hosting).
+        livePlate: (i = -1, slot) => { const idx = (i | 0) >= 0 ? Math.min(i | 0, _plates.length - 1) : (_plates.length - 1); if (idx < 0) return '[LIVEPLATE] no plates (store first)';
+          const ti = slot != null ? SLOTN.indexOf(String(slot)) : _plvSlotIdx();   // explicit slot, else the SELECTED one (no silent P2 default)
+          if (!(ti >= 1 && ti <= 3)) return '[LIVEPLATE] pick a host slot: V, P1 or P2 — W is the driven world and cannot host a live plate (mu1.livePlate(-1,"P1"), or select the slot in the register strip)';
+          injectEvent?.({ type: 'mediumVirt', mode: 'platelive', gx: idx, src: SLOTN[ti] }); _viewSlot = ti; _plateView = -1;
+          return `[LIVEPLATE] lifting plate ${idx + 1}/${_plates.length} into ${SLOTN[ti]} as a LIVING soliton (register-stepped) — viewing ${SLOTN[ti]}; damage it to watch it degrade live`; },
+        // releasePlate(slot) — the inverse of livePlate: the slot STOPS hosting its plate (keeps its field and keeps
+        //   living; bank damage simply no longer re-lifts into it). Replicated. Default = the SELECTED slot.
+        releasePlate: (slot) => { const ti = slot != null ? SLOTN.indexOf(String(slot)) : _plvSlotIdx();
+          if (!(ti >= 1 && ti <= 3)) return '[LIVEPLATE] pick a slot: V, P1 or P2';
+          injectEvent?.({ type: 'mediumVirt', mode: 'platelive', gx: -1, src: SLOTN[ti] });
+          return `[LIVEPLATE] ${SLOTN[ti]} releasing its plate — it keeps living, but bank damage no longer re-lifts into it`; },
+        // plateView(i) — the FROZEN-IMAGE alternative: display the stored plate `p` bytes directly (the raw memory +
+        //   damage), NOT stepped. i≥0 shows plate i; -1 off. Local display. (mu1.livePlate = the evolving-soliton view.)
+        plateView: (i = -1) => { _plateView = (i | 0) >= 0 ? Math.min(i | 0, Math.max(0, _plates.length - 1)) : -1;
+          return _plateView >= 0 ? `[PLATE-VIEW] showing stored plate ${_plateView + 1}/${_plates.length} FROZEN (the raw memory${_plates[_plateView]?._dmg != null ? ` · ${(100 * (1 - _plates[_plateView]._dmg)).toFixed(0)}% damaged` : ''}) — plateView(-1) off; mu1.livePlate() for the live soliton` : '[PLATE-VIEW] off (slot view)'; },
+        // occView(on) — PEER-LOCAL toggle: for a slot holding a recalled plate, draw the DAMAGED PLATE (the occlusion
+        //   ITSELF, pre-lift) vs the −T RECONSTRUCTION (default). The damaged plate + T are REPLICATED (identical on
+        //   every peer); only THIS view choice is local — so two peers at the SAME shared T can watch different things
+        //   at once: one the occlusion (what was knocked out), the other the reconstruction (what the hologram
+        //   recovered from it). No replicated state, not in eH — flip freely, it never affects the shared field.
+        occView: (on = true) => { _occView = !!on; return `[⊘VIEW] this peer now shows the ${_occView ? 'STORED PLATE — the memory itself, with its damage. STATIC by nature (a frozen record; it redraws only when you damage it), not a living field' : 'LIVE RECONSTRUCTION (default) — the slot\'s field, register-stepped every frame'} at the shared T=${_VIRT_T} · LOCAL only — another peer with the opposite toggle sees the other half of the SAME shared state`; },
         coevo: (on = true) => { injectEvent?.({ type: 'mediumVirt', mode: 'coevo', amp: on ? 1 : 0 }); return `[COEVO] Einstein loop → ${on ? 'ON' : 'OFF'} (replicated: lands at the shared step on every peer — it gates gx/gy, which is in regH)`; },
         // unpin(on) — THE GOVERNANCE SWITCH (lensU1 ⇄ lensC1). PINNED (default): the coevo gate reads the DESCRIPTOR-
         // predicted lag → pure leash arithmetic → in regH → byte-deterministic. UNPINNED: the gate reads the TRUE FIELD
@@ -1888,11 +2509,27 @@ function makeMediumU1Renderer(core) {
       if (_absBtn._on !== !!W.desc) { _absBtn._on = !!W.desc; _absBtn.textContent = W.desc ? '⌀PDE:ON' : '⌀PDE'; _absBtn._repaint(); }   // reflect the replicated state (position mirrors state)
       const _modeNow = W.desc ? 'mode:⌀register' : 'mode:physics';
       _coevoBtn._on = _coevoOn; _coevoBtn.style.opacity = _coevoOn ? 1 : 0.6; _unpinBtn._on = _unpinned; _unpinBtn.style.opacity = _unpinned ? 1 : 0.6;
+      { const _fl = _fieldMix ? '⇄mix' : '⇄mix:OFF'; if (_fmixBtn.textContent !== _fl) { _fmixBtn.textContent = _fl; _fmixBtn._repaint?.(); } _fmixBtn._on = _fieldMix; _fmixBtn.style.opacity = _fieldMix ? 1 : 0.6; }
       { const _ll = _LIN_LABELS[_linearMode]; if (_linBtn.textContent !== _ll) { _linBtn.textContent = _ll; _linBtn._repaint?.(); } _linBtn._on = _linearMode > 0; _linBtn.style.opacity = _linearMode ? 1 : 0.6; }
       _turboBtn._on = _turboOn; _turboBtn.style.opacity = _turboOn ? 1 : 0.6;
       { const _exl = _turboOn ? 'gpu' : 'cpu'; if (_turboBtn.textContent !== _exl) { _turboBtn.textContent = _exl; _turboBtn._repaint?.(); } }   // executor label reflects the replicated state
       if (_modeBtn.textContent !== _modeNow) { _modeBtn.textContent = _modeNow; _modeBtn._on = !!W.desc; _modeBtn._repaint(); }
       if (_xattBtn._on !== _xattOn) { _xattBtn._on = _xattOn; _xattBtn.textContent = _xattOn ? 'x𝔸tt:ON' : 'x𝔸tt'; _xattBtn._repaint(); }
+      // live-plate button: reflects the TARGETED slot (_verbSlot: viewed slot wins, else the register-strip target).
+      //   _recalledInto[] is written by the platelive/recall VERB HANDLERS on every peer and restored on join → the
+      //   state is correct everywhere (same proven mechanism as _VIRT_T). Label shows the slot + which plate it holds;
+      //   ◉ = THIS peer is viewing that slot, ○ = it holds a plate but this peer is looking elsewhere.
+      { const _ti = _plvSlotIdx(), _pi = _ti >= 0 ? _recalledInto[_ti] : -1;
+        const _hasP = _pi >= 0;
+        const _lbl = _ti < 0 ? 'live plate (pick V/P1/P2)'   // W selected: no valid host — say so, never silently retarget
+          : _hasP ? `live ${SLOTN[_ti]}:pl${_pi + 1} ◉` : `live plate→${SLOTN[_ti]}`;   // ◉ = this slot HOSTS a plate (damage re-lifts into it); press to RELEASE
+        const _op = _ti < 0 ? 0.35 : (_hasP ? 1 : 0.6);
+        if (_plvBtn.textContent !== _lbl || _plvBtn._on !== _hasP || _plvBtn.style.opacity !== String(_op)) {
+          _plvBtn._on = _hasP; _plvBtn.textContent = _lbl; _plvBtn.style.opacity = _op; _plvBtn._repaint?.(); } }
+      if (_ocvBtn._on !== _occView) { _ocvBtn._on = _occView; _ocvBtn.textContent = _occView ? '⊘plate (static)' : '⊘view'; _ocvBtn.style.opacity = _occView ? 1 : 0.6; _ocvBtn._repaint?.(); }   // label says STATIC: a plate is a frozen record, not a living field
+      { const _dig = _sb.slots.some((s) => s._digestLeft > 0), _held = _sb.slots.some((s) => !!s._attHold);   // ψatt button: digesting → ⌛, adopted → ψatt◉ (the field carries the symbol), else off
+        const _pl2 = _dig ? 'ψatt⌛' : _held ? 'ψatt◉' : 'ψatt'; const _on2 = _dig || _held;
+        if (_psaBtn.textContent !== _pl2) { _psaBtn._on = _on2; _psaBtn.textContent = _pl2; _psaBtn.style.opacity = _on2 ? 1 : 0.6; _psaBtn._repaint?.(); } }
       if (!n.cachedRadii?.length) return;
       _E.readyFrames++;
       // IFS-KERNEL SWAP — keyed on cachedRadiiVersion (the fractal clock's ring-change counter), NOT genomeVer (manual
@@ -1931,10 +2568,14 @@ function makeMediumU1Renderer(core) {
       // The verb log is normally the replicated array; when a peer has only the latest fields (no log yet), synthesize a
       // one-entry log so the FIRST verb still stamps. _siReg's seq cursor guards against double-staging on re-read.
       const _vlog = (Array.isArray(n.medVirtLog) && n.medVirtLog.length) ? n.medVirtLog
-        : ((n.medVirtSeq | 0) > _siReg.seen ? [{ seq: n.medVirtSeq | 0, time: n.medVirtTime ?? 0, mode: n.medVirtMode || 'record', amp: (typeof n.medVirtAmp === 'number') ? n.medVirtAmp : 0, src: n.medVirtSrc || 'W', gx: n.medVirtGx ?? 0, gy: n.medVirtGy ?? 0, leak: n.medVirtLeak ?? 0, scale: n.medVirtScale || 'all' }] : []);
+        : ((n.medVirtSeq | 0) > _siReg.seen ? [{ seq: n.medVirtSeq | 0, time: n.medVirtTime ?? 0, mode: n.medVirtMode || 'record', amp: (typeof n.medVirtAmp === 'number') ? n.medVirtAmp : 0, src: n.medVirtSrc || 'W', gx: n.medVirtGx ?? 0, gy: n.medVirtGy ?? 0, leak: n.medVirtLeak ?? 0, scale: n.medVirtScale || 'all',
+            holoMode: n.medVirtHoloMode ?? 0, frac: n.medVirtFrac ?? 0, block: n.medVirtBlock ?? 0, seed: n.medVirtSeed ?? 0, obj: n.medLensObj }] : []);   // recallo occluder params + the lensobj probe geometry
       _siReg.pull(_vlog, (e) => ({ mode: e.mode, src: e.src || 'W', amp: (typeof e.amp === 'number') ? e.amp : 0, gx: (typeof e.gx === 'number') ? e.gx : 0, gy: (typeof e.gy === 'number') ? e.gy : 0,
         kx: (typeof e.kx === 'number') ? e.kx : undefined, ky: (typeof e.ky === 'number') ? e.ky : undefined,
         leak: (typeof e.leak === 'number') ? e.leak : 0,
+        holoMode: e.holoMode | 0, frac: (typeof e.frac === 'number') ? e.frac : 0, block: e.block | 0, seed: (typeof e.seed === 'number') ? e.seed : 0,   // recallo: occluder mode/frac/block/seed (must ride every hop — the dead-edge-bug lesson)
+        at: Array.isArray(e.at) ? [+e.at[0] || 0, +e.at[1] || 0] : null,   // recall PLACEMENT — must ride every hop too
+        obj: (typeof e.obj === 'string') ? e.obj : undefined,   // lensobj: the probe geometry the pin holds
         scale: (e.scale === 'coarse' || e.scale === 'fine') ? e.scale : 'all' }));   // gx/gy ride for descgo; kx/ky for lensset; leak = edge κ; scale = the recall band (coarse/fine/all — tier-selective ±T leg). Every hop of the pipe must carry it (the dead-edge-bug lesson)
 
       // GRACE (first-load fix): on a fresh page the world clock's n.time can arrive in a settling burst right as the
@@ -2060,7 +2701,9 @@ function makeMediumU1Renderer(core) {
         //    (v1 dissolution → v2 fixed point → v4 shimmer → v6 silence) taught the lesson the arc already
         //    knew: the only faithful model of the medium is the medium.
         _tbFrameRing = _E.ringCache; _tbFrameRingCur = null;   // turbo frame context (ring BEFORE this frame's swaps)
-        _regAttC = (W.descBase && W.movAtt) ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : null;
+        _regAttC = W._digestLeft > 0 ? null   // ψATT digest: pin lifted (the medium digests the injected pixels)
+          : W._attHold ? _xattBuild(_holdOp(0, W), _holdDx(W), _holdDy(W), W._attHold)   // ψATT adopted: the FIELD-borne symbol (INTEGER-rolled — see _holdDx — + register-rotated)
+          : (W.descBase && W.movAtt) ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : null;
         for (let i = 0; i < todo; i++) { const k = _base + i; let _cpuSnap = null;
           while (_pendKern.length && k >= _pendKern[0].startStep) { const pk = _pendKern.shift(); _E.kernelVer = pk.ver; _E.ringCache = { r: pk.r, w: pk.w, o: pk.o };
             _kernApplied.push({ atStep: k, r: pk.r, w: pk.w, o: pk.o }); }   // version BOOKKEEPING (the register engine reads the ring via the λ-grid cache) + the schedule for a live MIRROR
@@ -2130,7 +2773,7 @@ function makeMediumU1Renderer(core) {
             if (_K.edge) { let ae = false; for (let a2 = 0; a2 < 4; a2++) for (let b2 = 0; b2 < 4; b2++) if (_K.edge[a2][b2]) ae = true;
               if (ae) _cpuSnap = _sb.slots.map((s2) => (s2.descBase ? Float64Array.from(s2.descBase) : null)); }
             _regStep1(W, _coupledAtt(0, _regAttC, _cpuSnap), _lensOp[0].beta || 1); }
-          if (!_turboOn) for (let li = 1; li <= 3; li++) { const VL = _sb.slots[li]; if (VL.desc && VL.descLive && VL.descBase && VL.descE0) _regStep1(VL, _coupledAtt(li, VL.descAtt, _cpuSnap), _lensOp[li].beta || 1); }
+          if (!_turboOn) for (let li = 1; li <= 3; li++) { const VL = _sb.slots[li]; if (VL.desc && VL.descLive && VL.descBase && VL.descE0) _regStep1(VL, _coupledAtt(li, VL.descAtt, _cpuSnap), (_lensOp[li].beta || 1) * _pinFac(VL, k)); }   // ⌛pinHold: fade the plate-attractor drive after birth (0 = drive forever, the default)
           // THE KURAMOTO/XY LAW, MEDIUM-DRIVEN (v2 — the pure-descriptor version settled at the exact splay and
           // froze: a noiseless ODE parks at its equilibrium; the OLD medium's life came from the FIELDS kicking
           // the phases). Applied at Q boundaries (the old cadence, 3×/bar): each slot's phase entering the XY
@@ -2147,10 +2790,10 @@ function makeMediumU1Renderer(core) {
                 for (let j = 0; j < f2.length; j += 2) { rr += att2[j] * f2[j] + att2[j + 1] * f2[j + 1]; im2 += att2[j] * f2[j + 1] - att2[j + 1] * f2[j]; }
                 return lensU1.angle(op) + Math.atan2(im2, rr); }
               return lensU1.angle(op); });
-            const dth = [0, 0, 0, 0]; let anyK = false;
-            for (let ia = 0; ia < 4; ia++) { if (ia !== 0 && !_sb.slots[ia].born) continue;
-              for (let ib = 0; ib < 4; ib++) { const kk = _K.edge[ia][ib]; if (!kk || (ib !== 0 && !_sb.slots[ib].born)) continue;
-                anyK = true; dth[ia] += (_turboOn ? 3 : 1) * kk * Math.sin(th[ib] - th[ia]); } }
+            // THE XY LAW itself is now the pure core kuramotoStep(th, edge, {gain, born}); the app owns only WHAT the
+            // phase is (th above = op∠ + measured lock offset) and the apply/wrap below. turbo gain=3 = the Q-rate Euler
+            // equivalent (bar cadence vs the 3×/bar Q cadence). born-gating: index 0 (W) always live.
+            const { dth, any: anyK } = kuramotoStep(th, _K.edge, { gain: _turboOn ? 3 : 1, born: _sb.slots.map((s) => s.born) });
             if (anyK) { for (let ia = 0; ia < 4; ia++) if (dth[ia]) _lensOp[ia].phase = ((_lensOp[ia].phase + dth[ia]) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
               const barK = Math.floor((k + 1) / 21);
               if ((barK % 4) === 0 && _kurLogBar !== barK && ((k + 1) % 21) === 0) { _kurLogBar = barK;
@@ -2168,7 +2811,7 @@ function makeMediumU1Renderer(core) {
                 // measured gate has no field to read — unpin is meaningless here and deliberately ignored).
                 if (s.leash.state.go) leashAdvance(s.leash.state, null, () => 1, null,
                   (si === 0 && _coevoOn) ? ((L) => { const g = _unpinned
-                      ? Math.max(0, Math.min(1, (W._engE ?? W.descE0 ?? 1) / (W.descE0 || 1)))   // UNPINNED (ℂ*): TRUE register-field energy — admissible in ⌀PDE since v7 (the engine computed the field for this k in THIS loop; _engE is a pure fn of shared state — the bar-interleaved-drive thread, closed)
+                      ? leashGainEnergy(W._engE ?? W.descE0 ?? 1, W.descE0 || 1)   // UNPINNED (ℂ*): TRUE register-field energy (the core coevo-gain twin) — admissible in ⌀PDE since v7 (_engE is a pure fn of shared state)
                       : leashGainPredicted(L, _COEVO_MAXLAG); _coevoG = g; return g; }) : null); }
               // the register SCHEDULE for a live MIRROR/AUTOC — pushed UNCONDITIONALLY per processed bar (even an idle
               // leash must anchor phi at each bar: the ω tick above changed it, and end-of-frame φ is peer-frame-local)
@@ -2194,8 +2837,55 @@ function makeMediumU1Renderer(core) {
               if (si2 === 0 && _wSharded && !_shardXspace) _shardFreezeOutside();
               if (_dispNeeds(si2)) s3.descDisp = Float64Array.from(s3.descBase);
               s3.descPos = [s3.leash.state.gx, s3.leash.state.gy];
+              // ── ψATT (selfatt): digest countdown + ADOPTION at the shared bar. While digesting, the att is null
+              //    (pin lifted — the medium digests the injected pixels). At 0 the slot ADOPTS its own f32 state as
+              //    the attractor: from then on att = _xattBuild(register op, Δpos, hold) — the field-borne symbol,
+              //    rolled by the leash and rotated by the register's φ/ω. All at shared bars → peer-identical.
+              if (s3._digestLeft > 0) { s3._digestLeft--;
+                if (s3._digestLeft === 0) { if (_turboOn && _gpu && !(si2 === 0 && _shardXspace)) { _tbAdvanceAll(k + 1); _tbSyncSlot(si2); }   // adoption reads the PIN TARGET bytes: advance the texture to the SHARED bar step first (the store-verb pattern), else peers could capture different steps
+                  s3._attHold = Float64Array.from(Float32Array.from(s3.descBase)); s3._attHoldPos = [s3.leash.state.gx, s3.leash.state.gy];
+                  s3._holdPhi0 = lensU1.angle(_lensOp[si2]);   // the register angle AT CAPTURE — the hold is later rotated by ∠now − this (aging only), never by the absolute angle it already carries
+                  // ── MEDIUM-SEMANTIC IDENTITY of the adopted symbol. Once ψATT drops the probe, `obj` (the foreign
+                  //    name) no longer describes what the field carries — but sl(2) does: V and V̈ are invariant under
+                  //    exactly the anchors the hold is allowed to move by (integer roll + global phase), so they name
+                  //    the ADOPTED THING in the medium's own units. Telemetry only (never regH); recomputed on join.
+                  s3._holdSl2 = _mkSl2(s3._attHold); s3._holdRef = null; s3._holdRefBar = barA + _HOLD_MIN; s3._holdRefPrev = null; s3._holdRefN = 0; s3._holdRefStuck = false;   // the SETTLED reference is taken later (by CONVERGENCE, see _HOLD_TOL): V₀ is a byte-freeze and the state relaxes off it
+                  const _om = _lensOp[si2].omega || 0, _bt = _lensOp[si2].beta || 1;
+                  console.log(`[MU1-ψATT] ${SLOTN[si2]} ADOPTED its field as the attractor @bar=${barA} — the symbol is now carried by the FIELD, not the probe. ${_om ? `ω=${_om.toFixed(3)}/bar → the pin target precesses: REGISTER-DRIVEN oscillation (expect liveliness ≈${(0.37 * Math.abs(_om)).toFixed(2)}; the probe-beat's was ≈0.19, matched at ω≈0.5).` : '⚠ ω=0 → the target is STATIC and the state is a FIXED POINT: it will freeze (measured liveliness 0.004). Set mu1.lensTau(0.3, "' + SLOTN[si2] + '") — after adoption the ONLY oscillator is the register clock, because the probe↔medium mismatch that used to beat is gone by construction.'}${_bt > 0.5 ? ` ⚠ β=${_bt.toFixed(2)} is HIGH for ψATT: the target is now the field's OWN state, so β is pure DAMPING (it clamps ψ to a rotating copy of itself), not drive. Liveliness ≈halves per +0.2β below 0.6 and saturates flat past ~0.7 — use mu1.pinBeta(0.3,"${SLOTN[si2]}") (or the β slider) and raise ω instead.` : ''}`); } }
+              // the adopted attractor = the captured field TRANSLATED to the current leash offset and ROTATED by the
+              //   slot's register angle. _xattBuild (not lensC1.apply) REGARDLESS of the xatt toggle, and that is
+              //   deliberate: lensC1.apply REGENERATES from a probe base under a full operator (mode/rot/scale);
+              //   a hold is a CAPTURED FIELD, and the only operations that keep it that field are a unitary shift +
+              //   a global phase. THE ROTATION IS THE OSCILLATOR: lensU1.angle(op) is the very phase ω advances once
+              //   per bar (the beat law below), so the pin target precesses — the field is chased by a rotating copy
+              //   of itself. ω=0 ⇒ a static target ⇒ a fixed point (measured temporal 0.004); liveliness is LINEAR in
+              //   ω (0.037 per 0.1 rad/bar) and reaches the probe-beat's own liveliness (~0.19) at ω≈0.5.
+              // THE SETTLED IDENTITY REFERENCE: sampled at SHARED bars until successive samples CONVERGE, once the pin+cap
+              //   relaxation transient off the f32 byte-freeze has run out. Everything before this is measured against
+              //   the snapshot and flagged as such. Telemetry only — one FFT, once per hold.
+              //   TURBO: descBase is STALE until _tbSyncSlot — the GPU holds truth. The display path above only syncs
+              //   when _dispNeeds(si2), so a holding slot that isn't on screen would be sampled from old bytes: the
+              //   convergence test would compare two stale reads, "converge" early, and freeze a wrong reference.
+              //   Sync HERE, gated on the sample actually being due, so non-sampling bars cost nothing. (Determinism
+              //   is not at stake either way — nothing reads _holdRef back into physics — but the numbers have to be
+              //   worth trusting, which is the whole point of the instrument.)
+              if (s3._attHold && !s3._digestLeft && !s3._holdRef && s3._holdRefBar >= 0 && barA >= s3._holdRefBar && s3.descBase && _E.ringCache?.r?.length) {
+                if (_turboOn && _gpu && !(si2 === 0 && _shardXspace)) _tbSyncSlot(si2);   // same guard as the adoption capture above (the advance to this bar already ran)
+                const smp = _mkSl2(s3.descBase);
+                if (smp) { const prev = s3._holdRefPrev; s3._holdRefPrev = smp; s3._holdRefN = (s3._holdRefN | 0) + 1;
+                  s3._holdRefBar = barA + _vptEvery;   // next sample at the telemetry cadence (one FFT per sample)
+                  // CONVERGED = two successive samples agree to _HOLD_TOL, after at least _HOLD_MIN samples (the
+                  // transient RISES before it falls, so an early pair can agree by crossing — the minimum blocks that).
+                  const rel = prev && prev.V ? Math.abs(smp.V / prev.V - 1) : Infinity;
+                  const stuck = s3._holdRefN >= _HOLD_MAX;
+                  if ((s3._holdRefN >= _HOLD_MIN && rel <= _HOLD_TOL) || stuck) {
+                    s3._holdRef = smp; s3._holdRefStuck = stuck && rel > _HOLD_TOL;
+                    console.log(`[ψATT-ID] ${SLOTN[si2]} identity reference ${s3._holdRefStuck ? 'ACCEPTED WITHOUT CONVERGENCE' : 'CONVERGED'} @bar=${barA} after ${s3._holdRefN} samples: V=${smp.V.toExponential(3)} (adopted ${s3._holdSl2 ? s3._holdSl2.V.toExponential(3) : '?'}, relaxation ${s3._holdSl2 ? (100 * (smp.V / s3._holdSl2.V - 1)).toFixed(2) + '%' : '?'}, last step ${(100 * rel).toFixed(3)}%)${s3._holdRefStuck ? ' ⚠ the state never stopped moving — verdicts against this reference are provisional' : ' — drift is judged against this from now on'}`); } } }
+              const _selfHold = () => _xattBuild(_holdOp(si2, s3), _holdDx(s3), _holdDy(s3), s3._attHold);   // aging-only rotation (_holdOp) + INTEGER roll (_holdDx)   // INTEGER shift — see _holdDx: a fractional resample of the hold rings at 13–17% and corrupts the pin target
               if (si2 === 0) { if ((barA % 4) === 0) W.sl2 = null;   // sl2 refresh at the VPT cadence (a per-bar rebuild profiled at 120ms/bar with the analytic v_g — 31% of the frame)
-                _regAttC = W.movAtt(W.leash.state.gx, W.leash.state.gy); }
+                _regAttC = W._digestLeft > 0 ? null : (W._attHold ? _selfHold() : W.movAtt(W.leash.state.gx, W.leash.state.gy)); }
+              else if (s3._digestLeft > 0) s3.descAtt = null;
+              else if (s3._attHold) s3.descAtt = _selfHold();
               else if (s3.descAttG) s3.descAtt = _plateAtt(s3.descAttG.dop, s3.descPos, s3.descAttG.obj); }
             if (_turboOn && (barA % 8) === 0 && _tbLogBar !== barA) { _tbLogBar = barA;
               console.log(`[TURBO] bar ${barA} · GPU executed ${_tbSteps} engine steps since the last report (CPU engine idle) — proof of engagement; mu1.pure() now counts these honestly`); _tbSteps = 0; }
@@ -2275,7 +2965,7 @@ function makeMediumU1Renderer(core) {
           const _gx0 = W.leash.state.gx, _gy0 = W.leash.state.gy;
           const _gainOf = !_coevoOn ? null
             : (_unpinned ? (() => { let e = 0; for (let j = 0; j < q.length; j++) e += q[j] * q[j];   // ℂ*: TRUE field energy vs the slot's budget
-                const g = W.e0 > 0 ? e / W.e0 : 1; _coevoG = g; return g; })
+                const g = leashGainEnergy(e, W.e0); _coevoG = g; return g; })   // the core coevo-gain twin (clamped [0,1]; the sigmoid saturates ≥1 anyway → gx/gy/regH identical, only _coevoG telemetry clamps)
                : ((L) => { const g = leashGainPredicted(L, _COEVO_MAXLAG); _coevoG = g; return g; }));   // lensU1: descriptor-predicted
           if (leashDue(W.leash.state, _E.kwSteps, null)) leashAdvance(W.leash.state, null, (gx, gy) => W.movAtt(gx, gy), null, _gainOf);
           // REGENERATE att ONLY WHEN gx/gy ACTUALLY MOVED — the oracle's "ONE att per frame, stationary across the loop"
@@ -2447,7 +3137,20 @@ function makeMediumU1Renderer(core) {
           // the gate-F tier: the dated forecast (t* / t_c in engine time units, ÷DT for steps) + İ the maintenance power
           const elTxt = r.I == null ? '' : ` · I=${r.I.toExponential(2)}${r.Idot != null ? ` İ=${r.Idot.toExponential(1)} (sl2-work of pin+cap; 0 on free flight)` : ''}${r.rekey != null ? ` · re-key ΔI=${r.rekey.toExponential(1)} (kernel bump — the clock re-tuned V̈; bookkept out of İ)` : ''}${r.tFoc != null ? ` · freed: FOCUS in ${Math.round(r.tFoc / DT)} steps, waist V=${r.vMinP.toExponential(2)}` : r.tCol != null ? ` · freed: V→0 in ${Math.round(r.tCol / DT)} steps (dated collapse call)` : ''}`;
           const sl2Txt = (W.desc && W.sl2) ? ` · sl2-REG V=${W.sl2.V.toExponential(2)} (wit Δ=${(100 * (r.V / W.sl2.V - 1)).toFixed(1)}% — the register's charge vs the witness; held ⇒ stationary, the arrest law)` : '';
-          console.log(`[VPT] bar ${_E.frameBar} · src=${r.src} · H=${r.H.toExponential(3)} (kin ${r.hk.toExponential(2)} nl ${r.hn.toExponential(2)}) · V=${r.V.toExponential(3)} · ${r.H < 0 ? '⚠ H<0 — would COLLAPSE if freed (the pin+cap are holding it: the VPT call, live)' : 'H>0 — would spread if freed'}${elTxt}${sl2Txt}`); }
+          // ψATT IDENTITY: what the medium says about the thing it adopted, in anchor-invariant charges. dV≈0 with a
+          // position gap ⇒ the SAME state stalled short (a transport failure); dV drifting ⇒ a DIFFERENT state the
+          // pin+SPM built (an identity failure). Those are physically different and this is the only line that tells
+          // them apart — sl(2) is an identity CHECK, not a generator: it verifies, it cannot rebuild the field.
+          const hd = _holdDrift(0);
+          // the control for the per-bar line: only OTHER HOLDING slots can be stationary controls, and each costs an
+          // FFT (~120ms) — so cap the survey at the slots that actually hold, and reuse slot 0's already-computed drift.
+          const hdCm = !hd ? null : _holdCommon([{ ...hd, slot: 0 }].concat(
+            _sb.slots.map((s4, i) => { if (!(i > 0 && s4?._attHold && !s4._digestLeft && s4._holdSl2)) return null;
+              if (_turboOn && _gpu) _tbSyncSlot(i);   // the guard at the top of this block syncs slot 0 ONLY — the control slots need it too
+              return _holdDrift(i); })
+              .filter(Boolean).map((d, i) => ({ ...d, slot: i + 1 }))));
+          const hdTxt = !hd ? '' : ` \u00b7 \u03c8ATT-ID V=${hd.V.toExponential(3)} vs settled ref ${hd.Vref.toExponential(3)} \u21d2 dV=${(100 * hd.dV).toFixed(2)}%${(hdCm && hdCm.ok) ? ` (common-mode ${(100 * hdCm.com).toFixed(2)}% \u2014 relaxation, subtracted)` : ''}${hd.gap != null ? ` \u00b7 gap=${hd.gap.toFixed(2)}px` : ''} \u00b7 \u0394I=${hd.dI.toExponential(2)} \u2192 ${_holdVerdict(hd, hdCm)}`;
+          console.log(`[VPT] bar ${_E.frameBar} · src=${r.src} · H=${r.H.toExponential(3)} (kin ${r.hk.toExponential(2)} nl ${r.hn.toExponential(2)}) · V=${r.V.toExponential(3)} · ${r.H < 0 ? '⚠ H<0 — would COLLAPSE if freed (the pin+cap are holding it: the VPT call, live)' : 'H>0 — would spread if freed'}${elTxt}${sl2Txt}${hdTxt}`); }
         // PURE ⌀PDE (no field anywhere): the register-only ledger — the sl(2) charges + the dated forecast,
         // asserted from register content ALONE (Vd=0: the held state is stationary by the measured arrest law;
         // freed from rest, V(t)=V+½V̈t²). The mirror is the optional VERIFIER, not the source.
@@ -2471,6 +3174,12 @@ function makeMediumU1Renderer(core) {
       const _wViaMirror = _viewSlot === 0 && W.desc && V.born && V.mirror && !!V.field && _dials.view !== 'desc';
       if (_wViaMirror) vfield = V.field;
       let _drawn = false;
+      // FROZEN PLATE VIEW: draw a STORED plate's `p` bytes directly — the raw MEMORY (and its damage), NOT stepped.
+      // Local display; overrides the slot render. Console-only: mu1.plateView(i) (the UI 'live plate' shows the
+      // EVOLVING soliton via mu1.livePlate — this is the raw-bytes alternative for inspecting exact stored content).
+      if (_plateView >= 0 && _plates[_plateView]?.p) { _drawField(outCell, _plates[_plateView].p);
+        outCell.setLabel(`PLATE ${_plateView + 1}/${_plates.length} (the stored memory itself · atStep=${_plates[_plateView].k}${_plates[_plateView]._dmg ? ` · ⊘ DAMAGED ${(100 * (1 - _plates[_plateView]._dmg)).toFixed(0)}% removed` : ''}) — mu1.plateView(-1) to return to the slot view`);
+        _drawn = true; if (_viewSel.value !== SLOTN[_viewSlot]) _viewSel.value = SLOTN[_viewSlot]; _sX.setVal(tgtX); _sY.setVal(tgtY); return; }
       // FRAME-LOCK: display the last SHARED-bar state instead of the peer-local frame end → every displayed image is
       // a member of one shared sequence across peers (the shared film; ≤1 bar wall-time offset). Local display dial.
       if (_frameLock) { if (_wViaMirror) { if (_dispV) vfield = _dispV; }
@@ -2500,6 +3209,15 @@ function makeMediumU1Renderer(core) {
             for (let j = 0; j < acc.length; j++) acc[j] += pf[j]; }
           _viewAllCache = { bar: nowBar, f: nSum ? acc : null }; }
         if (_viewAllCache.f) { _drawField(outCell, _viewAllCache.f); _drawn = true; } }
+      // ⊘VIEW (local): draw the viewed slot's hosted PLATE `p` — the STORED RECORD in the bank, with its damage.
+      // IT IS DELIBERATELY STATIC: a plate is a frozen record (written once at store, rewritten only by occludebank),
+      // so nothing steps it — that is the whole contrast. ⊘view OFF shows the slot's LIVE reconstruction (descBase),
+      // which the register steps every frame. Static = the memory · moving = the recalled soliton. Dragging the damage
+      // slider DOES update this image (each damage rewrites p); it simply does not evolve between changes.
+      if (_occView && _recalledInto[_viewSlot] >= 0 && _plates[_recalledInto[_viewSlot]]?.p) {
+        const dpl = _plates[_recalledInto[_viewSlot]]; _drawField(outCell, dpl.p);
+        outCell.setLabel(`⊘STORED PLATE ${_recalledInto[_viewSlot] + 1} hosted by ${vnm}${dpl._dmg != null ? ` · ${(100 * (1 - dpl._dmg)).toFixed(0)}% removed` : ''} — the MEMORY ITSELF (a frozen record: STATIC by nature, updates only when you damage it) at the shared T=${_VIRT_T} · ⊘view OFF = ${vnm}'s LIVE reconstruction of this same plate (register-stepped, moving)`);
+        _drawn = true; if (_viewSel.value !== vnm) _viewSel.value = vnm; _sX.setVal(tgtX); _sY.setVal(tgtY); return; }
       // FIELD-VIEW (residual/bare) forces the CPU field path (the GPU 𝔸 shader has no ψ−A): use the slot's live
       // descBase (or descDisp) as ψ, then _fieldViewApply subtracts A / shows A. Only when a transform is active.
       const _fvActive = _fieldView !== 'full' && vsl && (vsl.descBase || vsl.field);
@@ -2508,7 +3226,7 @@ function makeMediumU1Renderer(core) {
       else if (_dials.view === 'desc') vfield = (_viewSlot === 0) ? att : (vsl ? vsl.att : null);
       if (!_drawn) _drawField(outCell, _lensedView(_viewSlot, _fieldViewApply(_viewSlot, vfield)));
       const vop = _lensOp[_viewSlot];
-      outCell.setLabel(`ψ_${vnm}${(vsl && vsl.born) || _viewSlot === 0 ? '' : ' (unborn)'} · ∠${lensU1.wrap(lensU1.angle(vop)).toFixed(2)}${vop.beta !== 1 ? ` β${vop.beta}` : ''}${vop.omega ? ` ω${vop.omega}` : ''}${_wViaMirror ? ' · LIVE via MIRROR (the physics of the register; 𝔸 declaration on the view cycle)' : vsl && vsl.mirror ? ' · MIRROR: live PDE injection-locked to the register' : vsl && vsl.desc ? ' · 𝔸 PREDICTIVE slot (descriptor-only, 0 grid steps)' : _dials.view === 'lens' ? ' · ∠lens view' : _dials.view === 'desc' ? ' · 𝔸 DESCRIPTOR render (register prediction — not ψ)' : ''}${_viewSlot === 0 ? ` · transport lock ${_E.lockNow.toFixed(2)}` : ''}${_frameLock ? ` · film@k=${_viewSlot === 1 && V.mirror ? _dispVk : _dispWk} (shared index: identical k ⇒ identical pixels)` : ''}${_mirRegion && V.mirror ? ` · shard:${_mirRegionName} (outside R = the declaration)` : ''}${_viewAllOn && W.desc ? ' · Σ VIEW (linear superposition of the slot declarations — a VIEW; slots do not interact)' : ''}`);
+      outCell.setLabel(`ψ_${vnm}${(vsl && vsl.born) || _viewSlot === 0 ? '' : ' (unborn)'} · ∠${lensU1.wrap(lensU1.angle(vop)).toFixed(2)}${vop.beta !== 1 ? ` β${vop.beta}` : ''}${vop.omega ? ` ω${vop.omega}` : ''}${_wViaMirror ? ' · LIVE via MIRROR (the physics of the register; 𝔸 declaration on the view cycle)' : vsl && vsl.mirror ? ' · MIRROR: live PDE injection-locked to the register' : vsl && vsl.desc ? ' · 𝔸 PREDICTIVE slot (descriptor-only, 0 grid steps)' : _dials.view === 'lens' ? ' · ∠lens view' : _dials.view === 'desc' ? ' · 𝔸 DESCRIPTOR render (register prediction — not ψ)' : ''}${_viewSlot === 0 ? ` · transport lock ${_E.lockNow.toFixed(2)}` : ''}${_frameLock ? ` · film@k=${_viewSlot === 1 && V.mirror ? _dispVk : _dispWk} (shared index: identical k ⇒ identical pixels)` : ''}${_mirRegion && V.mirror ? ` · shard:${_mirRegionName} (outside R = the declaration)` : ''}${_edgeTag(_viewSlot)}${_viewAllOn && W.desc ? ` · Σ VIEW (linear superposition of the slot declarations — this RENDER does not couple; ${_anyEdge() ? 'but an edge IS live → the slots ARE interacting in the STATE, shown above' : 'and no edge is set → the slots are truly independent'})` : ''}`);
       }
       // reflect the selector to only-born slots (W always; V/P when born — S6)
       if (_viewSel.value !== vnm) _viewSel.value = vnm;
@@ -2516,6 +3234,13 @@ function makeMediumU1Renderer(core) {
       // reflect the register strip to the TARGETED slot's live descriptor (the bar5 law: position mirrors state)
       const rsi = SLOTN.indexOf(_regSlot); if (rsi >= 0) { _sBeta.setVal(_lensOp[rsi].beta); _sOm.setVal(_lensOp[rsi].omega);
         _regReadout.textContent = ` ${_regSlot}:∠${lensU1.wrap(lensU1.angle(_lensOp[rsi])).toFixed(2)} β${_lensOp[rsi].beta.toFixed(2)} ω${_lensOp[rsi].omega.toFixed(2)}${_sb.slots[rsi].born || rsi === 0 ? '' : ' (unborn)'}`; }
+      _sVirtT.setVal(_VIRT_T);   // reflect the replicated hologram depth (a peer's virtt change / a join updates the slider)
+      if (_objSel.value !== _lensObj && document.activeElement !== _objSel) _objSel.value = _lensObj;   // reflect WHAT the lock holds (set by the lensobj verb handler on every peer; restored on join)
+      // reflect the DAMAGE slider + method — from _occFrac/_occMode, which the occludebank VERB HANDLER sets on EVERY
+      //   peer at the shared step (and the snapshot restores on join). This is the identical mechanism as the working
+      //   _sVirtT←_VIRT_T reflection; reading the world node directly proved unreliable here.
+      _occDmg.setVal(_occFrac);   // reflect the damage level — _occFrac is set by the occludebank VERB HANDLER (runs on every peer at the shared step), exactly like _sVirtT←_VIRT_T. setVal's DRAG guard (not focus) lets this update the moment the drag ends.
+      if (_occSel.value !== String(_occMode) && document.activeElement !== _occSel) _occSel.value = String(_occMode);   // same for the method dropdown
       if (core._renderAvatars) core._renderAvatars(world, root);
       if (_lagOn) _lagTick(_lagT0, todo, n);
       _autoTempoTick(todo);

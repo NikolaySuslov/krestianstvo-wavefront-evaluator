@@ -38,7 +38,8 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 import { makeTauKernel } from '../kwe-tau.js';
 import { lensU1 } from '../soliton-algebra.js';
-import { makeObserverBank, normalizeVirtEvent, applySettingsVerb, makeStepClock, makeCouplingStore, muxClocks, chainMeter } from '../medium-core.js';
+import { makeObserverBank, normalizeVirtEvent, applySettingsVerb, makeStepClock, makeCouplingStore, chainMeter, wrap2pi, makeRegisterReadout,
+  makeHologramBank, kuramotoStep } from '../medium-core.js';   // one import from the consolidated core: laws + makeRegisterReadout (regPhase) + the HOLOGRAM bank (NON-FIELD: matter = the (M,O) lensC1 pair, pluggable coherence metric) + kuramotoStep (XY phase — edges entrain the operators' PHASES alongside matter coupling). muxClocks dropped (homogeneous full-rate).
 
 const REFLECTOR_MS = 50;
 const TICK_S = REFLECTOR_MS / 1000;
@@ -90,7 +91,7 @@ const selfhostWorldProgram = `
 
 function makeSelfhostScripts(avatarScript) { return [selfhostWorldProgram, avatarScript]; }
 
-const wrap2pi = (x) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+// wrap2pi now imported from medium-core (one definition; [0,2π) register-aging wrap)
 const wrap = lensU1.wrap;
 // the matter/operator lens element: phase (U(1)) + rot (SO(2)) + GAIN (ℂ*, the modulus r). In U(1)-mode gain≡1 →
 // the element lives on a COMPACT space (torus) → runaway-proof (2 regimes). In ℂ*-mode gain is free → NON-compact →
@@ -122,12 +123,18 @@ function makeSelfhostRenderer(core) {
     const unpinned = [false, false, false, false];   // PER-WORLDLINE governance: false = lensU1 (pinned, gain≡1, compact) · true = lensC1 (UNPINNED — amplitude DOF free). unpin(slot) moves ONE worldline lensU1→lensC1; repin projects back (gain→1). Replicated per-slot.
     const det = SLOTN.map(() => ({ bar: 0, prev: 0, lastKp: -1e9 }));
     const cohHist = [[], [], [], []];   // recent coherence for the face bar + regime readout
-    const plates = [];
+    // ── THE HOLOGRAM BANK (shared core, NON-FIELD regime): selfhost's memory banks (M,O) lensC1 pairs, not fields.
+    //    The pluggable metric = coherence(cue.M, plate.m.M) — recall content-addresses by MATTER COHERENCE, not
+    //    amplitude. No leg, no lift (an M/O pair is not a propagating image); the dual-layer [RECALL-∠] aging readout
+    //    (∠now − ∠stored) is shared, and honestly reports NO field-Δφ half (there is no field). plates = the bank array.
+    const _holo = makeHologramBank({ bankMax: 4, beatsOf: (nm) => (tauK.beatsOf(nm) ?? 0) });
+    const plates = _holo.plates;   // { m: {M,O}, dop, bw, k } — the self-hosting operator's remembered matter
     let k = 0, seen = 0, booted = false, halted = false, lag = 0;
     const beatsOut = [];
     let inhabit = -1;
-    const nSlots = () => 1 + (live[1] ? 1 : 0) + (live[2] ? 1 : 0) + (live[3] ? 1 : 0);
-    const reanchor = (kk) => { const r = nSlots(); if (clk.reanchor(kk, r)) tauK.reanchor(kk, r); };
+    // reanchor: REMOVED the nSl rate-flip (the mux's 1/nSl slowing). Homogeneous full-rate matter-clocks → fixed world
+    // rate; differential aging is each unit's own M↔O dynamics. No-op hook kept for call-site/snapshot shape.
+    const reanchor = (_kk) => {};
     const spawn = (i) => { O[i] = elt(0, 0, 1); M[i] = elt(Math.PI, 0, 1); live[i] = true; kp[i] = 0; det[i] = { bar: 0, prev: 0, lastKp: -1e9 }; };   // M starts OPPOSED to O → it must chase → the first ripple
 
     const stepSlot = (i, kk) => { if (!live[i]) return;
@@ -177,13 +184,14 @@ function makeSelfhostRenderer(core) {
       else if (vq.mode === 'spawn') { const t = vq.slot | 0; if (live[t]) { spawn(t); console.log(`[SH] respawn ${SLOTN[t]} atStep=${kk}`); } }
       else if (vq.mode === 'boot') { const t = live[2] ? 3 : 2; if (!live[t]) { spawn(t); Object.assign(regs[t], lensU1.id()); beta[t] = beta[0]; wash[t] = wash[0]; console.log(`[SH] boot ${SLOTN[t]} — a new self-hosting worldline atStep=${kk}`); } }
       else if (vq.mode === 'kill') { const t = live[3] ? 3 : live[2] ? 2 : -1; if (t > 0) { live[t] = false; M[t] = O[t] = null; Object.assign(regs[t], lensU1.id()); console.log(`[SH] kill ${SLOTN[t]} atStep=${kk}`); } }
-      else if (vq.mode === 'store') { plates.push({ M: { ...M[0] }, O: { ...O[0] }, lop: { ...regs[0] }, bw: tauK.beatsOf('W') ?? 0 }); if (plates.length > 4) plates.shift(); console.log(`[SH] store — the (matter,operator) pair banked ${plates.length}/4 (∠${lensU1.angle(regs[0]).toFixed(3)}, bw=${tauK.beatsOf('W') ?? 0})`); }
-      else if (vq.mode === 'recall') { if (plates.length) { let best = 0, bc = -1;
-        for (let pi = 0; pi < plates.length; pi++) { const c = coherence(M[0], plates[pi].M); if (c > bc) { bc = c; best = pi; } }
-        const pl = plates[best]; live[1] = true; M[1] = { ...pl.M }; O[1] = { ...pl.O }; kp[1] = 0; det[1] = { bar: 0, prev: 0, lastKp: -1e9 }; Object.assign(regs[1], lensU1.id()); beta[1] = beta[0]; wash[1] = wash[0];
-        const dN = (tauK.beatsOf('W') ?? 0) - (pl.bw ?? 0);
+      else if (vq.mode === 'store') { _holo.store(null, regs[0], { m: { M: { ...M[0] }, O: { ...O[0] } }, k: kk });   // NON-FIELD: bank the (M,O) matter pair + the register; no field
+        console.log(`[SH] store — the (matter,operator) pair banked ${plates.length}/4 (∠${lensU1.angle(regs[0]).toFixed(3)}, bw=${plates[plates.length - 1].bw})`); }
+      else if (vq.mode === 'recall') { if (plates.length) {
+        const bd = _holo.bind(M[0], { metric: (cueM, plM) => coherence(cueM, plM.M) });   // content-address by MATTER COHERENCE (the pluggable metric on plate.m)
+        const { plate: pl, index: best, corr: bc } = bd; live[1] = true; M[1] = { ...pl.m.M }; O[1] = { ...pl.m.O }; kp[1] = 0; det[1] = { bar: 0, prev: 0, lastKp: -1e9 }; Object.assign(regs[1], lensU1.id()); beta[1] = beta[0]; wash[1] = wash[0];
+        const ag = _holo.agingReadout(pl, bd.cueLeg, regs[0], { name: 'W' });   // shared aging (descriptor-only here — no field-Δφ, honestly)
         console.log(`[SH] recall → plate ${best + 1} (cue⊗=${bc.toFixed(3)}) → V; the remembered SELF-HOSTING operator runs again atStep=${kk}`);
-        console.log(`[RECALL-∠] plate frame ∠=${lensU1.angle(pl.lop).toFixed(3)} vs W now ∠=${lensU1.angle(regs[0]).toFixed(3)} → Δ=${lensU1.wrap(lensU1.angle(regs[0]) - lensU1.angle(pl.lop)).toFixed(3)} rad · Δτ_W=${dN} beats${regs[0].omega ? ` → ω·Δτ=${lensU1.wrap(regs[0].omega * dN).toFixed(3)} predicted` : ''}`); } }
+        console.log(`[RECALL-∠] plate frame ∠=${lensU1.angle(pl.dop).toFixed(3)} vs W now ∠=${lensU1.angle(regs[0]).toFixed(3)} → Δ=${ag.dDesc.toFixed(3)} rad · Δτ_W=${ag.dTau} beats${ag.dOmegaTau != null ? ` → ω·Δτ=${ag.dOmegaTau.toFixed(3)} predicted` : ''}`); } }
       else if (vq.mode === 'edge') { const ea = vq.gx | 0, eb = vq.gy | 0, ek = vq.leak || 0;
         if (!K.setEdge(ea, eb, ek)) console.log('[SH] edge: self-coupling ignored'); else console.log(`[SH] edge κ(${SLOTN[ea]},${SLOTN[eb]}) = ${ek} atStep=${kk} — coupled self-hosting operators`); } };
     const chainSlots = () => SLOTN.map((nm, i) => ({ name: nm, field: live[i] ? matField(i) : null, op: regs[i] })).filter((s) => s.field);
@@ -192,14 +200,14 @@ function makeSelfhostRenderer(core) {
     const takeSnap = () => ({ k, seq: seen, clk: { c0: clk.c0, rate: clk.rate, ratePrev: clk.ratePrev }, tauK: tauK.save(), bank: bank.save(), dials: { ...dials },
       K: { edge: K.edge ? K.edge.map((r) => [...r]) : null, capPh: K.capPh, capStep: K.capStep, src: K.src.map((s) => s ? Array.from(s) : null) },
       live: [...live], M: M.map((m) => m ? { ...m } : null), O: O.map((o) => o ? { ...o } : null), kp: [...kp], beta: [...beta], wash: [...wash], gdrift: [...gdrift], cap: [...cap], unpinned: [...unpinned],
-      det: det.map((d) => ({ ...d })), plates: plates.map((pl) => ({ M: { ...pl.M }, O: { ...pl.O }, lop: { ...pl.lop }, bw: pl.bw })) });
+      det: det.map((d) => ({ ...d })), plates: _holo.save() });   // the bank owns the plate shape; m (the {M,O} pair) rides as a plain-object structured clone
     const restoreSnap = (s) => { k = s.k | 0; seen = s.seq | 0; clk.c0 = s.clk?.c0 ?? 0; clk.rate = s.clk?.rate ?? 1; clk.ratePrev = s.clk?.ratePrev ?? 1;
       if (s.tauK) tauK.restore(s.tauK); bank.restore(s.bank); Object.assign(dials, s.dials || {});
       K.edge = s.K?.edge ? s.K.edge.map((r) => [...r]) : null; K.capPh = s.K?.capPh ?? -1; K.capStep = s.K?.capStep ?? -1;
       for (let i = 0; i < 4; i++) K.src[i] = s.K?.src?.[i] ? Float64Array.from(s.K.src[i]) : null;
       for (let i = 0; i < 4; i++) { live[i] = !!s.live?.[i]; M[i] = s.M?.[i] ? { ...s.M[i] } : null; O[i] = s.O?.[i] ? { ...s.O[i] } : null;
         kp[i] = s.kp?.[i] ?? 0; beta[i] = s.beta?.[i] ?? BETA0; wash[i] = s.wash?.[i] ?? WASH0; gdrift[i] = s.gdrift?.[i] ?? GDRIFT0; cap[i] = s.cap?.[i] ?? 8; unpinned[i] = !!s.unpinned?.[i]; Object.assign(det[i], s.det?.[i] || { bar: 0, prev: 0, lastKp: -1e9 }); cohHist[i] = []; }
-      plates.length = 0; for (const pl of (s.plates || [])) plates.push({ M: { ...pl.M }, O: { ...pl.O }, lop: { ...pl.lop }, bw: pl.bw | 0 });
+      _holo.restore(s.plates);   // the bank rebuilds the plate shape incl. m ({M,O}) via structured clone
       booted = true; console.log(`[SH] restored from join snapshot @ step=${k} — mH must match live peers at equal step`); };
     world.ps.app._snapHook = (worldSnap) => { if (booted) worldSnap.medSnapSh = takeSnap(); };
 
@@ -216,10 +224,20 @@ function makeSelfhostRenderer(core) {
       try { while (done < 4000) {
         const tgt = clk.target(time * TICK_S);
         if (k >= tgt) break;
-        q.drain(k, (vq) => { if (!applySettingsVerb(vq, k, regs, dials)) appVerb(vq, k); reanchor(k); });
-        const nSl = nSlots(); const { ph, capPh } = muxClocks(k, nSl, null);
+        q.drain(k, (vq) => { if (!applySettingsVerb(vq, k, regs, dials)) appVerb(vq, k); });
+        // ── HOMOGENEOUS MATTER-CLOCKS (the mux unification, matching observers/rhythm/ifsclock/medium-u1): each self-
+        //    host unit (its own M/O lensC1 pair) advances every shared k at FULL rate — no 1/nSl slowing, no shared
+        //    substrate to time-share. Differential aging is each unit's OWN M↔O chase dynamics (spin/beta/wash), which
+        //    the mux slot-count slowing was redundant with. Capture rides the fixed flat-slice cadence (period 21),
+        //    slot-independent.
+        const capPh = Math.floor(k / 21);
         if (K.shouldCapture(capPh)) K.capture([live[0] ? matField(0) : null, live[1] ? matField(1) : null, live[2] ? matField(2) : null, live[3] ? matField(3) : null], k, capPh);
-        stepSlot(ph, k);
+        for (let i = 0; i < 4; i++) if (live[i]) stepSlot(i, k);         // every live matter-clock advances at k (homogeneous, full-rate)
+        // A+: THE PHASE-KURAMOTO — edges entrain the operators' register PHASES (the shared kuramotoStep law), at the
+        // SAME %7 Q boundary as stepSlot's matter coupling, over all live worldlines (read-all-then-write →
+        // deterministic). Runs ALONGSIDE the M↔O matter coupling (edges nudge both phase and matter).
+        if (K.edge && ((k + 1) % 7) === 0) { const { dth, any } = kuramotoStep(regs.map((o) => o.phase), K.edge, { born: [...live] });
+          if (any) for (let i = 0; i < 4; i++) if (dth[i]) regs[i].phase = wrap2pi(regs[i].phase + dth[i]); }
         k++; done++; } } catch (err) { halted = true; console.error(`[SH] ENGINE HALTED at step=${k}:`, err); } };
 
     // ── audio + console ──
@@ -241,18 +259,19 @@ function makeSelfhostRenderer(core) {
       if (mean > 0.85 && vv < 0.04) return 'FROZEN';          // locked, no ripple → dead clock (stiff pin: crank beta)
       return 'HOSTED'; };                                     // a living self-hosting ripple clock
     const inj = (p) => injectEvent?.({ type: 'shVerb', ...p });
+    const _rout = makeRegisterReadout({ tauK, names: SLOTN, op: (i) => regs[i], born: (i) => !!live[i], step: () => k });   // the FULL register introspection (∠/ω/β/beats/τ/born per slot) — selfhost as a full-fidelity U1 demo
     globalThis.sh = {
       chainRead: () => { const c = chainSlots(); if (c.length < 2) return '[SH] need ≥2 worldlines'; const m = chainMeter(c);
         console.log(`[CHAIN] ${m.links.map((l) => `${l.a}→${l.b}:Δφ=${l.dphi}(vis ${l.vis} pred ${l.pred} mdl ${l.mdl})`).join(' · ')} · ε=${m.defect} · beatsS[${SLOTN.map((n) => tauK.beatsOf(n) ?? 0).join(',')}] step=${k}`); return m; },
       regime: () => { const r = SLOTN.map((n, i) => live[i] ? `${n}:${regimeOf(i)}` : `${n}:—`).join(' · '); console.log(`[SH] regimes: ${r}`); return r; },
       lensOps: () => { const o = regs.map((l, i) => ({ slot: SLOTN[i], ...l, angle: +lensU1.angle(l).toFixed(4) })); console.log(`[LENSOPS] ${o.map((l) => `${l.slot}:{∠${l.angle} ω=${l.omega}}`).join(' · ')} · step=${k}`); return o; },
-      regPhase: () => ({ beats: SLOTN.map((n) => tauK.beatsOf(n) ?? 0), tau: SLOTN.map((n) => +tauK.tauOf(n).toFixed(3)), step: k, kH: tauK.hash(), mH: mH() }),
+      regPhase: () => _rout.phase({ mH: mH() }),   // {beats,tau,step,kH} shared + selfhost's matter hash
       wash: (slot = 'W', a = WASH0) => inj({ mode: 'wash', src: slot, amp: +a }),
       beta: (slot = 'W', a = BETA0) => inj({ mode: 'beta', src: slot, amp: +a }),
       gdrift: (slot = 'W', a = GDRIFT0) => inj({ mode: 'gdrift', src: slot, amp: +a }),
       cap: (slot = 'W', a = 8) => inj({ mode: 'cap', src: slot, amp: +a }), unpin: (slot = 'W') => inj({ mode: 'unpin', src: slot }),
       kick: (slot = 'W', a = 1.5) => inj({ mode: 'kick', src: slot, amp: +a }),
-      aphase: (a = 0.1, slot = 'W') => inj({ mode: 'aphase', amp: +a, src: slot }), lensTau: (w = 0.1) => inj({ mode: 'lenstau', amp: +w }),
+      aphase: (a = 0.1, slot = 'W') => inj({ mode: 'aphase', amp: +a, src: slot }), lensTau: (w = 0.1, slot = null) => inj({ mode: 'lenstau', amp: +w, ...(slot ? { src: slot } : {}) }),   // per-slot ω when slot given (each self-hosting worldline ages at its own rate); global when omitted
       edge: (a = 0, b = 1, kk2 = 0.1) => inj({ mode: 'edge', gx: a | 0, gy: b | 0, leak: +kk2 }),
       store: () => inj({ mode: 'store' }), recall: () => inj({ mode: 'recall' }), boot: () => inj({ mode: 'boot' }), kill: () => inj({ mode: 'kill' }), respawn: (slot = 'W') => inj({ mode: 'spawn', slot: { W: 0, V: 1, P1: 2, P2: 3 }[slot] ?? 0 }),
       sound: () => soundOn() };
@@ -283,7 +302,7 @@ function makeSelfhostRenderer(core) {
       const sGd = sld('gdrift', 0, 4, 0.05, GDRIFT0, (v) => globalThis.sh.gdrift(slot, v));   // ℂ* amplitude-excursion rate
       const sCap = sld('cap', 0, 60, 1, 8, (v) => globalThis.sh.cap(slot, v));                 // the energy law (0 = uncapped → runaway)
       const unpb = btn('unpin', () => { globalThis.sh.unpin(slot); });   // unpin/repin the SELECTED worldline (lensU1 ↔ lensC1); label synced from unpinned[] in the frame loop
-      const sOm = sld('ω', -0.5, 0.5, 0.01, 0, (v) => globalThis.sh.lensTau(v));
+      const sOm = sld('ω', -0.5, 0.5, 0.01, 0, (v) => globalThis.sh.lensTau(v, slot));   // per-SLOT ω (the dropdown targets it; each self-hosting worldline ages at its own rate)
       btn('kick', () => globalThis.sh.kick(slot)); btn('respawn', () => globalThis.sh.respawn(slot));
       btn('store', () => globalThis.sh.store()); btn('recall', () => globalThis.sh.recall()); btn('boot', () => globalThis.sh.boot()); btn('kill', () => globalThis.sh.kill());
       return { cvs, sWash, sBeta, sGd, sCap, unpb, sOm, slotSel: () => slot, st: document.getElementById(`${containerId}-st`), roster: document.getElementById(`${containerId}-roster`) };
@@ -313,7 +332,7 @@ function makeSelfhostRenderer(core) {
       const med = world.getNodeState('med');
       if (med) { beatsOut.length = 0; advance(med.time ?? 0); for (const i of beatsOut) pluck(i); }
       if (els) { for (let i = 0; i < 4; i++) face(i);
-        const si = Math.max(0, SLOTN.indexOf(els.slotSel())); els.sWash.set(wash[si]); els.sBeta.set(beta[si]); els.sGd.set(gdrift[si]); els.sCap.set(cap[si]); els.sOm.set(regs[0].omega);
+        const si = Math.max(0, SLOTN.indexOf(els.slotSel())); els.sWash.set(wash[si]); els.sBeta.set(beta[si]); els.sGd.set(gdrift[si]); els.sCap.set(cap[si]); els.sOm.set(regs[si].omega);   // ω reflects the SELECTED slot now (was regs[0])
         const upT = unpinned[si] ? 'repin ●' : 'unpin'; if (els.unpb.textContent !== upT) els.unpb.textContent = upT;
         els.st.textContent = `step=${k}${halted ? ' · ⚠ HALTED' : lag > 100 ? ` · replaying (${lag})` : ''} · kH=${tauK.hash()} · mH=${mH()} · beats[${SLOTN.map((n) => tauK.beatsOf(n) ?? 0).join(',')}]${K.edge ? ' · edges' : ''} — diff kH/mH across peers at equal step`;
         if (els.roster) els.roster.innerHTML = _clientBadge(world); }
