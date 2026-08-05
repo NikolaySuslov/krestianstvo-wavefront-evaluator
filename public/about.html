@@ -760,10 +760,9 @@
   </section>
 
 <main class="wrap">
-
-    <p>A computer made of <span class="grad">physics</span>, not a picture of one.     The machine state is a <b>group-theoretic register</b>; memory is <b>interference read by correlation</b>; the processor is a wave medium the register <b>runs on itself</b>. A memory in this machine is not stored as a picture — it is <b>propagated into interference</b> and <b>propagated back out</b>. Follow one textured symbol from the moment it is dressed, through the plate it becomes, to the living soliton it is reborn as. Every stage names the function in the code that performs it. </p>
-
-
+    <p><b>Abstract holographic computer </b>in which the machine state is a <b>group-theoretic register</b>, the memory is interference read by <b>correlation</b>, and the processor is a wave medium that the register executes on itself — Lisp's <b>meta-circular eval</b> performed on <span class="grad">physics</span> instead of syntax, under <b>Croquet</b>-style replication where determinism is extended with naturality with shared <b>proper time</b> (Space-Time from Special and General Relativity), with <b>category theory</b>  supplying the honest bookkeeping (an adjunction with measured defects, a presheaf of shardable witnesses with a measured gluing residue) and <b>abstract harmonic analysis</b> supplying the executable duality (characters as the spectral register, correlation as the dual product). A memory in this machine is not stored as a picture — it is <b>propagated into interference</b> and <b>propagated back out</b>. Follow one textured symbol from the moment it is dressed, through the plate it becomes, to the living soliton it is reborn as. Every stage names the function in the code that performs it. 
+    </p>
+  
   <!-- ═══ THE 5-STAGE PIPELINE ════════════════════════════ -->
   <div class="pipe">
 
@@ -887,7 +886,7 @@
         <div class="rcard"><h4>The hash is the contract</h4><p><code>regH</code>, <code>eH/eV/eP1/eP2</code> per shared step are the determinism proof, run forever. Equal hashes at equal k = the peers are the same world, provably.</p></div>
       </div>
 
-      <div class="rtie"><b>There is no state synchronization because there is no state to synchronize.</b> This is the Croquet / TeaTime lineage completed in KWE: computation is <em>pulled</em> — each peer advances its island to the stamped shared step on its own schedule — and the entire nonlinear physics lives inside that deterministic replay. Turn off the network after a join and each peer keeps computing the same world; reconnect and a new joiner rebuilds it from one snapshot + the verbs since.</div>
+      <div class="rtie"><b>There is no state synchronization because there is no state to synchronize.</b> This is the Croquet / TeaTime lineage evolved towards full continuous time support in Krestianstvo Wavefront Evaluator (KWE): computation is <em>pulled</em> — each peer advances its "island" to the stamped shared step on its own schedule — and the entire nonlinear physics lives inside that deterministic replay. In perspective with the use of the KWE's local reflector feature, peers could keeps computing the same world localy even being disconneced; a new joiners rebuilds it from one snapshot + the verbs since.</div>
     </div>
   </div>
 
@@ -943,7 +942,7 @@
         <div class="tier field">
           <div class="tn">the medium (running) &nbsp;·&nbsp; ↻ every step</div>
           <div class="tt">The wave field</div>
-          <div class="td">a living soliton on the torus — but since v7 it is <code>_regStep1</code> that runs it <b>continuously</b>, so this tier and the register <b>coincide on the evolution law itself</b>. The eval is the whole life of the field, not a store/recall event.</div>
+          <div class="td">a living soliton on the torus — it is <code>_regStep1</code> that runs it <b>continuously</b>, so this tier and the register <b>coincide on the evolution law itself</b>. The eval is the whole life of the field, not a store/recall event.</div>
         </div>
       </div>
 
@@ -1107,7 +1106,7 @@
   <!-- ═══ WHAT KWE IS — THE DIFFERENCE FROM CLASSICAL CROQUET ═══ -->
   <section class="wrap">
     <div class="sec-head"><span class="sec-num">the engine</span><h2>What the Krestianstvo Wavefront Evaluator is</h2></div>
-    <p class="sec-sub">A deterministic, reactive, multiplayer computational engine — and a <b>fundamentally different approach to distributed time</b> than the Croquet VM it descends from. Classical Croquet routes every message through a <b>central dispatcher</b>: the shared queue <em>is</em> the synchronization. KWE has no central queue. Causality propagates as a <b>wavefront</b> through a graph of locally-autonomous nodes — each owns its own queue of futures, and synchronization emerges from <b>shared logical time + deterministic local computation</b>.</p>
+    <p class="sec-sub">A deterministic, reactive, multiplayer computational engine — that evolved towards <b>full continuous and distributed time</b> support approach implmented in functional-reactive paradigm, thus differ from the Croquet VM it descends from. Classical Croquet routes every message through a <b>central dispatcher</b>: the shared queue <em>is</em> the synchronization. KWE has no central queue. Causality propagates as a <b>wavefront</b> through a graph of locally-autonomous nodes — each owns its own queue of futures, and synchronization emerges from <b>shared logical time + deterministic local computation</b>.</p>
 
     <!-- the two-node contrast (abstract = central VM · measure = wavefront) -->
     <div class="tower" style="margin-top:30px">
@@ -1190,8 +1189,14 @@
         <p>In the VM architecture the queue <b>was</b> the synchronization mechanism. In the Wavefront Evaluator the queue is a <em>local implementation detail</em> of each node — synchronization is achieved instead through <b>shared logical time and deterministic local computation</b>. There is no <code>Date.now()</code> in the model: <code>wallTime = logicalTime</code>, a pure tick count, so two peers on different machines produce identical state regardless of real-time jitter. On top of this sits the <b>fractal IFS clock</b> — time as a self-similar landscape, not a linear axis — the substrate the whole holographic computer above is clocked by.</p>
       </div>
     </div>
+  </section>
 
-    <!-- the complex field ℂ — the arithmetic everything runs in -->
+  <!-- ═══ THE DUALITY TOWER ═══════════════════════════════ -->
+  <section class="wrap" id="tower">
+    <div class="sec-head"><span class="sec-num">§3.5 · §6.3</span><h2>The tower of groups behind the physics</h2></div>
+    <p class="sec-sub">A ladder of groups, each <b>represented</b> in the machine — and each with its representation's honest reach <em>measured</em>. Left: the abstract group. Right: the operator that realizes it. The rungs are how they connect.</p>
+
+        <!-- the complex field ℂ — the arithmetic everything runs in -->
     <div class="node abs" style="margin-top:22px;border-left:2px solid var(--spectral-a);display:flex;gap:16px;align-items:flex-start">
       <svg viewBox="0 0 44 44" width="44" height="44" fill="none" stroke="var(--spectral-a)" stroke-width="1.4" aria-hidden="true" style="flex:none;margin-top:2px">
         <!-- the complex plane: axes + a phasor e^{iθ} on the unit circle -->
@@ -1208,12 +1213,6 @@
       <div class="desc" style="max-width:none">The state is a <b>complex field</b> ψ ∈ ℓ²((ℤ/G)², <b>ℂ</b>) — every cell carries an amplitude <em>and</em> a phase, written <code>e^{iθ}</code>. That is not decoration: the whole calculus runs in ℂ. A soliton's memory <em>is</em> its <b>global phase</b> ∠ψ (the U(1) register); the descriptors and the IFS lenses are <b>ℂ* group elements</b> (<code>lensC1</code>, phase × gain); the spectral step, the FFT, <code>spectralShift</code>, and the ±T holographic legs are all <b>complex multiplication</b> in the dual. Interference — the heart of holography — is only meaningful because amplitudes are complex and can <b>add or cancel by phase</b>. Restricting the gain to 1 gives the unitary <b>U(1)</b> sector; letting it vary opens the full <b>ℂ*</b>. The real numbers you see on screen are magnitudes; the computation lives one dimension up, in the complex plane above.</div>
       </div>
     </div>
-  </section>
-
-  <!-- ═══ THE DUALITY TOWER ═══════════════════════════════ -->
-  <section class="wrap" id="tower">
-    <div class="sec-head"><span class="sec-num">§3.5 · §6.3</span><h2>The tower of groups behind the physics</h2></div>
-    <p class="sec-sub">A ladder of three groups, each <b>represented</b> in the machine — and each with its representation's honest reach <em>measured</em>. Left: the abstract group. Right: the operator that realizes it. The rungs are how they connect.</p>
 
     <div class="tower">
       <div class="rung">
@@ -1329,7 +1328,7 @@
   <!-- ═══ PDE ELIMINATION ═════════════════════════════════ -->
   <section class="wrap" id="pde">
     <div class="sec-head"><span class="sec-num">§1.4 · §7.1</span><h2>The PDE, eliminated</h2></div>
-    <p class="sec-sub">The register does not <em>describe</em> the medium — since v7 it <b>runs</b> it. Every evolution step executes inside the algebraic register in f64 CPU arithmetic; the GPU performs <b>zero</b> physics steps. Lisp's meta-circular <code>eval</code>, performed on physics instead of syntax.</p>
+    <p class="sec-sub">The register does not <em>describe</em> the medium —  it <b>runs</b> it. Every evolution step executes inside the algebraic register in f64 CPU arithmetic; the GPU performs <b>zero</b> physics steps. Lisp's meta-circular <code>eval</code>, performed on physics instead of syntax.</p>
 
     <div class="feature">
       <div class="fg">
@@ -1441,7 +1440,7 @@
       </div>
 
       <div class="prose">
-        <div class="claim">The field is the <span class="k">processor</span>, not the RAM. Memory lives operator-side, written as a <span class="k">phase</span> the injection-lock holds.</div>
+        <div class="claim">The field is the <span class="k">processor</span>. Memory lives operator-side, written as a <span class="k">phase</span> the injection-lock holds.</div>
         <p>Each slot — <b>W, V, P1, P2</b> — is a pinned soliton. Its stored bit is its angle on the wheel: <code>∠ψ</code>, read as the argument of the field against its attractor. Writing is an <b>injection lock</b> (a PLL): <code>ψ ← ψ + β·att</code>, then a cap. The lock is bistable with a finite capture range — a strong off-phase probe can rewrite it, so it can also forget.</p>
         <p><b>Holography.</b> A <b>store</b> takes the field forward through the spectral leg to an interference <b>plate</b>; a <b>recall</b> lifts the exact backward leg to reconstruct it — content-addressable from a fragment. The plate is the transferable object; the register moves it in ω-time.</p>
         <ul class="steps">

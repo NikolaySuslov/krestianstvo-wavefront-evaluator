@@ -1,6 +1,6 @@
 {
   "name": "krestianstvo-wavefront-evaluator",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Holographic computing & Multimedia, Physics and Croquet-TeaTime inspired, Renkon-driven collaborative computational engine",
   "type": "module",
   "exports": {
@@ -18,7 +18,6 @@
     "public/kwe-tau.js",
     "public/medium-core.js",
     "public/medium-gpu.js",
-    "public/medium-u1-slots.js",
     "public/renkon-core-0.10.7.js",
     "public/ifs-gpu.js",
     "public/holography.js",

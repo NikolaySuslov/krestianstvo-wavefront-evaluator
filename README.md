@@ -10,7 +10,9 @@ The Krestianstvo Wavefront Evaluator is a deterministic reactive collaborative c
 
 It replaces the Krestianstvo VM with a fundamentally different approach to time, computation, and inter-node communication — one where causality propagates as a *wavefront* through a graph of locally autonomous nodes, rather than being routed through a central message dispatcher.
 
-> Documentation: https://krestianstvo.org/kwe
+> [Abstract Holographic Computer](https://krestianstvo.org/kwe/about)
+
+> Full Documentation: https://krestianstvo.org/kwe
 
 > Live demo: https://wavefront.krestianstvo.org 
 
