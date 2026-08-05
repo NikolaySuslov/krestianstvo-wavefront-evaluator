@@ -114,7 +114,15 @@ function makeMediumU1Renderer(core) {
     let _solSeeded = false, _solLogBar = -1, _solE0 = -1;
     let _objOrbTheta = 0, _lastTgtX = NaN, _lastTgtY = NaN;   // last commanded transport target (virtGo only on CHANGE — re-arming every frame freezes the chase)
     let _muxOn = false;   // ⧉mux time-share (S7+); OFF (S6) → V runs in a parallel drive block (nSl=1 for W's clock)
-    let _regTraceOn = true, _regTraceLast = -1;   // [DET] trace ON BY DEFAULT (catch the first fork without enabling) — mu1.regTrace(false) to silence
+    let _syncTraceLeft = 0, _syncTraceSlot = 1;
+    let _tbTraceLeft = 0, _tbTraceSlot = 0, _attCadLeft = 0, _attCadSlot = 1, _tbTraceFrom = -1;   // _tbTraceFrom: hold the trace until this SHARED step so both peers log the same window (see tbTrace)
+    let _stepTraceLeft = 0, _stepTraceSlot = 1, _primeTrace = 0, _lastShipH = [null, null, null, null];
+    let _wattDetEvery = 0, _wattDetBar = -1, _paintDetEvery = 0, _paintDetBar = -1;   // ψATT fork locator (mu1.wattDet) — off by default
+    let _clockDetEvery = 0, _clockDetBar = -1;   // step-clock fork locator (mu1.clockDet) — the c0/target/solSteps terms; off by default
+    let _forkDetEvery = 0, _forkDetBar = -1, _forkDetSlot = 1, _forkArgPrev = null;   // _forkArgPrev: previous argPin sample, so [FORK] can print its own TREND (a decaying series = the pin converging, not a fork)   // always-on shared-bar state hash (mu1.forkDet) — brackets WHEN a fork happened; off by default
+    let _mapDetEvery = 0, _mapDetBar = -1, _mapDetSlot = 1;   // 4×4 tile map of the painted field (mu1.mapDet) — answers WHERE it differs, which no scalar can; off by default
+    let _dispEvery = 1;   // Q-blocks between DISPLAY film refreshes (1 = 3x/bar = the old behaviour; 3 = 1x/bar). See mu1.dispRate.
+    let _regTraceOn = true, _regTraceLast = -1, _detTickN = 0, _detFieldEvery = 8;   // _detFieldEvery: DET ticks between FIELD-hash syncs. DEFAULT 1 = per-tick (the user's call, 2026-07-30): measured at only 7% of readbacks once throttled, and fork detection is worth more than 7%. mu1.detField(8) if a session ever needs it back.   // [DET] trace ON BY DEFAULT (catch the first fork without enabling) — mu1.regTrace(false) to silence
     let _joinBurstLog = false;   // armed on restore → logs the joiner's FIRST driven frame (todo/target) to see if it bursts the backlog
     let _mirLogBar = -1;         // [MIRROR] bar-cadence log cursor
     const _mirVerbQ = [];
@@ -180,6 +188,10 @@ function makeMediumU1Renderer(core) {
     //    need this: it is REGENERATED at the position, never resampled.)
     const _holdDx = (s) => Math.round(s.leash.state.gx - (s._attHoldPos?.[0] ?? 0));
     const _holdDy = (s) => Math.round(s.leash.state.gy - (s._attHoldPos?.[1] ?? 0));
+    // NOTE (2026-07-27): a zero-offset short-circuit (`gx===0&&gy===0 ? copy : spectralShift`) looks free and is NOT
+    //   admissible: spectralShift(base,0,0) differs from a plain copy by ~2.7e-15 on 32686/32768 values (the f64 FFT
+    //   round-trip), and this builds the PIN TARGET, which is in regH. Peers on either side of that change would fork.
+    //   The per-bar cost is removed by CACHING the built target instead (see _selfHold) — same bytes, computed once.
     const _xattBuild = (op, gx, gy, base) => { const sh = spectralShift(base, gx, gy, GRID);
       const ph = lensU1.angle(op); if (!ph) return sh;
       const c = Math.cos(ph), sn = Math.sin(ph);
@@ -220,6 +232,7 @@ function makeMediumU1Renderer(core) {
     // FRAME-LOCK display (LOCAL dial): render the state AS OF THE LAST SHARED BAR instead of the peer-local frame
     // end. Frames are peer-local EVENTS — wall-clock-identical frames don't exist — but with this on, every image a
     // peer displays is a member of ONE shared sequence (identical film, ≤1 bar wall-time offset between peers).
+    let _dispDesc = [null, null, null, null], _dispDescK = [-1, -1, -1, -1];   // frame-lock film for 𝔸 DESCRIPTOR slots (the field-mode pair below covers W only) — captured at the shared bar, index stamped
     let _frameLock = false, _frameLockGrid = 21, _dispW = null, _dispV = null, _dispWk = -1, _dispVk = -1;   // grid must be a multiple of Q (captures live in the Q-block); the displayed index k is STAMPED on the label — identical index ⇒ identical pixels (post-hoc alignable at full granularity)
     let _lastPaintSig = '';   // SUBTICK-DRIVEN PAINT: the last painted shared-frame signature — with frameLock on, the canvas repaints ONLY when a NEW boundary frame exists (paint content AND order = pure fns of shared time; rAF becomes just the polling loop)
     let _joinTraced = false;   // one-shot [MU1-JOINTRACE] guard
@@ -234,9 +247,22 @@ function makeMediumU1Renderer(core) {
     //    each kernel change at its SHARED start step = floor((cachedRadiiTime·MON_RATE − c0)·spp/rate) and apply it INSIDE
     //    the drive loop at that exact step (field preserved across the swap). Pure fn of shared state → byte-identical. ──
     let _pendKern = [];   // [{ startStep, r, w, o, ver }] staged kernel swaps, applied at their shared step in the drive loop
+    let _KHOLD_MAX = 4200;   // ~200 bars of deferral before the hold gives up (mu1.kHold(bars) to tune). The fractal clock re-rings every few bars in a live world, so the hold normally releases far sooner; this is the stall guard, not the expected wait.
+    let _kernHold = null;   // {since, ver, need} — set at a join whose kernelVer is older than kernelQueue can replay. While set the soliton does NOT step: the joiner DEFERS until a queued swap lands at its shared step (the generative alignment; see [JOIN-KHOLD]) rather than cold-snapping the kernel at a peer-local frame.
     const _kernApplied = [];   // per-frame [{ atStep, r, w, o }] the kernel swaps W's loop applied → V's loop replays them at the SAME steps (the ring is global _ringTex; V steps through it too)
     const _attApplied = [];    // per-frame [{ atStep, gx, gy }] W's ATTRACTOR schedule (frame-start pose + every leash advance) — the MIRROR drive replays the same att at the same shared steps (movAtt is a pure register fn → deterministic)
     const _kernStep = (t) => Math.floor((t * _MON_RATE - _stepClk.c0) * STEPS_PER_PHASE / (_stepClk.rate || 1));
+    // _stageKern(q) — queue every kernel change from the SHARED kernelQueue at its SHARED step. Idempotent (deduped
+    //   on ver), so it is safe to call every frame — and it MUST be, not only when this peer's version happens to
+    //   differ from the node's: staging concerns FUTURE swaps, and gating it on a momentary version equality makes
+    //   which entries a peer holds depend on WHEN its frame sampled the queue. That is peer-local, and it is the
+    //   measured source of the residual 1–2 version slip between peers (see the note at the call site).
+    const _stageKern = (q) => { let added = 0;
+      for (const e of (q || [])) { if ((e.ver | 0) > _E.kernelVer && !_pendKern.some((p) => (p.ver | 0) === (e.ver | 0))) {
+          const _off = (e.o || []).map((tier) => Array.from(tier || []));   // deep-copy tiers (survive the node→setRings path intact)
+          _pendKern.push({ startStep: _kernStep(e.time ?? 0), r: e.r, w: e.w, o: _off, ver: e.ver | 0 }); added++; } }
+      if (added) _pendKern.sort((a, b) => a.startStep - b.startStep);
+      return added; };
     let _solH = '--------', _solHStep = -1;   // solH = the FIELD hash captured at the last SHARED Q-boundary step (both peers pass through it identically → comparable across peers, unlike a frame-end hash)
     let _detEvery = 1;   // [DET] log every Q-boundary (7 steps) BY DEFAULT — fine enough to catch the first fork; regTrace(true,N) to coarsen
     // THE PIN STRENGTH (β) — the injection-lock stiffness (finding_pin_injection_lock). A stronger β makes the shared
@@ -315,6 +341,37 @@ function makeMediumU1Renderer(core) {
       const h = st.length >> 1, med = st.length % 2 ? st[h] : 0.5 * (st[h - 1] + st[h]);   // TRUE median (even ⇒ mean of the two middles)
       const spread = st[st.length - 1] - st[0];
       return { com: med, spread, n: st.length, ok: st.length === 1 || spread <= _HOLD_SPREAD }; };
+    // ── _specSynth(field, N, kcut) — THE SPECTRAL RECIPE: keep the N strongest modes below kcut and rebuild the field
+    //    from them alone. A THIRD description form, between the two the arc had: `dop`+obj is compact but FOREIGN (a
+    //    shared generator both peers call); a ψATT byte-hold is native but has NO generator (128KB, must ride the wire).
+    //    A mode list is BOTH — Fourier is the medium's OWN eigenbasis here (λ(k) is diagonal in it; _specLeg propagates
+    //    in it), so a recipe written in modes is native description, not an imported vocabulary.
+    //    MEASURED (bench: relaxed letterA hold, cut at 0.5·kKnee):
+    //      N=64  → 1024 B  shape 0.9005   N=128 → 2048 B  shape 0.9415   N=256+ saturates at 0.9508
+    //    vs 131072 B for the f32 hold ⇒ ~64× at 0.94. And the identity bandwidth is NARROW: the sweep found V tracks
+    //    the full state down to ~0.35–0.5·kKnee (≈1% of modes) and only scrambles below that (cross inverts at 0.25).
+    //    NOTE this corrects the older "sharp strokes ARE the symbol" reading: that is true of the PROBE field, but an
+    //    ADOPTED hold is 98.6% low-band (the medium already low-passed it), so the identity lives BELOW the knee.
+    //    Deterministic: pure fn of (field bytes, N, kcut) — same inputs ⇒ same output on every peer.
+    const _specSynth = (f, N, kcut) => { if (!f || !(N > 0)) return null;
+      const re = new Float64Array(N_CELLS), im = new Float64Array(N_CELLS);
+      for (let j = 0; j < N_CELLS; j++) { re[j] = f[j * 2]; im[j] = f[j * 2 + 1]; }
+      fft2d(re, im, GRID, false);
+      const cand = [];
+      for (let y = 0; y < GRID; y++) for (let x = 0; x < GRID; x++) {
+        const kx = (x <= GRID / 2 ? x : x - GRID) * (2 * Math.PI / GRID), ky = (y <= GRID / 2 ? y : y - GRID) * (2 * Math.PI / GRID);
+        if (Math.hypot(kx, ky) > kcut) continue;
+        const j = y * GRID + x; cand.push([re[j] * re[j] + im[j] * im[j], j]); }
+      cand.sort((a, b) => (b[0] - a[0]) || (a[1] - b[1]));   // power desc, INDEX asc as the tie-break — a bare power sort is not a total order and could differ across engines
+      const keep = cand.slice(0, Math.min(N, cand.length));
+      const r2 = new Float64Array(N_CELLS), i2 = new Float64Array(N_CELLS);
+      for (const c of keep) { r2[c[1]] = re[c[1]]; i2[c[1]] = im[c[1]]; }
+      fft2d(r2, i2, GRID, true);
+      const out = new Float64Array(f.length);
+      for (let j = 0; j < N_CELLS; j++) { out[j * 2] = r2[j]; out[j * 2 + 1] = i2[j]; }
+      return { field: Float64Array.from(Float32Array.from(out)), modes: keep.length, pool: cand.length }; };
+    const _kKnee = () => { const rc = _E.ringCache; if (!rc?.r?.length) return Math.PI;
+      try { return kernelABCD(rc.r, rc.w, rc.o, { dt: DT, T: 1 }).kKnee; } catch (e) { return Math.PI; } };
     const _holdDrift = (i) => { const s = _sb.slots[i];
       if (!s || !s._attHold || s._digestLeft > 0 || !s._holdSl2 || !s.descBase) return null;
       const now = _mkSl2(s.descBase); if (!now) return null;
@@ -405,6 +462,12 @@ function makeMediumU1Renderer(core) {
       //    hologram lens; W is merely the one the drive acts on). The mirror queue survives only as the legacy
       //    path for a mirror-without-engine state (shouldn't occur post-v7, but honesty over deadcode-pruning).
       if ((e.mode === 'record' || e.mode === 'recvia' || e.mode === 'store' || e.mode === 'recall' || e.mode === 'recallx' || e.mode === 'recallo') && W.desc) {
+        // SYNC BEFORE BUILDING mv (audit 2026-07-31). The guard below syncs the FIELD before the executors read it,
+        //   but mv is built HERE — capturing W's leash (gx/gy) and _lensOp — one statement EARLIER. Under turbo the
+        //   leash/descBase can still be at a pre-advance step at that moment, so the verb's DESCRIPTOR carried a
+        //   pre-sync pose while its FIELD was post-sync: the two disagree, and a recall cued from that mv can select
+        //   a different plate on each peer. Advance+sync first so mv and the field describe the SAME shared step.
+        if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncSlot(0); }
         const mv = { mode: e.mode === 'recvia' ? 'record' : e.mode, amp: e.amp || 0, k, si, scale: e.scale || 'all',
           dop: { ..._lensOp[0] }, gx: W.leash.state.gx, gy: W.leash.state.gy, bw: _tauK ? (_tauK.beatsOf('W') ?? 0) : 0,
           holoMode: e.holoMode | 0, frac: e.frac || 0, block: e.block | 0, seed: e.seed || 0,   // recallo: the occluder params (mode/frac/block/seed → occlude())
@@ -426,7 +489,8 @@ function makeMediumU1Renderer(core) {
       //    BIRTH: V = an independently integrated PDE copy of W, injection-locked to the REGISTER's attractor.
       //    Seed: field mode = W's shared f32 bytes; ⌀PDE = the BAR-EXACT register projection (no render frac —
       //    peer-identical). In ⌀PDE this returns the medium as a LIVE VIEW of the abstract model. Toggle OFF releases V.
-      if (e.mode === 'mirror') {
+      if (e.mode === 'mirror') { if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncAll(); }   // TURBO SYNC (audit 2026-07-31): this handler READS field/leash state that feeds regH. Under turbo the GPU holds truth, so an unsynced read takes bytes from a peer-local step and forks. Every state-reading verb must advance+sync at its stamped k first — the store-verb pattern, applied uniformly.
+      
         if (!V.mirror) {
           let seed = null;
           if (W.field) seed = Float64Array.from(W.field);
@@ -484,6 +548,7 @@ function makeMediumU1Renderer(core) {
             if (!f) { s2.descBase = null; continue; }
             s2.field = Float64Array.from(f); let e2 = 0; for (let j = 0; j < f.length; j++) e2 += f[j] * f[j]; s2.e0 = e2 || 1;
             if (i2 > 0) { s2.att = Float64Array.from(s2.descBase); s2.hold = true; }   // plate slots resume held toward their envelope
+            _dispDesc[i2] = null; _dispDescK[i2] = -1;   // the slot is leaving desc mode: its frame-lock film describes a retired state
             s2.descBase = null; s2.descPhi0 = 0; s2.sl2 = null; s2.descHold = null; s2.descPosCap = null; s2.descE0 = null; s2.descDisp = null; s2.descLive = false; s2.descAtt = null; s2.descAttG = null; }   // the field resumes → the register tier retires (the witness IS the state again)
           if (W.field) _E.psiLensed = W.field;
           if (_E.ringCache && _gpu) _gpu.setRings(_E.ringCache.r, _E.ringCache.w, _E.ringCache.o);   // the abstract span only BOOKKEPT kernel versions — upload the current ring before the PDE resumes
@@ -525,7 +590,14 @@ function makeMediumU1Renderer(core) {
         return; }
       else if (e.mode === 'linonly') { _linearMode = Math.max(0, Math.min(2, e.amp | 0));
         console.log(`[MU1] linear mode=${_linearMode} @step=${k} — ${_linearMode === 0 ? 'FULL nonlinear medium (SPM + cap + pin)' : _linearMode === 1 ? 'FREE LINEAR (SPM+cap+pin OFF): only gate-D linear propagation → the field DISPERSES (nonlinearity-makes-the-soliton proof)' : 'LINEAR SHARP TRAP: pin ON (linear injection lock to the sharp attractor A) + linear damping ψ←(1−' + _linLeak().toFixed(2) + ')ψ (derived from β for unit gain) instead of the nonlinear cap → the symbol held SHARP by PURELY LINEAR means (a driven-damped oscillator whose fixed point sits at A — linear holography, not self-focusing)'} · REPLICATED (eH-affecting)`); }
-      else if (e.mode === 'turbo') { if (_turboOn && !e.amp && _gpu) _tbSyncAll();   // turning OFF: read back every living texture so the CPU engine resumes from current bytes
+      else if (e.mode === 'turbo') { if (_turboOn && !e.amp && _gpu) { _tbSyncAll();   // turning OFF: read back every living texture so the CPU engine resumes from current bytes
+          _filmStep = [-1, -1, -1, -1]; if (_gpu.dropFilm) for (let fi = 0; fi < 4; fi++) _gpu.dropFilm(fi); }   // and RETIRE the films: they are turbo-only captures, stale the moment the CPU executor takes over
+        // TURNING ON: the GPU textures may still hold bytes from a PREVIOUS turbo session, and _tbAdvanceAll only
+        //   primes when `_tbTexStep[i] < 0 || _texDirty`. Without invalidating here, a slot with a leftover
+        //   _tbTexStep >= 0 SKIPS the prime and the GPU steps from a stale texture instead of the CPU's current
+        //   descBase — so turbo starts from different bytes on each peer ("different fieldH from the start",
+        //   reported 2026-07-31). Force a re-prime from the canonical CPU state on every turbo entry.
+        if (!_turboOn && e.amp) { for (let ti2 = 0; ti2 < 4; ti2++) { _tbTexStep[ti2] = -1; const st = _sb.slots[ti2]; if (st) st._texDirty = true; } }
         _turboOn = !!e.amp; _tbCur = -1;
         console.log(`[MU1] ⚡turbo ${_turboOn ? 'ON — the GPU executes the U1 ENGINE STEP (same five operators, same f32 grain, batched per Q block; array-in/array-out — no field-mode semantics). REPLICATED: every peer switches executor at this shared step. Caveat, declared: GPU f32 pipelines round differently across VENDORS — cross-device eH needs the CPU executor (universal); turbo trades that for ~10× speed.' : 'OFF — the universal CPU f64 executor resumes'} @step=${k}`); }
       else if (e.mode === 'coevo') { _coevoOn = !!e.amp; console.log(`[MU1] ⟲coevo ${_coevoOn ? 'ON' : 'OFF'} @step=${_E.solSteps} — the Einstein loop (matter throttles its own transport)`); }
@@ -539,6 +611,14 @@ function makeMediumU1Renderer(core) {
       //   shared step, occlude is deterministic (mode/frac/block/seed stamped), and the damaged plate bytes ride the
       //   snapshot to joiners (regH hashes plate DOP not p-bytes → identical-damage-at-shared-step keeps peers in
       //   lockstep; the corruption is in the shipped plate, not a per-peer read). gx = plate index (−1 = the last).
+      // pinbeta — THE GLOBAL PIN STRENGTH, replicated (2026-08-03). See mu1.pin: _pinBeta scales ψ += β·att at every
+      //   step of every slot, so it is PHYSICS. It used to be set locally with no event and was absent from the join
+      //   snapshot, so two peers could run the pin at different strengths (measured: 0.25 vs 0.30) → a differently
+      //   scaled COMPLEX injection each step → a permanent GLOBAL PHASE offset that the cap could not remove
+      //   (amplitude restored exactly, phase not). regH did not catch it: regH covers _lensOp[].beta, not this
+      //   multiplier. Stamped like every other physics dial so it lands at the identical shared step.
+      else if (e.mode === 'pinbeta') { const _pb0 = _pinBeta; _pinBeta = Math.max(0, Math.min(1, +e.amp || 0));
+        console.log(`[MU1-PIN] β ${_pb0.toFixed(2)} → ${_pinBeta.toFixed(2)} @step=${k} (REPLICATED — lands at this shared step on every peer; it scales the per-step pin injection ψ+=β·att, so an unshared β is a permanent global-phase fork with |ψ|² untouched)`); }
       else if (e.mode === 'occludebank') { if (!_plates.length) { console.log('[MU1-BANK⊘] no plates to damage (store a moment first)'); return; }
         const idx = (e.gx | 0) >= 0 ? Math.min(e.gx | 0, _plates.length - 1) : _plates.length - 1;
         // SEED: a DETERMINISTIC per-press mask, derived from the SHARED drain step k via the KWE PRNG (makeRng) — NOT
@@ -586,7 +666,8 @@ function makeMediumU1Renderer(core) {
       //   (2) FINITE WAIST — use 'lightpts' (Gaussian σ=5, below the ring's kKnee), not hard 3×3 dots (deltas above
       //       the knee, which sit in the dispersive band and can only decohere).
       //   Replicated: the pin target is in regH, and every slot's att regenerates from obj.
-      else if (e.mode === 'lensobj') { const nm = String(e.obj || '');
+      else if (e.mode === 'lensobj') { if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncAll(); }   // TURBO SYNC (audit 2026-07-31): this handler READS field/leash state that feeds regH. Under turbo the GPU holds truth, so an unsynced read takes bytes from a peer-local step and forks. Every state-reading verb must advance+sync at its stamped k first — the store-verb pattern, applied uniformly.
+      const nm = String(e.obj || '');
         if (!_PROBE_OBJS.includes(nm)) { console.log(`[MU1-OBJ] unknown object '${nm}' — one of: ${_PROBE_OBJS.join(', ')}`); return; }
         _lensObj = nm; _baseCache.clear(); _rebuildBase();   // drop the cached probe fields so every att regenerates from the NEW object
         for (const s2 of _sb.slots) if (s2.descAttG) s2.descAttG.obj = nm;   // living slots re-pin to the new geometry
@@ -604,7 +685,7 @@ function makeMediumU1Renderer(core) {
         const _door = (s2, att2) => { if (!att2 || !s2.descBase) return;
           const nb2 = Float64Array.from(Float32Array.from(att2)); let e2 = 0; for (let j = 0; j < nb2.length; j++) e2 += nb2[j] * nb2[j];
           s2.descBase = nb2; s2.descE0 = e2 || 1; s2._engE = e2; s2.descDisp = Float64Array.from(nb2); s2._texDirty = true;
-          s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; s2._digestLeft = 0; };   // an object switch retires any ψATT hold (the new probe is the pin again)
+          s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._attCache = null; s2._shiftCache = null; s2._holdBytesKey = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; s2._digestLeft = 0; };   // an object switch retires any ψATT hold (the new probe is the pin again)
         if (W.desc && W.descBase && _regAttC) { _door(W, _regAttC); W.sl2 = null; }
         for (let li2 = 1; li2 <= 3; li2++) { const s2 = _sb.slots[li2]; if (!s2.desc || !s2.descLive || !s2.descAttG) continue;
           const att2 = _plateAtt(s2.descAttG.dop, s2.descPos, nm); if (att2) { s2.descAtt = att2; _door(s2, att2); } }
@@ -618,11 +699,37 @@ function makeMediumU1Renderer(core) {
       //   law the letter's identity lives ABOVE kKnee (its sharp strokes ARE the symbol in this medium's optics), so
       //   a field-borne symbol keeps sharp support, honestly. Replicated: digest countdown + adoption happen at shared
       //   bars; the hold rides the snapshot.
-      else if (e.mode === 'selfatt') { const bars = Math.max(0, Math.min(64, Math.round(e.amp || 0)));
-        if (!bars) { for (const s2 of _sb.slots) { s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; s2._digestLeft = 0; }
+      else if (e.mode === 'selfatt') { if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncAll(); }   // TURBO SYNC (audit 2026-07-31): this handler READS field/leash state that feeds regH. Under turbo the GPU holds truth, so an unsynced read takes bytes from a peer-local step and forks. Every state-reading verb must advance+sync at its stamped k first — the store-verb pattern, applied uniformly.
+      const bars = Math.max(0, Math.min(64, Math.round(e.amp || 0)));
+        if (!bars) { for (const s2 of _sb.slots) { s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._attCache = null; s2._shiftCache = null; s2._holdBytesKey = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; s2._digestLeft = 0; }
           console.log(`[MU1-ψATT] OFF @step=${_E.solSteps} — back to the probe pin (the operator re-asserts the injected symbol)`); return; }
-        let n2 = 0; for (const s2 of _sb.slots) if (s2.desc && s2.descBase && (s2 === W || s2.descLive)) { s2._digestLeft = bars; s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; n2++; }
+        let n2 = 0; for (const s2 of _sb.slots) if (s2.desc && s2.descBase && (s2 === W || s2.descLive)) { s2._digestLeft = bars; s2._attHold = null; s2._attHoldPos = null; s2._holdPhi0 = 0; s2._holdSl2 = null; s2._attCache = null; s2._shiftCache = null; s2._holdBytesKey = null; s2._holdRef = null; s2._holdRefBar = -1; s2._holdRefPrev = null; s2._holdRefN = 0; s2._holdRefStuck = false; n2++; }
         console.log(`[MU1-ψATT] DIGEST ${bars} bars → ADOPT @step=${_E.solSteps} for ${n2} living slot(s): the pin lifts, the medium digests the injected pixels, then the FIELD'S OWN state becomes the attractor (rolled by the leash, rotated by the register φ/ω — set ω≠0 via lensTau for living precession). The symbol is then carried by MATTER, not by the operator.`); }
+      // synthspec — SYNTHESISE → ADOPT, with no probe, no injection and no digest. Takes the slot's CURRENT state,
+      //   keeps its N strongest modes below kcut (_specSynth), writes THAT back as descBase, and adopts it directly as
+      //   the pin target. The digest phase exists only to disperse INJECTED PIXELS — a synthesised field never had any,
+      //   so there is nothing to digest and the door is immediate. Pixels are the render OUTPUT, never the input.
+      //   descE0 is recomputed from the synthesised field itself (the _door discipline): inheriting a stale budget
+      //   would let the cap rescale the state on its first step and quietly change what was adopted.
+      //   Only N + kfrac ride the wire — the recipe is DERIVED from replicated bytes, so every peer computes it.
+      //   Verified at the bench: a synthesised state is a legitimate attractor (pinned to itself, 24 bars, it drifts
+      //   −1.8% at N=32/128 and −0.6% at N=512 off its own start — it settles, it does not run away or collapse).
+      else if (e.mode === 'synthspec') { const N = Math.max(0, Math.min(4096, Math.round(e.amp || 0)));
+        const kf = Math.max(0.05, Math.min(4, (e.gx | 0) ? (e.gx | 0) / 100 : 0.5));   // gx = kcut as a PERCENT of kKnee (integer on the wire); default 0.5 — the measured identity floor is 0.35–0.5
+        if (!N) { console.log(`[MU1-SYNTH] N=0 — nothing synthesised (pass a mode count; 64–128 is the measured knee of the shape/size curve)`); return; }
+        const kc = _kKnee() * kf; let n3 = 0;
+        for (let si5 = 0; si5 < _sb.slots.length; si5++) { const s5 = _sb.slots[si5];
+          if (!s5.desc || !s5.descBase || !(s5 === W || s5.descLive)) continue;
+          if (_turboOn && _gpu && !(si5 === 0 && _shardXspace)) { _tbAdvanceAll(e.k != null ? e.k : _E.solSteps); _tbSyncSlot(si5); }   // read the slot's bytes AT THE STAMPED STEP (the store-verb pattern) — else peers synthesise from different states
+          const r = _specSynth(s5.descBase, N, kc); if (!r) continue;
+          let e5 = 0; for (let j = 0; j < r.field.length; j++) e5 += r.field[j] * r.field[j];
+          s5.descBase = r.field; s5.descE0 = e5 || 1; s5._engE = e5; s5.descDisp = Float64Array.from(r.field); s5._texDirty = true;
+          s5._attHold = Float64Array.from(r.field); s5._attHoldPos = [s5.leash.state.gx, s5.leash.state.gy]; s5._holdKeyN = (s5._holdKeyN | 0) + 1; s5._attCache = null; s5._shiftCache = null; s5._holdBytesKey = null;   // ADOPT IMMEDIATELY — no digest: there are no injected pixels to disperse
+          s5._holdPhi0 = lensU1.angle(_lensOp[si5]); s5._digestLeft = 0;
+          s5._holdSl2 = _mkSl2(s5._attHold); s5._holdRef = null; s5._holdRefBar = (_E.frameBar | 0) + _HOLD_MIN; s5._holdRefPrev = null; s5._holdRefN = 0; s5._holdRefStuck = false;
+          if (si5 === 0) W.sl2 = null;
+          n3++; if (si5 === 0 || n3 === 1) console.log(`[MU1-SYNTH] ${SLOTN[si5]}: ${r.modes}/${r.pool} modes below k=${kc.toFixed(3)} (${(100 * kf).toFixed(0)}% of kKnee) → ${r.modes * 16} B of recipe vs ${s5.descBase.length * 4} B of f32 field (${(s5.descBase.length * 4 / (r.modes * 16)).toFixed(0)}× smaller)`); }
+        console.log(`[MU1-SYNTH] SYNTHESISE→ADOPT @step=${_E.solSteps} on ${n3} slot(s): the field was rebuilt from its own ${N} strongest low-k modes and adopted DIRECTLY as the pin target — no probe, no injection, no digest. The state is now medium-native description (Fourier IS this medium's eigenbasis: λ(k) is diagonal in it), not a foreign generator and not an opaque byte-copy. Set ω≠0 (mu1.lensTau) for living precession; mu1.holdId() to verify identity.`); }
       else if (e.mode === 'pinhold') { _pinHold = Math.max(0, Math.min(4000, Math.round(e.amp || 0)));
         console.log(`[MU1-PINHOLD] ⌛ pin hold = ${_pinHold ? `${_pinHold} steps — DECOHERENCE EXPERIMENT: the drive fades and the soliton loses coherence, degenerating into per-cell SPECKLE (no symbol, no interference fringes). The pin is the medium's coherence source, not a texture painted over it. Set 0 to restore the live soliton.` : '0 = DRIVE FOREVER (the default and the right setting: the lock is what sustains the coherent soliton AND its interference)'} @step=${_E.solSteps}`); }
       else if (e.mode === 'virtt') { const nt = Math.max(1, Math.min(500, Math.round(e.amp || 16))); _VIRT_T = nt;
@@ -800,20 +907,82 @@ function makeMediumU1Renderer(core) {
     //    only ~7 uniforms — no eye-buffer round-trip, no readback, no PDE. The field "moves itself": with ω and k set
     //    the phase fronts flow through the envelope at ω/|k| (the travelling wave), transport glides via the leash
     //    law — all of it pure consequence of the register, none of it simulated, none of it faked.
+    let _filmOn = true, _filmStep = [-1, -1, -1, -1];   // texture-direct display film (see filmCapture): on by default; mu1.film(false) falls back to the readback path for A/B
     let _descTexKey = null, _descPeak = 1;   // which base is on the GPU + its peak (upload/measure once per recall)
     const _drawDesc = (cell, si) => { const s = _sb.slots[si]; if (!s?.descBase || !_gpu || !_gpuCanvas) return false;
       const P = _descPose(si); if (!P) return false;
       // display source = the BAR-GRID buffer when the register engine is live (descDisp — the shared film;
       // the live descBase is mid-bar at a peer-local frame end and would paint DIFFERENT steps on peers)
-      const baseArr = s.descDisp || s.descBase;
+      // FRAME-LOCK takes precedence over every other display source: it is the "identical shared index ⇒ identical
+      //   pixels" guarantee, and it must NOT be overridden by descDisp (peer-local readback step) or by the GPU film
+      //   (captured on the peer-local _dispTick). Falls through to the normal sources when locking is off or no
+      //   shared-bar capture exists yet.
+      const _lockArr = (_frameLock && _dispDesc[si] && _dispDescK[si] >= 0) ? _dispDesc[si] : null;
+      const baseArr = _lockArr || s.descDisp || s.descBase;
       // upload only when the buffer OBJECT changed (descDisp is rebuilt each refresh → new identity), but ALWAYS
       // recompute the peak the colormap normalizes by: it is a property of the CONTENT, and a stale peak crushes or
       // blows out the visible dynamic range (worst for SPARSE targets, whose peak is one small spot that moves).
-      if (_descTexKey !== baseArr) { _gpu.setDescBase(baseArr); _descTexKey = baseArr; }
-      _descPeak = _peakSq(baseArr);
+      // TEXTURE-DIRECT: when a film exists for this slot, renderDescField samples it (and its GPU-reduced peak)
+      //   directly — no setDescBase upload, no _peakSq scan of a CPU array, and nothing was read back to build it.
+      // _turboOn is REQUIRED: the film is captured only in the turbo branch, so in CPU mode any existing film is a
+      //   STALE leftover from before the switch — rendering it would freeze the picture (the same regression as the
+      //   descDisp gate below). CPU mode therefore always falls back to descDisp, which its own path keeps current.
+      // NOTE (2026-08-03): do NOT add `&& s.descLive` here. The outCell label reads "𝔸 PREDICTIVE slot
+      //   (descriptor-only, 0 grid steps)" for ANY slot with `desc` set (see the label at the bottom of the render)
+      //   — it does NOT mean descLive is false. A recalled V is BOTH desc and descLive, its texture advances every
+      //   step, and gating the film on descLive there merely drops the smooth display source for no reason.
+      const _useFilm = !_lockArr && _filmOn && _turboOn && _gpu.hasFilm && _gpu.hasFilm(si) && _filmStep[si] >= 0;   // frame-lock overrides the film: the film is captured on the PEER-LOCAL _dispTick, the lock film at the SHARED bar
+      if (!_useFilm) { if (_descTexKey !== baseArr) { _gpu.setDescBase(baseArr); _descTexKey = baseArr; }
+        _descPeak = _peakSq(baseArr); }
       const op = _lensOp[si], px = (s.descPos?.[0] ?? 0), py = (s.descPos?.[1] ?? 0);
+      if (_paintDetEvery && (_E.frameBar % _paintDetEvery) === 0 && _paintDetBar !== _E.frameBar + si * 0.1) {
+        _paintDetBar = _E.frameBar + si * 0.1;
+        const _sl = _sb.slots[si];
+        // fieldH MUST HASH WHAT IS ACTUALLY PAINTED (2026-08-01). It hashed `baseArr` = _lockArr || descDisp ||
+        //   descBase — but when the FILM is active the render samples the GPU film texture and descDisp is
+        //   deliberately NOT refreshed (_skipCopy). So fieldH was reporting a stale buffer that nothing paints, on
+        //   BOTH peers, which made every cross-peer comparison meaningless while the film was on. Hash the film when
+        //   the film is the source; hash baseArr otherwise. `src` names which, so the column is never ambiguous.
+        let _paintH = null, _paintSrc = 'baseArr';
+        if (_useFilm) { try { _gpu.selectEyeSlot(si); _paintH = _hashField(_gpu.readEyePsi()); _paintSrc = 'FILM(gpu)'; _gpu.selectEyeSlot(null); } catch (e) { _paintH = null; } }
+        if (_paintH == null) _paintH = _hashField(baseArr);
+        console.log(`[PAINT] bar=${_E.frameBar} ${SLOTN[si]} · fieldH=${_paintH} (src=${_paintSrc}) · baseIs=${_sl?.descDisp === baseArr ? 'descDisp' : _sl?.descBase === baseArr ? 'descBase' : 'other'} · regH=${_regH()} · solStep=${_E.solSteps}`
+          + ` · OP β=${(op.beta ?? 1).toPrecision(17)} φ=${(op.phase || 0).toPrecision(17)} prec=${(op.prec || 0).toPrecision(17)} ω=${(op.omega || 0).toPrecision(17)}`
+          + ` · POSE dphi=${P.dphi.toPrecision(17)} ox=${P.ox.toPrecision(17)} oy=${P.oy.toPrecision(17)} descPos=[${px},${py}] descPhi0=${(_sl?.descPhi0 || 0).toPrecision(17)} descBar=${_sl?.descBar | 0}/${Math.floor((_E.solSteps | 0) / 21)}${(_sl?.descBar | 0) > Math.floor((_E.solSteps | 0) / 21) ? ' *** descBar AHEAD of the current bar → nbD≤0 → φ CAN NEVER TICK AGAIN ***' : ''}${(si > 0 && _sl?.descLive && !(op.omega)) ? ' *** ω=0 on a LIVING slot → the bar tick is gated `if (omega)` so φ CAN NEVER ADVANCE: compare ω with the other peer (a replay must keep the LIVE ω, not the plate\'s stored one) ***' : ''}`
+          + ` · att=${_sl?._attHold ? 'ψATT' : _sl?.descAtt ? 'plate' : 'probe'} attH=${_sl?._attHold ? _hashField(_sl._attHold) : '—'} descAttH=${_sl?.descAtt ? _hashField(_sl.descAtt) : '—'} e0=${(_sl?.descE0 ?? 0).toPrecision(17)}`
+          + (() => { // THE FIELD'S OWN GLOBAL PHASE, relative to its pin target — the quantity the screenshots show.
+            //   Two peers whose ring pattern is RIGIDLY ROTATED differ by a global phase, which no other column
+            //   measures: regH, descPhi0, ∠ and the hold hash can all match while the FIELD sits at a different
+            //   absolute phase. argPin = arg⟨att, ψ⟩ (the measured lock offset, the same inner product the XY law
+            //   uses); |ψ|² and Σψ give a phase-free amplitude check, so a rotation-only difference is separable
+            //   from a genuine content difference: SAME |ψ|² + DIFFERENT argPin ⇒ pure global rotation.
+            // THESE SCALARS MUST HASH WHAT fieldH HASHES (2026-08-03). They read `baseArr` = descDisp — but when the
+            //   FILM is the render source, _skipCopy deliberately STOPS refreshing descDisp, so descDisp is a stale
+            //   buffer that nothing paints. That is the exact defect the note above records as fixed for fieldH and
+            //   it was never fixed HERE: |ψ|²/Σψ/argPin were frozen constants (identical on every bar) while fieldH
+            //   and nowH moved every bar, on BOTH peers. Any cross-peer verdict drawn from them while the film was
+            //   on was reading two stale buffers, not the painted state — which is precisely how a phase "fork" can
+            //   appear that no other column corroborates. Use the SAME source fieldH used: the film when the film
+            //   is the source, baseArr otherwise. src= already names which, so the numbers are never ambiguous.
+            let f = baseArr;
+            if (_useFilm) { try { _gpu.selectEyeSlot(si); f = _gpu.readEyePsi(); _gpu.selectEyeSlot(null); } catch (e2) { f = baseArr; } }
+            let e = 0, sr = 0, si2 = 0; for (let j = 0; j < f.length; j += 2) { e += f[j] * f[j] + f[j + 1] * f[j + 1]; sr += f[j]; si2 += f[j + 1]; }
+            let ap = null; const a2 = _sl?.descAtt || (si === 0 ? _regAttC : null);
+            if (a2 && a2.length === f.length) { let rr = 0, ii = 0;
+              for (let j = 0; j < f.length; j += 2) { rr += a2[j] * f[j] + a2[j + 1] * f[j + 1]; ii += a2[j] * f[j + 1] - a2[j + 1] * f[j]; }
+              ap = Math.atan2(ii, rr); }
+            return ` · FIELD(${_useFilm ? 'film' : 'baseArr'}) |ψ|²=${e.toPrecision(17)} Σψ=${Math.atan2(si2, sr).toPrecision(17)} argPin=${ap == null ? '—' : ap.toPrecision(17)}`; })()
+          // SHIPPED vs nowH: what this peer last SHIPPED in a snapshot vs what descBase holds now. For a LIVING slot
+          //   (descLive — a recalled 𝔸-slot) the register engine steps it every frame, so nowH SHOULD advance and a
+          //   difference here is normal, not a defect. The old text asserted "a desc slot is NOT stepped (0 grid
+          //   steps), so only a DOOR can change it" — true of a PARKED descriptor, false of a living recall, and it
+          //   sent several rounds of debugging after correct behaviour. Only flag the genuinely suspicious case.
+          + ((_lastShipH[si] && _sl?.descBase) ? ` · SHIPPED=${_lastShipH[si]} nowH=${_hashField(_sl.descBase)}${_lastShipH[si] === _hashField(_sl.descBase) ? ' (unchanged)' : (_sl.descLive ? ' (advancing — LIVING slot, the engine steps it every frame: expected)' : ' *** PARKED desc slot REWRITTEN — a non-living descriptor runs 0 grid steps, so only a DOOR (lensobj/wabs/platelive/recall/damage re-lift) can change it ***')}` : '')
+          + ` · CAP=${(_gpu && _gpu.applyEyeEnergyCapNS) ? 'NS(f32 shader scale)' : 'RB(f64 cpu scale)'}`
+          + ` · TURBO on=${_turboOn ? 1 : 0} tbCur=${_tbCur} texStep=[${_tbTexStep.join(',')}] texDirty=${_sl?._texDirty ? 1 : 0} texSynced=${_sl?._texStepSynced ?? '—'} filmStep=${_filmStep[si]}`
+          + ` · frameLock=${_frameLock ? _frameLockGrid : 'off'}`); }
       _gpu.renderDescField({ ox: P.ox, oy: P.oy, cx: GRID / 2 + px + P.ox, cy: GRID / 2 + py + P.oy,
-        kx: op.kx || 0, ky: op.ky || 0, phi: P.dphi, ampView: _ampFor(true) ? 1 : 0 }, _descPeak * _GLOW);
+        kx: op.kx || 0, ky: op.ky || 0, phi: P.dphi, ampView: _ampFor(true) ? 1 : 0, filmId: _useFilm ? si : null, peakGain: _GLOW }, _descPeak * _GLOW);   // peakGain = the same _GLOW the legacy path folds into smoothMax, so film and readback paths normalize IDENTICALLY
       _blit(cell); return true; };
 
     // ── SLOT VIEWS (S5): "eye/medium scopes" are re-derived as slot VIEWS. There is ONE view slot the observer looks
@@ -871,18 +1040,45 @@ function makeMediumU1Renderer(core) {
     // _coupledAtt (cross-slot attractor/Kuramoto coupling) EXTRACTED to medium-core.js (bound above).
     // upload descBase → the slot's resident texture (only when the CPU side was mutated externally: a verb, a
     // fresh recall, or first prime); after this the texture and descBase agree at _tbCur.
-    const _tbPrime = (i) => { const sl = _sb.slots[i]; _gpu.selectEyeSlot(i);
-      _gpu.setEyePsi(sl.descBase); _gpu.commitEyeSlot(i); _gpu.markEyeSlotPrimed(i); _tbTexStep[i] = _tbCur; sl._texDirty = false; };
+    const _tbPrime = (i) => { const sl = _sb.slots[i]; _filmStep[i] = -1; if (_gpu.dropFilm) _gpu.dropFilm(i);   // the CPU side just replaced the texture — any film of the OLD content is stale
+      _gpu.selectEyeSlot(i);
+      // BOTH halves (2026-08-03): a prime replaces the slot's CPU-side truth, so leaving the opposite half holding
+      //   older content lets any later parity flip resurrect bytes that are no longer the state. Same reasoning as
+      //   the join prime — see the setEyePsiBoth note in _restoreSnap. Makes the primed state parity-independent.
+      (_gpu.setEyePsiBoth || _gpu.setEyePsi).call(_gpu, sl.descBase); _gpu.commitEyeSlot(i); _gpu.markEyeSlotPrimed(i); _tbTexStep[i] = _tbCur; sl._texDirty = false;
+      if (_primeTrace > 0) { _primeTrace--;
+        // PRIME RECEIPT: what went UP to the GPU, and what comes straight back DOWN. If up != down the upload did not
+        //   land where the stepper reads (wrong slot selected, wrong parity, or the texture is not the stepped one) —
+        //   which on a join means turbo steps the joiner's PRE-JOIN texture while the CPU side holds the leader's bytes.
+        let back = '—'; try { back = _hashField(_gpu.readEyePsi()); } catch (e) {}
+        console.log(`[PRIME] ${SLOTN[i]} · up=${_hashField(sl.descBase)} · readback=${back} · tbCur=${_tbCur} texStep=${_tbTexStep[i]} · ${back === _hashField(sl.descBase) ? 'MATCH — the GPU holds the restored bytes' : '*** MISMATCH — the upload did not land in the stepped texture ***'}`); } };
     // sync one slot's descBase FROM its texture (readback) — the only place a per-bar readback can happen, and
     // only when a consumer calls it. Idempotent: no-op if descBase already current at the texture's step.
-    const _tbSyncSlot = (i) => { const sl = _sb.slots[i]; if (!_tbLive(i) || _tbTexStep[i] < 0) return;
+    const _tbSyncSlot = (i) => { const sl = _sb.slots[i];
+      if (_syncTraceLeft > 0 && i === _syncTraceSlot) { _syncTraceLeft--;
+        // WHY DOES ONE PEER'S SYNC LAND A Q-BLOCK LATER? Log the DECISION, not just the result: live/texStep gate,
+        //   the early-out comparison, and the caller. Two peers with identical cursors that nonetheless sync at
+        //   different steps must differ in WHICH CALL reaches here first within the frame.
+        const why = !_tbLive(i) ? 'SKIP notLive' : _tbTexStep[i] < 0 ? 'SKIP texStep<0' : (sl._texStepSynced === _tbTexStep[i]) ? 'SKIP already-synced' : 'SYNC';
+        const st = (new Error()).stack.split('\n')[2] || '?';
+        const ln = (st.match(/medium-u1\.js:(\d+)/) || [])[1] || '?';
+        console.log(`[SYNCDEC] ${SLOTN[i]} · ${why} · texStep=${_tbTexStep[i]} texSynced=${sl._texStepSynced ?? '—'} tbCur=${_tbCur} solSteps=${_E.solSteps} · caller=line${ln}`); }
+      if (!_tbLive(i) || _tbTexStep[i] < 0) return;
       if (sl._texStepSynced === _tbTexStep[i]) return;
+      if (_rbTrace) { _rbN[i] = (_rbN[i] | 0) + 1;   // WHO is forcing this readback? (peer-local diagnostic, off by default)
+        const fr = (new Error()).stack.split('\n').slice(2, 6).map((x) => x.trim().replace(/^at\s+/, ''));
+        const nm = (x) => { const mm = x.match(/^([^\s(]+)/); const ln = x.match(/medium-u1\.js:(\d+)/); return (mm ? mm[1] : '?') + (ln ? ':' + ln[1] : ''); };
+        const key = fr.slice(0, 3).map(nm).join(' < ');   // 3 frames deep: _tbSyncAll alone never says WHO called IT
+        _rbSrc[key] = (_rbSrc[key] | 0) + 1; }
       _gpu.selectEyeSlot(i); sl.descBase = _gpu.readEyePsi();
       let eT = 0; for (let j = 0; j < sl.descBase.length; j++) eT += sl.descBase[j] * sl.descBase[j]; sl._engE = eT;
       sl._texStepSynced = _tbTexStep[i]; };
     const _tbSyncAll = () => { for (let i = 0; i < 4; i++) _tbSyncSlot(i); };
-    // advance every living slot's RESIDENT texture from _tbCur to upTo — in place, no readback (except the ring
-    // swap's carry, unavoidable). descBase is NOT touched here; consumers sync on demand.
+    // READBACK TRACE (mu1.rbTrace()): readPixels is a hard GPU pipeline stall — with two peers on one GPU each stall
+    //   drains the SHARED queue, so the cost is superlinear in peers. This counts who actually forces one.
+    let _rbTrace = false, _rbN = [0, 0, 0, 0], _rbSrc = {}, _rbT0 = 0;
+    // advance every living slot's RESIDENT texture from _tbCur to upTo — in place, NO readback at all (the ring
+    // swap's carry was removed 2026-07-30: setRings does not touch the eye texture, so nothing needed carrying). descBase is NOT touched here; consumers sync on demand.
     const _tbAdvanceAll = (upTo, skipSlot = -1) => { if (!_gpu || _tbCur < 0 || _tbCur >= upTo) return;
       const cur = _tbCur;
       // COUPLING SNAPSHOT (determinism): if any edge is set, freeze every coupled slot's field AT cur BEFORE
@@ -898,17 +1094,63 @@ function makeMediumU1Renderer(core) {
         else _gpu.selectEyeSlot(si4);
         let ring = _tbFrameRing; for (const ks of _kernApplied) if (ks.atStep <= cur && ks.r?.length) ring = ks;
         if (ring && ring.r?.length && _tbFrameRingCur !== ring) { _gpu.setRings(ring.r, ring.w, ring.o); _tbFrameRingCur = ring; }
+        // att4 IS CAPTURED ONCE PER CALL AND HELD FOR THE WHOLE BLOCK — and this function is invoked at PEER-LOCAL
+        //   moments (Q boundaries, verb handlers, snapshots, display ticks), while sl.descAtt is REBUILT in the BAR
+        //   loop (once per 21 steps, via _selfHold). So the split of a bar's 21 steps into blocks, and therefore HOW
+        //   MANY steps are pinned against the pre-refresh target versus the post-refresh one, is frame-cadence
+        //   dependent. attH matching between peers proves only that the BYTES agree — never that the SCHEDULE did.
+        //   Why that shows up as a pure ROTATION: applyEyeSuperpose adds β·att (a COMPLEX vector) into ψ every step,
+        //   so injecting the refreshed target one step earlier/later tilts ψ's global phase, and the cap (a real
+        //   scale) then restores the amplitude exactly — leaving |ψ|² equal to float noise and argPin permanently
+        //   offset. Measured 2026-08-03: [SNAP-PHASE]/[JOIN-PHASE] agree to 13 significant figures at the join
+        //   (baseH identical, so the payload is faithful), yet [PAINT] argPin drifts to 0.009–0.036 rad apart while
+        //   |ψ|² stays within 0.23× the f32 floor. attCur names the step the held target was captured at, so two
+        //   peers' [TBSTEP] lines at equal cur= reveal a schedule difference the attH column cannot.
+        const _attCapK = cur;
         const att4 = _coupledAtt(si4, si4 === 0 ? _regAttC : sl.descAtt, _coupSnap); if (att4) _gpu.setObjField(att4);
         const b4base = 0.15 * (_lensOp[si4].beta || 1);
         for (let kk2 = cur; kk2 < upTo; kk2++) {
           const b4 = si4 === 0 ? b4base : b4base * _pinFac(sl, kk2);   // ⌛pinHold fades per STEP → recompute inside the loop so turbo matches the CPU executor exactly (W never fades)
-          for (const ks of _kernApplied) if (ks.atStep === kk2 && ks.r?.length && _tbFrameRingCur !== ks) { const qv = _gpu.readEyePsi(); _gpu.setRings(ks.r, ks.w, ks.o); _gpu.setEyePsi(qv); _tbFrameRingCur = ks; if (att4) _gpu.setObjField(att4); }
+          // RING SWAP, NO CARRY (2026-07-30): this used to do readEyePsi → setRings → setEyePsi, a full readback+
+          //   re-upload INSIDE the per-step loop, per living slot, every time the fractal clock re-rang the kernel.
+          //   Profiled at 46.3% of frame time (_tbAdvanceAll, 2967ms) once the display path went texture-direct.
+          //   The carry is NOT needed: setRings writes only the ring/meta textures and _nRings — it never touches
+          //   the eye ping-pong or any framebuffer (verified in ifs-gpu.js), so the resident field is untouched by
+          //   a ring swap. Dropping the round-trip changes no bytes; it removes a pipeline stall per swap per slot.
+          for (const ks of _kernApplied) if (ks.atStep === kk2 && ks.r?.length && _tbFrameRingCur !== ks) { _gpu.setRings(ks.r, ks.w, ks.o); _tbFrameRingCur = ks; if (att4) _gpu.setObjField(att4); }
           if (att4 && _linearMode !== 1 && b4 > 0) _gpu.applyEyeSuperpose(b4);   // pin ON in full + linear TRAP (mode 2); OFF only in free-linear (mode 1), or once pinHold has faded to 0
           _gpu.stepEyeN(1, DT);   // the LINEAR spectral step (gate D) always runs
           if (!_linearMode) { _gpu.applyEyeNlSpm(-_SOL_GAMMA, _SOL_ISAT, DT); (_gpu.applyEyeEnergyCapNS || _gpu.applyEyeEnergyCap).call(_gpu, sl.descE0); }   // nonlinear SPM+cap: full medium only
           else if (_linearMode === 2 && _gpu.applyEyeScale) _gpu.applyEyeScale(1 - _linLeak());   // linear SHARP TRAP: LINEAR damping balances the pin (driven-damped → sharp fixed point)
           _tbSteps++; }
-        _gpu.commitEyeSlot(si4); _tbTexStep[si4] = upTo; }
+        _gpu.commitEyeSlot(si4); _tbTexStep[si4] = upTo;
+        if (_tbTraceLeft > 0 && si4 === _tbTraceSlot && (_tbTraceFrom < 0 || upTo > _tbTraceFrom)) { _tbTraceLeft--;   // _tbTraceFrom: a SHARED start step, so both consoles log the SAME window (an unaligned window has no comparable line — see tbTrace)
+          // TURBO STEP RECEIPT: hash the TEXTURE after the block (readback is diagnostic-only, off by default).
+          //   joiner hash CONSTANT while steps climb ⇒ the GPU stepped but the result never reached descBase
+          //   (parity/prime bookkeeping) — hash MOVING but != leader ⇒ genuine divergence in the stepping itself.
+          // READ THIS AT EQUAL cur=, NEVER BY LINE POSITION (2026-08-03). The trace starts when the VERB IS TYPED,
+          //   which is a different wall-clock moment in each console — so two peers' traces cover DIFFERENT step
+          //   windows of the same trajectory, and the first lines can look "a constant N steps apart" while nothing
+          //   is wrong. Match lines by the cur= value; only then are texH/attH comparable.
+          // attH = THE PIN TARGET THIS WHOLE BLOCK WAS STEPPED AGAINST. It is captured ONCE per advance (att4,
+          //   above) and held for all `upTo−cur` steps, but for a ψATT slot descAtt is rebuilt only in the BAR loop
+          //   (once per 21 steps) while this runs every 7 — so WHICH refresh a given block sees depends on whether
+          //   the bar loop ran before or after it within the frame, which is frame-cadence (peer-local) ordering.
+          //   Same cur= + same texH-in + DIFFERENT attH ⇒ the peers pinned against targets from different refreshes:
+          //   the pin sets the field's GLOBAL PHASE while the cap fixes only amplitude, so that shows up downstream
+          //   as matched |ψ|² with a differing Σψ/argPin — the rotation seen on screen, not an amplitude fork.
+          // ringH = THE KERNEL THIS BLOCK PROPAGATED THROUGH — the last per-step input that is NOT verified across
+          //   peers anywhere in steady state ([SNAP-RING] checks it only at join). It is peer-local BY CONSTRUCTION:
+          //   `ring` starts at _tbFrameRing (= _E.ringCache captured at THIS PEER'S frame start) and is then
+          //   overridden by any _kernApplied entry with atStep <= cur — but _kernApplied is CLEARED EVERY FRAME.
+          //   So a fractal-clock swap recorded in frame N on one peer falls in frame N+1 on a peer whose frame
+          //   boundaries sit elsewhere: there it is already folded into _tbFrameRing and the replay loop adds
+          //   nothing, while the first peer replays it explicitly. Same steps, same field, DIFFERENT kernel for a
+          //   few blocks ⇒ a small permanent phase/shape difference with amplitude untouched (the cap renormalizes).
+          //   Same cur= + same texH-in + DIFFERENT ringH is the confirmation; kv is the swap count folded in so far.
+          let th = '—'; try { _gpu.selectEyeSlot(si4); th = _hashField(_gpu.readEyePsi()); } catch (e) {}
+          let rh = '—'; try { rh = ring?.r?.length ? _hashNums([].concat(Array.from(ring.r || []), Array.from(ring.w || []), ...((ring.o || []).map((t) => Array.from(t || []))))) : '—'; } catch (e) {}
+          console.log(`[TBSTEP] ${SLOTN[si4]} · cur=${cur}→${upTo} (${upTo - cur} steps) · texH=${th} · descBaseH=${sl.descBase ? _hashField(sl.descBase) : '—'} · attH=${att4 ? _hashField(att4) : '—'}${sl._attHold ? ' (ψATT)' : ''} attCapK=${_attCapK} attBar=${Math.floor(_attCapK / 21)} · ringH=${rh} ringSrc=${ring === _tbFrameRing ? 'frameStart' : 'kernApplied'} kernQ=${_kernApplied.length} ver=${_E.kernelVer} · primed=${_gpu.eyeSlotPrimed ? (_gpu.eyeSlotPrimed(si4) ? 1 : 0) : '?'} · texDirty=${sl._texDirty ? 1 : 0} · texSynced=${sl._texStepSynced ?? '—'}`); } }
       _gpu.selectEyeSlot(null);
       _tbCur = upTo; };
     // ── THE U1 SHARD EXECUTOR (rung 2 rewired to the register engine — the old path lived in the mirror
@@ -1002,7 +1244,7 @@ function makeMediumU1Renderer(core) {
         _vptPrev = { k: _E.solSteps, V: Vr, I: Ic, src, kv: _E.kernelVer,
           st: { r: Array.from(rc.r), w: Array.from(rc.w), o: rc.o.map((a) => Array.from(a)) } }; }   // stencil COPY (the node's live arrays get recomputed by the clock)
       return { H: hk + hn, hk, hn, V: Vr, E, src, vddX, Vd, I: Ic, Idot, tFoc, vMinP, tCol, rekey }; };
-    const _recordV = (phi, k) => { if (!W.field) return;
+    const _recordV = (phi, k) => { if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncSlot(0); }   // TURBO SYNC (audit): reads W.field to record V — an unsynced read captures a peer-local step if (!W.field) return;
       const rvOp = { mode: 'id', phase: phi || 0, beta: 1, omega: 0, prec: 0 };
       // V's held OPERATOR = W's current ATTRACTOR (the probe field at W's leash position — the operator W was living
       // UNDER), NOT W's field. This is the fix for "view:V frozen after record": holding V toward a copy of its OWN
@@ -1020,6 +1262,12 @@ function makeMediumU1Renderer(core) {
       V.leash.release();
       console.log(`[MU1-VIRT] recorded+lifted V atStep=${k}${phi ? ` · THROUGH LENS φ=${phi.toFixed(3)}` : ''} · lift fidelity vs W = ${_ampCorr(lift, W.field).toFixed(4)} (T=${_VIRT_T}, spectral) · V BORN (dual plate: field + descriptor ∠${lensU1.wrap(lensU1.angle(_lensOp[1])).toFixed(3)})`); };
     const _storeMoment = (k) => { if (!W.field) return;
+      // ψATT DETERMINISM (2026-07-31): under ψATT the plate's att is _liveAtt(0) = _xattBuild(op, Δpos, W._attHold),
+      //   which reads W's LEASH POSE (_holdDx/_holdDy) — and under turbo the leash/descBase may not be at the stamped
+      //   step yet when the drain runs. The ADOPTION site already advances+syncs for exactly this reason ("else peers
+      //   could capture different steps"); store needs the same guard, or two peers bank atts built from DIFFERENT
+      //   Δpos and the recalled pin target — which is in regH — forks. This is the store-verb pattern, applied.
+      if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncSlot(0); }
       // the hologram bank owns the plate math (f32-quantized ±T leg + descriptor copy + w0 dressed profile). The
       // f32 discipline (leader f64 vs joiner f32 splits recall's argmax at the margin) is the bank's f32:true default.
       const pl = _holo.store(W.field, _lensOp[0], { pos: [W.leash.state.gx, W.leash.state.gy], obj: _lensObj,
@@ -1032,8 +1280,23 @@ function makeMediumU1Renderer(core) {
       //   regenerated from dop+obj the way a probe att can — that is why `a` is normally omitted from the snapshot).
       pl.a = _liveAtt(0) || W.movAtt(W.leash.state.gx, W.leash.state.gy);
       pl.selfAtt = !!W._attHold;   // the moment was captured in FIELD-CARRIED form
+      // ── THE PHASE THE STORED HOLD CARRIES (2026-08-04) — the ψATT-only recall asymmetry ────────────────────────
+      //   Under ψATT `pl.a` is _liveAtt(0) = _xattBuild(_holdOp(0,W), dx, dy, W._attHold): W's hold ALREADY ROTATED
+      //   by (∠W_op − W._holdPhi0) and SHIFTED by W's pose. So the bytes CARRY a phase, and whoever later adopts
+      //   them as a hold must record THAT phase as its _holdPhi0 — _holdOp's contract is "rotate by the aging SINCE
+      //   the hold was captured, never by the absolute angle the bytes already carry".
+      //   Both recall paths instead set `_holdPhi0 = ∠_lensOp[ti]` — the SLOT'S OWN op at recall time, which is not
+      //   the angle these bytes were built with. The convention then subtracts the wrong reference, and the recalled
+      //   slot chases a hold rotated by (∠V_now − ∠V_recall) layered on a field already carrying (∠W_store − φ0_W).
+      //   Scoped to ψATT (a probe att is phase-neutral, so the absolute angle is correct there) and to RECALL (W
+      //   never re-adopts a plate as its hold) — exactly the reported isolation: non-ψATT V restores exactly, ψATT W
+      //   restores exactly, only ψATT V/P1/P2 fails.
+      pl.aPhi = pl.selfAtt ? lensU1.angle(_holdOp(0, W)) : 0;   // the angle `a` was BUILT with (0 for a probe att)
+      try { console.log(`[STORE-ψATT] plate ${_plates.length} · selfAtt=${pl.selfAtt ? 1 : 0} · aPhi=${(pl.aPhi || 0).toPrecision(17)} — an adopter must use THIS as its _holdPhi0, not its own op angle · holdD=[${_holdDx(W)},${_holdDy(W)}] · aH=${pl.a ? _hashField(pl.a) : '—'}`); } catch (e) {}
       console.log(`[MU1-VIRT] STORE atStep=${k} — plate ${_plates.length}/${BANK_MAX} banked (dual: field + descriptor ∠${lensU1.wrap(lensU1.angle(pl.dop)).toFixed(3)}, bw=${pl.bw})`); };
     const _recallMoment = (k, xshift = false) => { if (!_plates.length || !W.field) return;
+      if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncSlot(0); }   // the cue is W's field/leash AT the stamped step — see _recallDop: an unsynced cue can select a different plate on each peer
+      try { console.log(`[RECALL-CUE] path=recallMoment atStep=${k} · cueH=${W.field ? _hashField(W.field) : '—'} · leash=[${W.leash.state.gx.toPrecision(17)},${W.leash.state.gy.toPrecision(17)}] · xshift=${xshift ? 1 : 0} · plates=${_plates.length}`); } catch (e) {}
       // BIND + LIFT via the hologram bank: cue = W now, propagated to plate space (the bank's spectral leg — zero GPU);
       // argmax overlap (xshift → shift-invariant crossCorrScan + relocate). The bank owns the correlation/lift math;
       // the app owns V's slot-birth + the readout logging.
@@ -1065,6 +1328,13 @@ function makeMediumU1Renderer(core) {
     //    no-tricks law the view is labeled PREDICTIVE, never passed off as ψ). All arithmetic CPU f64 at the shared
     //    drain step → in regH → byte-identical across peers by construction.
     const _recallDop = (k) => { if (!_plates.length) return;
+      // CUE DETERMINISM (2026-07-31). bindDesc scores the bank against W's LIVE LEASH POSITION, and the winning
+      //   plate decides V's whole future: descBase = pl.w0 and descPhi0 = ∠pl.dop. Under turbo the leash/descBase may
+      //   not be at the stamped step when the drain runs, so two peers could cue from slightly different positions,
+      //   pick a DIFFERENT PLATE (or the same plate at a different score margin), and each settle onto its own static
+      //   state — identical register, identical pin, permanently different field. This is the store-verb pattern that
+      //   _storeMoment already applies; the recall cue needs it for the same reason.
+      if (_turboOn && _gpu && !_shardXspace) { _tbAdvanceAll(k); _tbSyncSlot(0); }
       // 𝔸-RECALL bind via the bank: closed-form content-address on W's DESCRIPTOR position (leash coords, no field
       // read) — the Gaussian exp(−|Δpos|²/2σ²) with object-identity gating. The bank owns the bind; V's descriptor
       // birth stays here. (σ = the ctx sigma:6 — the probe autocorrelation radius.)
@@ -1080,6 +1350,10 @@ function makeMediumU1Renderer(core) {
       V.leash.state.gx = V.descPos[0]; V.leash.state.gy = V.descPos[1];   // seed the 𝔸-leash AT the stored position (descgo chases FROM here; the render translates by leash − descPos, so the reconstruction starts un-shifted)
       const dDesc = lensU1.wrap(lensU1.angle(_lensOp[0]) - lensU1.angle(pl.dop));   // predicted aging (Σω difference — the [RECALL-∠] (B) path, now primary)
       const dN = (pl.bw != null && _tauK) ? (_tauK.beatsOf('W') ?? 0) - pl.bw : null;
+      // CUE RECEIPT: the inputs that DECIDE the recall, printed at full precision. Compare peers at equal atStep=:
+      //   cue → the scores → the chosen plate → descPhi0/w0. A difference in ANY of these makes V a permanently
+      //   different static state, since the pin then holds each peer at its own fixed point (identical thereafter).
+      console.log(`[RECALL-CUE] path=recallDop atStep=${k} · cue=[${cx.toPrecision(17)},${cy.toPrecision(17)}] obj=${_lensObj} · scores=[${scores.map((v) => (+v).toPrecision(17)).join(', ')}] · chose=${best} · dopPhase=${(pl.dop?.phase ?? 0).toPrecision(17)} descPhi0=${lensU1.angle(pl.dop).toPrecision(17)} · w0H=${pl.w0 ? _hashField(pl.w0) : '—'} · plates=${_plates.length}`);
       console.log(`[RECALL-𝔸] cue⊗bank (closed form, no field)=[${scores.join(', ')}] → plate ${best + 1} (stored atStep=${pl.k}, pos ${(pl.pos?.[0] ?? 0).toFixed(1)},${(pl.pos?.[1] ?? 0).toFixed(1)}) — V born DESCRIPTOR-ONLY (0 grid steps) · predicted aging Δ∠=${dDesc.toFixed(3)} rad over Δτ_W=${dN ?? '—'} beats · oracle: run 'recall' (field path) and compare choice+Δ∠`); };
 
     // ── MIRROR-SOURCED VERB EXECUTORS (⌀PDE): mv = the queue entry (register context AT the drain step — shared-
@@ -1109,6 +1383,10 @@ function makeMediumU1Renderer(core) {
       // seed are stamped in mv) → in regH, byte-identical across peers. Shift-invariant bind so a fragment that also
       // MOVED is still found+relocated. The readout reports fragment-in (keptFraction) vs whole-out fidelity.
       const cue = occ ? occlude(mf, { mode: mv.holoMode || 7, frac: mv.frac, block: mv.block || 8, seed: mv.seed, G: GRID }) : mf;
+      // CUE RECEIPT (all three recall paths carry one — see _recallDop). The cue BYTES decide which plate wins, and
+      //   the winner decides V's whole future (descBase/descPhi0), so a peer-local cue makes V a permanently
+      //   different static state. Compare peers at equal atStep=: cueH first, then the chosen plate.
+      try { console.log(`[RECALL-CUE] path=recallFrom atStep=${mv.k ?? '—'} · cueH=${_hashField(cue)} · occ=${occ ? 1 : 0} xshift=${xshift ? 1 : 0} · plates=${_plates.length}`); } catch (e) {}
       const bd = _holo.bind(cue, { xshift: xshift || occ }); if (!bd) return;
       const { plate: pl, index: best, scores, shift: bestD } = bd;
       const lift = _holo.lift(pl, { scale: mv.scale, shift: bestD }); if (!lift) return;
@@ -1123,6 +1401,13 @@ function makeMediumU1Renderer(core) {
       _recalledInto[ti] = best;   // remember this slot holds plate `best` → memory-damage re-lifts the live reconstruction
       _lensOp[ti].phase = 0; _lensOp[ti].prec = 0; _lensOp[ti].omega = mv.dop.omega;
       V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = 0; V1._texDirty = true;   // fresh CPU bytes → turbo re-primes the texture on the next advance
+      // THE BIRTH RECIPE (2026-08-03) — so a JOIN can reproduce THIS lift, not a different one. There are TWO recall
+      //   births and they are NOT interchangeable: _recallFrom (cue⊗bank, this one) lifts with {scale, shift:bestD}
+      //   and sets descPhi0 = 0 / op.phase = 0; _recallPlateLive lifts with {scale:'all'} and sets
+      //   descPhi0 = ∠pl.dop / op.phase = ∠pl.dop. The join replay only ever called _recallPlateLive, so a slot the
+      //   leader birthed HERE was re-derived on the joiner through the OTHER path — different lift arguments and a
+      //   different aging reference (dphi = ∠now − descPhi0), i.e. a genuinely different reconstruction from the
+      //   same plate. Measured: the leader logged [MU1-RECALLX] while the joiner logged [MU1-PLATELIVE].
       // WHERE THE RECALLED MOMENT LANDS — three cases, in priority order:
       //   1. mv.at  → an EXPLICIT commanded position (recallAt / the at:[x,y] option): place it THERE. Without this
       //      every recall could only land at the plate's stored pos (recall@) or at the cue's pos (recall⇄) — there
@@ -1131,20 +1416,31 @@ function makeMediumU1Renderer(core) {
       //      brings it to where the cue now is; bestD is [0,0] for zero-lag recall@, so that lands at the stored pos).
       //   3. mv.gx/gy → the verb's carried coords (a plate with no stored pos).
       const _atPos = Array.isArray(mv.at) ? [+mv.at[0] || 0, +mv.at[1] || 0] : null;
-      V1.descPos = _atPos || (pl.pos ? [pl.pos[0] - bestD[0], pl.pos[1] - bestD[1]] : [mv.gx, mv.gy]); V1.descObj = pl.obj || _lensObj; V1.descBar = Math.floor(mv.k / 21);
-      V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(mv.k / 21); V1.descHold = null;
+      V1.descPos = _atPos || (pl.pos ? [pl.pos[0] - bestD[0], pl.pos[1] - bestD[1]] : [mv.gx, mv.gy]); V1.descObj = pl.obj || _lensObj;   // (descBar is set below, from the STORE step — see the store-anchored note)
+      V1._birth = { via: 'recallFrom', scale: mv.scale || 'all', shift: bestD ? [bestD[0], bestD[1]] : null, atPos: _atPos ? [..._atPos] : null };   // the birth recipe (declared here, after _atPos) — see the note above the lift
+      // STORE-ANCHORED ω-TIME — the same law as _recallPlateLive (see the long note there): a recall RESURRECTS a
+      //   stored moment, so the cursor is anchored to the PLATE's own step (pl.k, baked into the plate and therefore
+      //   identical on every peer and at every join), never to the recall step (which depends on WHEN each peer
+      //   recalled and has to be reconstructed from the wire on a join). Both birth paths must agree, or a joiner
+      //   replaying through the other path re-derives a different phase from the same plate.
+      const _anchorK = (typeof pl.k === 'number') ? (pl.k | 0) : (mv.k | 0);
+      const _agedBars = Math.max(0, Math.floor((mv.k | 0) / 21) - Math.floor(_anchorK / 21));   // aging since the STORE, applied at birth (see the note in _recallPlateLive)
+      if (_agedBars && _lensOp[ti].omega) _lensOp[ti].phase = ((_lensOp[ti].phase + _agedBars * _lensOp[ti].omega) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+      V1.descBar = Math.floor((mv.k | 0) / 21);
+      V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(_anchorK / 21); V1.descHold = null;
       let eL = 0; for (let j = 0; j < V1.descBase.length; j++) eL += V1.descBase[j] * V1.descBase[j]; V1.descE0 = eL || 1;
-      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj }; V1._pinK = mv.k;   // birth step → the ⌛pinHold fade clock (shared k, so the decay is identical on every peer)
+      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj }; V1._pinK = _anchorK;   // the ⌛pinHold fade clock runs from the STORE step
       V1.descAtt = _plateAtt(pl.dop, V1.descPos, pl.obj || _lensObj); V1._digestLeft = 0;
       // ψATT INHERITANCE: a plate banked in FIELD-CARRIED form (selfAtt) re-enters ψATT on recall — its stored att IS
       //   a captured field, so the recalled slot is pinned to that, not to a regenerated probe. Otherwise the probe
       //   symbol would reappear in every recalled copy, which is exactly the leak ψATT exists to close. The hold is
       //   anchored at the plate's own position so the leash rolls it from there (same convention as adoption).
-      if (pl.selfAtt && pl.a) { V1._attHold = Float64Array.from(pl.a); V1._attHoldPos = [...V1.descPos]; V1._holdPhi0 = lensU1.angle(_lensOp[ti]); V1._holdSl2 = _mkSl2(V1._attHold); V1._holdRef = null; V1._holdRefBar = (_E?.frameBar | 0) + _HOLD_MIN; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // the recalled hold keeps its medium-semantic identity (sl(2) is anchor-invariant, so the banked charges survive the relocation)
-      else { V1._attHold = null; V1._attHoldPos = null; V1._holdPhi0 = 0; V1._holdSl2 = null; V1._holdRef = null; V1._holdRefBar = -1; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // a recall birth retires any ψATT hold (the plate att is the pin)
+      if (pl.selfAtt && pl.a) { V1._attHold = Float64Array.from(pl.a); V1._attHoldPos = [...V1.descPos]; V1._holdKeyN = (V1._holdKeyN | 0) + 1; V1._attCache = null; V1._shiftCache = null; V1._holdBytesKey = null; V1._holdPhi0 = (typeof pl.aPhi === 'number') ? pl.aPhi : lensU1.angle(_lensOp[ti]); V1._holdSl2 = _mkSl2(V1._attHold); V1._holdRef = null; V1._holdRefBar = (_E?.frameBar | 0) + _HOLD_MIN; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // the recalled hold keeps its medium-semantic identity (sl(2) is anchor-invariant, so the banked charges survive the relocation)
+      else { V1._attHold = null; V1._attHoldPos = null; V1._holdPhi0 = 0; V1._holdSl2 = null; V1._attCache = null; V1._shiftCache = null; V1._holdBytesKey = null; V1._holdRef = null; V1._holdRefBar = -1; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // a recall birth retires any ψATT hold (the plate att is the pin)
       V1.descDisp = Float64Array.from(V1.descBase);
       V1.field = null; V1.att = null; V1.hold = false; V1.mirror = false; V1.born = true;
       V1.leash.release(); V1.leash.state.gx = V1.descPos[0]; V1.leash.state.gy = V1.descPos[1];
+      if (V1._attHold && !V1._digestLeft) { const _a = _liveAtt(ti); if (_a) V1.descAtt = _a; }   // ψATT BIRTH PINS TO ITS HOLD, NOT THE PROBE (AFTER the leash seed → _holdDx/dy=0) — see the full note at the same line in _recallPlateLive (the join-replay-only V/P1/P2 fork)
       const dDesc = (pl.bw != null) ? lensU1.wrap(lensU1.angle(mv.dop) - lensU1.angle(pl.dop)) : null;
       console.log(`[MU1-RECALL${xshift ? 'X' : ''}] (⌀register-sourced) cue⊗bank${xshift ? ' (SHIFT-INVARIANT)' : ''}=[${scores.join(', ')}] → plate ${best + 1} (stored atStep=${pl.k})${(mv.scale && mv.scale !== 'all') ? ` · SCALE=${mv.scale} (${mv.scale === 'coarse' ? 'smooth skeleton — large-radius tiers only' : 'speckle detail — small-radius tiers only'}, exact by the tier theorem; rMid=${_rMid().toFixed(1)})` : ''}${xshift ? ((bestD[0] || bestD[1]) ? ` · δ=(${bestD[0]},${bestD[1]}) → lift RELOCATED to the cue's position` : ' · δ=(0,0) — no relocation needed') : ''} → ${SLOTN[ti]} born LIVING (the register engine steps it; held toward its plate attractor; mu1.descGo(x,y,'${SLOTN[ti]}') to walk it)${dDesc != null ? ` · descriptor aging Δ∠=${dDesc.toFixed(3)} rad over Δτ_W=${(mv.bw - pl.bw) | 0} beats` : ''} · view:${SLOTN[ti]}`); };
 
@@ -1152,25 +1448,120 @@ function makeMediumU1Renderer(core) {
     //   register engine steps it every frame, held toward its plate attractor → a LIVE SOLITON (not a frozen image).
     //   This is "view plate" done honestly: the memory brought back to life. Damage to the plate re-lifts here
     //   (_recalledInto), so the living soliton degrades as you drag. Same birth as _recallFrom, minus the cue/bind.
-    const _recallPlateLive = (idx, ti, k, at = null) => { const pl = _plates[idx]; if (!pl?.p) return;   // at = [x,y] explicit placement (else the plate's stored pos)
-      const lift = _holo.lift(pl, { scale: 'all' }); if (!lift) return;
+    // birth = the recipe recorded at the ORIGINAL recall ({via, scale, shift, atPos}); when present this reproduces
+    //   that lift EXACTLY — same scale band, same shift correction, and the same descPhi0/op.phase convention as the
+    //   path that actually birthed the slot. A joiner cannot re-run _recallFrom (it needs the live cue field mf,
+    //   which the joiner does not have), so the recipe carries the parts of that path that matter for the result.
+    const _recallPlateLive = (idx, ti, k, at = null, birth = null) => { const pl = _plates[idx]; if (!pl?.p) return;   // at = [x,y] explicit placement (else the plate's stored pos)
+      // A NULL LIFT IS A SILENT NO-OP AND MUST NOT BE (2026-08-03). lift() returns null when the λ-grid is missing
+      //   — i.e. when there is no ring/kernelVer yet — and this guard then returned WITHOUT WRITING ANY SLOT STATE,
+      //   leaving the caller to believe the recall had been derived. That is exactly how the join replay ran as a
+      //   no-op for a whole session (joiner logged liftVer=-1). Say it out loud.
+      const lift = _holo.lift(pl, birth ? { scale: birth.scale || 'all', shift: birth.shift || undefined } : { scale: 'all' });   // reproduce the ORIGINAL lift's arguments when a recipe is present
+      if (!lift) { console.warn(`[MU1-PLATELIVE] ⚠ ABORTED for plate ${idx + 1} → ${SLOTN[ti]}: _holo.lift returned null (kernelVer=${_E.kernelVer}, ring tiers=${_E.ringCache?.r?.length ?? 0}). The lift is a PROPAGATION through the λ-grid — with no ring there is nothing to propagate through, so NOTHING was written: the slot keeps whatever it already had. If this fires during a JOIN, the kernel is being adopted after the replay.`); return; }
       const V1 = _sb.slots[ti]; _recalledInto[ti] = idx;
-      _lensOp[ti].phase = lensU1.angle(pl.dop); _lensOp[ti].prec = 0; _lensOp[ti].omega = pl.dop.omega || 0;
-      V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = lensU1.angle(pl.dop); V1._texDirty = true;
-      V1.descPos = at ? [+at[0] || 0, +at[1] || 0] : (pl.pos ? [...pl.pos] : [0, 0]); V1.descObj = pl.obj || _lensObj; V1.descBar = Math.floor(k / 21);   // explicit placement wins over the plate's stored pos
-      V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(k / 21); V1.descHold = null;
+      // THE PHASE CONVENTION IS PART OF THE BIRTH RECIPE. _recallFrom sets phase=0/descPhi0=0; _recallPlateLive sets
+      //   both to ∠pl.dop. descPhi0 is the AGING REFERENCE (the render computes dphi = ∠now − descPhi0), so mixing
+      //   the two conventions makes the same plate reconstruct at a different phase — and the pin then contracts the
+      //   two peers toward different fixed points. Follow whichever path actually birthed the slot.
+      const _bPhi = (birth && birth.via === 'recallFrom') ? 0 : lensU1.angle(pl.dop);
+      // A REPLAY KEEPS THE CURSOR IT WAS GIVEN. On a genuine recall the op is (re)born at the birth phase and ages
+      //   from there. On a JOIN REPLAY the caller has already installed the leader's AGED cursor (see the note at
+      //   the call site) precisely so that everything derived below — above all _holdPhi0, the ψATT hold's rotation
+      //   reference — is consistent with it. Resetting phase here would put _holdPhi0 and the op on different
+      //   instants again, which is the mismatch the ordering fix exists to remove. birth.replay marks that case.
+      const _isReplay = !!(birth && birth.replay);
+      if (!_isReplay) _lensOp[ti].phase = _bPhi;
+      // ω IS LIVE REGISTER STATE, NOT A PLATE PROPERTY (2026-08-04) — the frozen-φ bug, second half.
+      //   A birth takes ω from the plate's stored dop, which is right: the recalled moment resumes the precession it
+      //   was banked with. But a REPLAY must keep the LIVE value the restore already installed from `lensOps`.
+      //   Why it matters: ω can be changed AFTER the store (mu1.lensTau / the `lenstau` verb), so a plate banked
+      //   while ω was 0 carries dop.omega = 0 forever. The replay then overwrote the joiner's correctly-restored
+      //   ω=0.08 with that stale 0 — and the bar tick is gated `if (_lensOp[si].omega)`, so the joiner's φ COULD
+      //   NEVER ADVANCE. MEASURED: leader ω=0.080000000000000002 with φ advancing every bar; joiner ω=0 with φ
+      //   frozen at 3.0400000000000027 and dphi frozen with it, while descBar/regH/attH/e0 all matched — none of
+      //   them read ω. A dead precession is exactly a persistent argPin offset that no state hash can see.
+      //   (This is why the earlier ω=0 runs hid it: a stale 0 and a live 0 are indistinguishable.)
+      _lensOp[ti].prec = _isReplay ? (_lensOp[ti].prec || 0) : 0;
+      if (!_isReplay) _lensOp[ti].omega = pl.dop.omega || 0;
+      V1.desc = true; V1.descBase = Float64Array.from(Float32Array.from(lift)); V1.descPhi0 = _bPhi; V1._texDirty = true;   // descPhi0 follows the birth convention (0 for a recallFrom slot, ∠pl.dop for a plateLive one)
+      V1._birth = birth ? { via: birth.via, scale: birth.scale, shift: birth.shift, atPos: birth.atPos }   // preserve the ORIGINAL recipe across a replay (drop the transient `replay` marker — it describes THIS call, not the birth)
+        : { via: 'plateLive', scale: 'all', shift: null, atPos: at ? [+at[0] || 0, +at[1] || 0] : null };
+      // placement, in the SAME priority order the birthing path used: an explicit `at`, else the recipe's atPos,
+      //   else the plate's stored pos SHIFT-CORRECTED by the recipe (that is what _recallFrom's bestD does — a
+      //   relocated lift lands at pl.pos − bestD, not at pl.pos).
+      V1.descPos = at ? [+at[0] || 0, +at[1] || 0]
+        : (birth?.atPos ? [...birth.atPos]
+        : (pl.pos ? [pl.pos[0] - (birth?.shift?.[0] || 0), pl.pos[1] - (birth?.shift?.[1] || 0)] : [0, 0]));
+      // ── STORE-ANCHORED ω-TIME (2026-08-03, user's call) ──────────────────────────────────────────────────────
+      //   A RECALL RESURRECTS A STORED MOMENT; the store is the accurate instant, the recall is just when someone
+      //   asked for it. So the slot's ω-time cursor is anchored to the PLATE's own step (pl.k), not to the recall
+      //   step k. Why this matters beyond taste: pl.k is BAKED INTO THE PLATE, so it is identical on every peer and
+      //   at every join, forever. The recall step is not — it depends on WHEN each peer recalled, and on a join the
+      //   replay has to reconstruct it from the wire (recallK) while the leader used its own live step. Every
+      //   quantity derived from it — the aging cursor (descBar), the capture stamp (descCapBar), the pin-fade birth
+      //   (_pinK) — was therefore anchored to an event that is NOT intrinsic to the memory, which is exactly the
+      //   class of thing that cannot survive a join. Anchoring to pl.k makes the reconstruction's phase a pure
+      //   function of the plate: same answer on any peer, at any join, whenever the recall happened.
+      //   This is the same law regH already runs on — derive from shared state, never copy an event.
+      //   Fallback to the recall step only for a plate with no k (legacy bank entries).
+      const _anchorK = (typeof pl.k === 'number') ? (pl.k | 0) : (k | 0);
+      // AGE THE CURSOR AT BIRTH, don't leave a debt for the bar loop. The loop advances phase by
+      //   (barA − descBar)·ω on the next boundary; with a store anchor that debt is every bar since the store, so
+      //   applying it here makes the slot resume at its aged phase IMMEDIATELY instead of rendering one frame at the
+      //   store phase and then jumping. Pure fn of shared values (pl.k, k, ω) ⇒ identical on every peer.
+      //   (skipped on a REPLAY: the cursor installed by the caller is ALREADY the aged one — the leader's live
+      //    value — so ageing it again would double-count every bar since the store.)
+      const _agedBars = _isReplay ? 0 : Math.max(0, Math.floor((k | 0) / 21) - Math.floor(_anchorK / 21));
+      if (_agedBars && _lensOp[ti].omega) _lensOp[ti].phase = ((_lensOp[ti].phase + _agedBars * _lensOp[ti].omega) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+      // descBar IS THE ω-TICK CURSOR, AND ON A REPLAY IT MUST BE **NOW** (2026-08-04) — the frozen-φ bug.
+      //   The bar loop ticks the register by `nbD = barA − descBar` and then sets `descBar = barA`. So descBar must
+      //   never be AHEAD of the current bar, or nbD ≤ 0 and the slot's φ NEVER ADVANCES AGAIN.
+      //   On a genuine recall, k is the recall step and floor(k/21) is the current bar — fine. On a JOIN REPLAY the
+      //   caller passes k = recallK, which store-anchoring made the STORE step (it ships _pinK), so this wrote a
+      //   descBar from the wrong epoch while the aging that would have compensated is deliberately skipped
+      //   (_isReplay). MEASURED: the joiner's φ froze at a single value (5.4399999999999924) for every bar while the
+      //   leader's advanced by ω per bar — with regH/attH/e0/ω all matching, because none of them read φ's motion.
+      //   A frozen register clock is exactly a persistent argPin offset that no state hash can see.
+      //   On a replay the cursor is already the leader's aged value; anchor descBar to NOW so the tick resumes from
+      //   it rather than being disabled.
+      V1.descObj = pl.obj || _lensObj; V1.descBar = _isReplay ? Math.floor((_E.solSteps | 0) / 21) : Math.floor((k | 0) / 21);
+      V1.descPosCap = [...V1.descPos]; V1.descCapBar = Math.floor(_anchorK / 21); V1.descHold = null;
       let eL = 0; for (let j = 0; j < V1.descBase.length; j++) eL += V1.descBase[j] * V1.descBase[j]; V1.descE0 = eL || 1;
-      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj }; V1._pinK = k;   // birth step → the ⌛pinHold fade clock (shared k → identical decay on every peer)
+      V1.descLive = true; V1.descAttG = { dop: { ...pl.dop }, obj: pl.obj || _lensObj }; V1._pinK = _anchorK;   // the ⌛pinHold fade clock runs from the STORE step — the plate's own coordinate, identical on every peer
       V1.descAtt = _plateAtt(pl.dop, V1.descPos, pl.obj || _lensObj); V1._digestLeft = 0;
       // ψATT INHERITANCE: a plate banked in FIELD-CARRIED form (selfAtt) re-enters ψATT on recall — its stored att IS
       //   a captured field, so the recalled slot is pinned to that, not to a regenerated probe. Otherwise the probe
       //   symbol would reappear in every recalled copy, which is exactly the leak ψATT exists to close. The hold is
       //   anchored at the plate's own position so the leash rolls it from there (same convention as adoption).
-      if (pl.selfAtt && pl.a) { V1._attHold = Float64Array.from(pl.a); V1._attHoldPos = [...V1.descPos]; V1._holdPhi0 = lensU1.angle(_lensOp[ti]); V1._holdSl2 = _mkSl2(V1._attHold); V1._holdRef = null; V1._holdRefBar = (_E?.frameBar | 0) + _HOLD_MIN; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // the recalled hold keeps its medium-semantic identity (sl(2) is anchor-invariant, so the banked charges survive the relocation)
-      else { V1._attHold = null; V1._attHoldPos = null; V1._holdPhi0 = 0; V1._holdSl2 = null; V1._holdRef = null; V1._holdRefBar = -1; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; } V1.descDisp = Float64Array.from(V1.descBase);   // a recall birth retires any ψATT hold
+      // ── A REPLAY MUST NOT RE-ANCHOR THE ψATT HOLD (2026-08-03) ────────────────────────────────────────────────
+      //   _holdPhi0 is the hold's ROTATION REFERENCE: _holdOp rotates the pin target by (∠now − _holdPhi0) every
+      //   bar, so it is physics. The leader's value was taken WHEN IT ADOPTED ψATT — a third instant, neither the
+      //   plate's store step nor the recall step — and it rides the wire correctly as descSlots.selfPhi0, restored
+      //   just before this replay runs. Re-deriving it here from the current op (whatever that is) throws the
+      //   correct value away and gives the joiner a differently-rotated pin target: same bytes, same regH, same
+      //   energy, permanently different PHASE — measured at 0.035–0.083 rad while |ψ|² agreed to 0.002–0.040× the
+      //   f32 floor. On a REPLAY, keep every restored hold field; only a genuine recall re-anchors.
+      if (_isReplay) { /* keep the restored ψATT hold verbatim (bytes, pose, φ0, digest, keyN) */ }
+      else if (pl.selfAtt && pl.a) { V1._attHold = Float64Array.from(pl.a); V1._attHoldPos = [...V1.descPos]; V1._holdKeyN = (V1._holdKeyN | 0) + 1; V1._attCache = null; V1._shiftCache = null; V1._holdBytesKey = null; V1._holdPhi0 = (typeof pl.aPhi === 'number') ? pl.aPhi : lensU1.angle(_lensOp[ti]); V1._holdSl2 = _mkSl2(V1._attHold); V1._holdRef = null; V1._holdRefBar = (_E?.frameBar | 0) + _HOLD_MIN; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; }   // the recalled hold keeps its medium-semantic identity (sl(2) is anchor-invariant, so the banked charges survive the relocation)
+      else { V1._attHold = null; V1._attHoldPos = null; V1._holdPhi0 = 0; V1._holdSl2 = null; V1._attCache = null; V1._shiftCache = null; V1._holdBytesKey = null; V1._holdRef = null; V1._holdRefBar = -1; V1._holdRefPrev = null; V1._holdRefN = 0; V1._holdRefStuck = false; } V1.descDisp = Float64Array.from(V1.descBase);   // a recall birth retires any ψATT hold
+      // ψATT BIRTH PINS TO ITS HOLD, NOT THE PROBE (2026-08-05) — the join-replay-only V/P1/P2 fork, ROOT CAUSE.
+      //   descAtt was set to _plateAtt (a PROBE att) unconditionally above, and the ψATT branch adopted _attHold but
+      //   never overwrote descAtt. So a ψATT slot leaves this birth fn pinned to a PROBE, and the per-step register
+      //   loop (medium-core step: psi += β·descAtt) drives it toward the probe until the NEXT bar boundary rebuilds
+      //   descAtt = _selfHold() (line ~4314). A LIVE recall survives that because both connected peers hit the same
+      //   shared bar together (the probe epoch is identical and immediately replaced in lockstep). A JOIN does not: the
+      //   replay runs mid-bar, so the joiner pins ψATT V against the PROBE for the steps up to the next bar while the
+      //   leader — long past its own recall bar — pins against its evolved HOLD. A handful of probe-vs-hold steps near
+      //   the contraction leave a permanent argPin offset that no state hash sees (regH/attH/e0/ω all match, exactly
+      //   as reported). W is immune (never recalled → never here); non-ψATT V is immune (its pin IS the probe, so the
+      //   birth value is already correct). Seed the ψATT pin here — _liveAtt = the same shift+rotate _selfHold builds
+      //   (verified byte-identical) — so the slot is born chasing the hold, and both live-recall and join-replay agree
+      //   from the birth step, with no wrong-pin epoch to expose.
       V1.field = null; V1.att = null; V1.hold = false; V1.mirror = false; V1.born = true;
       V1.leash.release(); V1.leash.state.gx = V1.descPos[0]; V1.leash.state.gy = V1.descPos[1];
-      console.log(`[MU1-PLATELIVE] plate ${idx + 1}/${_plates.length} lifted into ${SLOTN[ti]} as a LIVING soliton (register-stepped, held toward its attractor) — damage the plate to watch it degrade LIVE · view:${SLOTN[ti]}`); };
+      if (V1._attHold && !V1._digestLeft) { const _a = _liveAtt(ti); if (_a) V1.descAtt = _a; }   // AFTER the leash is seeded to descPos (so _holdDx/_holdDy = 0, the clean birth roll — matches the leader's _selfHold at its recall bar)
+      console.log(`[MU1-PLATELIVE] plate ${idx + 1}/${_plates.length} lifted into ${SLOTN[ti]} as a LIVING soliton (register-stepped, held toward its attractor) — damage the plate to watch it degrade LIVE · view:${SLOTN[ti]} · liftVer=${_E.kernelVer} liftH=${_hashField(V1.descBase)} — liftVer is the kernel version whose λ-grid propagated this plate (specLeg→lambda() is cached on kernelVer). A REPLICATED recall runs on every peer at the same shared step, so liftVer matches and so does liftH; a JOIN re-lifts at whatever version is current THEN, and a plate carries no kernelVer of its own — so compare this line's liftVer against the joiner's [JOIN-LIFT]`); };
 
     // _reliftDamaged(idx) — after a stored plate is damaged, re-lift it into every LIVE slot that recalled it, so the
     //   slot's RECONSTRUCTION visibly DEGRADES with the damage (the "corrupted memory read live" demo). Uses the SAME
@@ -1208,7 +1599,68 @@ function makeMediumU1Renderer(core) {
       return _xattOn ? _xattBuild(dop, pos?.[0] ?? 0, pos?.[1] ?? 0, base)
                      : lensC1.apply({ ...dop, mode: 'metric', tx: pos?.[0] ?? 0, ty: pos?.[1] ?? 0 }, base, GRID); } catch (e) { return null; } };
     const _takeSnap = () => {
+      // THE CAPTURE STEP IS ASYNCHRONOUS AND MAY BE MID-Q-BLOCK (2026-08-03) — the INTERMITTENCY.
+      //   takeSnapshot runs on a `request_snapshot` network message (krestianstvo-wavefront-evaluator.js ~456), so
+      //   it fires at an ARBITRARY solSteps, not on a step boundary. The advance below is required (the textures
+      //   must hold the bytes we are about to ship) but it advances to _E.solSteps, which in the steady drive is
+      //   NOT a multiple of Q: the normal caller is gated on `(k+1) % Q === 0`, so every other block is an aligned
+      //   7-step chunk. A mid-block capture therefore executes a PARTIAL block and leaves _tbCur off the Q grid on
+      //   the LEADER, while the joiner resumes on it — after which the two peers' blocks are permanently offset.
+      //   That is precisely the att4 schedule difference (att4 is captured once per _tbAdvanceAll call and held for
+      //   the block, so an offset block boundary changes HOW MANY steps see the pre- vs post-refresh pin target),
+      //   and it explains why the symptom is INTERMITTENT: when the request happens to land on a Q boundary the
+      //   peers stay aligned and everything matches (measured: [SNAP-PHASE]/[JOIN-PHASE] agreeing to 13 figures on
+      //   the runs that landed clean), and when it lands mid-block they rotate apart.
+      //   Logged, not silently corrected: rounding the capture step here would change WHICH state is shipped, and
+      //   solSteps is the label the joiner adopts — the fix belongs at the block boundary, not in the payload.
+      const _capOff = (_E.solSteps | 0) % Q;
+      if (_capOff !== 0) console.warn(`[SNAP-ALIGN] ⚠ capture at solStep=${_E.solSteps} is MID-Q-BLOCK (offset ${_capOff}/${Q}) — the leader is about to advance a PARTIAL block, leaving its _tbCur off the Q grid while the joiner resumes on it. Every later block is then offset between the peers, which shifts WHEN the refreshed pin target (att4) enters the step loop → a small permanent GLOBAL PHASE difference (|ψ|² equal, argPin apart). A capture landing ON a boundary (offset 0) stays aligned — that is the intermittency.`);
+      else console.log(`[SNAP-ALIGN] capture at solStep=${_E.solSteps} is Q-ALIGNED (offset 0) — blocks stay in phase with the joiner`);
       if (_turboOn && _gpu) { _tbAdvanceAll(_E.solSteps); _tbSyncAll(); }   // turbo: advance every living texture to solSteps AND read back BEFORE any field is captured (a mid-bar lag on the wire would fork the joiner)
+      if (_turboOn && _gpu) console.log(`[SNAP-ALIGN] after advance: _tbCur=${_tbCur} (${_tbCur % Q === 0 ? 'ON the Q grid' : `OFF the Q grid by ${_tbCur % Q}`}) — the joiner will anchor _tbCur at the restored solStep and step in aligned Q blocks from there`);
+      // NOTE (2026-07-31): a `_q32` pass was added here on the theory that the leader kept f64 while shipping f32.
+      //   MEASURED WRONG and removed: saveEngine already f32-quantizes psiLensed (medium-gpu.js), and _tbSyncAll
+      //   above has just read descBase back FROM the f32 texture — so the bytes are already f32 and re-quantizing
+      //   only allocated a new array and marked the texture dirty ON THE LEADER ONLY, which is an asymmetry between
+      //   the peers rather than a fix. The SNAP-SENT/SNAP-RECV receipts confirm the payload is transferred exactly
+      //   (same solStep, same descBase hash), so the divergence is NOT in the snapshot.
+      // THE LEADER ADOPTS THE f32 IT SHIPS — for the DESC SLOTS (2026-07-31). descSlots ships `base: _b64f(descBase)`,
+      //   i.e. Float32Array, but a desc slot is stepped by _regStep1 in f64 (and under turbo read back from an f32
+      //   texture, which is already f32 — so this is a no-op there). On the CPU executor the leader therefore keeps
+      //   f64 bytes while the joiner resumes from their f32 truncation: the two start on DIFFERENT state, and since
+      //   the pin is a CONTRACTION each converges to the fixed point nearest its own start and neither moves again —
+      //   the measured signature (|ψ|² frozen and unequal, every input identical). saveEngine already does this for
+      //   W's psiLensed; the desc slots had no equivalent. Idempotent for already-f32 buffers.
+      for (const s2 of _sb.slots) if (s2?.desc && s2.descBase) {
+        s2.descBase = Float64Array.from(Float32Array.from(s2.descBase));
+        let e2 = 0; for (let j = 0; j < s2.descBase.length; j++) e2 += s2.descBase[j] * s2.descBase[j];
+        s2.descE0 = e2 || 1; s2._texDirty = true; s2._holdBytesKey = null; s2._shiftCache = null;   // the cap must be measured from the SHIPPED bytes, else leader and joiner renormalize to different levels
+        if (s2._attHold) s2._attHold = Float64Array.from(Float32Array.from(s2._attHold)); }
+      // RING RECEIPT: the kernel the leader was STEPPING THROUGH at the capture step. A joiner that steps a vN field
+      //   through a v(N+1) kernel forks on its FIRST step and then locks in (the pin contracts each peer to a
+      //   different fixed point). The version alone is not enough — two peers can hold the same VERSION NUMBER with
+      //   different offsets if the fractal clock re-rang between capture and apply — so hash the content.
+      try { const _rh = _E.ringCache ? _hashNums([].concat(Array.from(_E.ringCache.r || []), Array.from(_E.ringCache.w || []), ...(_E.ringCache.o || []).map((t) => Array.from(t || [])))) : '—';
+        console.log(`[SNAP-RING] kernelVer=${_E.kernelVer} · ringH=${_rh} · tiers=${_E.ringCache?.r?.length ?? 0} · offTot=${(_E.ringCache?.o || []).reduce((a, t) => a + ((t?.length || 0) >> 1), 0)}`); } catch (e) {}
+      for (let qi = 0; qi < 4; qi++) { const qs = _sb.slots[qi]; _lastShipH[qi] = (qs?.desc && qs.descBase) ? _hashField(qs.descBase) : null; }
+      // THE LEADER'S HALF OF THE PHASE RECEIPT — the same argPin the joiner prints at restore, measured on the
+      //   EXACT bytes being shipped, at the ship step. If the joiner's [JOIN-PHASE] argPin differs from this at the
+      //   same solStep, the rotation was introduced by the WIRE (the f32 b64 codec) or by capturing these bytes at
+      //   a different sub-step than solSteps claims; if it matches, the payload is faithful and the divergence is
+      //   downstream in the drive. Deliberately measured AFTER the f32 quantization loop above, so it reports what
+      //   the joiner will actually receive rather than the leader's f64 working copy.
+      try { for (let qi2 = 1; qi2 < 4; qi2++) { const qs2 = _sb.slots[qi2];
+        if (!qs2?.desc || !qs2.descLive || !qs2.descBase) continue;
+        const a4 = qs2.descAtt || qs2._attHold; if (!a4 || a4.length !== qs2.descBase.length) continue;
+        let rr3 = 0, ii3 = 0, e4 = 0; const f4 = qs2.descBase;
+        for (let j4 = 0; j4 < f4.length; j4 += 2) { e4 += f4[j4] * f4[j4] + f4[j4 + 1] * f4[j4 + 1];
+          rr3 += a4[j4] * f4[j4] + a4[j4 + 1] * f4[j4 + 1]; ii3 += a4[j4] * f4[j4 + 1] - a4[j4 + 1] * f4[j4]; }
+        console.log(`[SNAP-PHASE] ${SLOTN[qi2]} @solStep=${_E.solSteps} · argPin=${Math.atan2(ii3, rr3).toPrecision(17)} · |ψ|²=${e4.toPrecision(17)} · baseH=${_hashField(f4)} attH=${_hashField(a4)} — the joiner's [JOIN-PHASE] for this slot at this solStep MUST equal this; a difference means the rotation rode the wire`); } } catch (e) {}
+      // the LEADER's ping-pong parity at the ship step — see the [JOIN-PARITY] note in _restoreSnap. The parity is
+      //   per-GPU-CONTEXT state advanced by this peer's own op history; it is NOT in the snapshot and NOT in regH.
+      try { console.log(`[SNAP-PARITY] ${_sb.slots.map((x, i) => `${SLOTN[i]}:${_gpu?.eyeSlotParity ? _gpu.eyeSlotParity(i) : '?'}`).join(' ')} @solStep=${_E.solSteps} — the joiner's [JOIN-PARITY] at this step tells you whether the two peers step the SAME half of each texture pair`); } catch (e) {}
+      // SEND RECEIPT: the LEADER's view of what it is shipping, hashed the same way the joiner hashes what it takes.
+      try { console.log(`[SNAP-SENT] solStep=${_E.solSteps} · psiLensed=${_E.psiLensed ? _hashField(_E.psiLensed) : 'NULL'} · descBase=[${_sb.slots.map((s2, i) => s2?.desc && s2.descBase ? `${SLOTN[i]}:${_hashField(s2.descBase)}` : `${SLOTN[i]}:—`).join(' ')}] · turbo=${_turboOn ? 1 : 0}`); } catch (e) {}
       const eng = _E.saveEngine({ stepClkC0: _stepClk.c0, torbE0: W.e0, transPx: W.leash.state.gx, transPy: W.leash.state.gy });
       return {
       eng: { ...eng, psiLensed: eng.psiLensed ? _b64f(eng.psiLensed) : null },   // WIRE: f32-base64 (the app owns this boundary, per G3; decoded before restoreEngine)
@@ -1222,18 +1674,31 @@ function makeMediumU1Renderer(core) {
         // ψATT plate: its `a` is a CAPTURED FIELD, so it CANNOT be regenerated from dop+obj at restore the way a probe
         //   att can (that regeneration is why `a` is normally omitted). Ship it, with the selfAtt marker, or the
         //   joiner's recall would fall back to the probe and re-inject the retired symbol.
-        const _self = lp.selfAtt ? { selfAtt: 1, a: lp.a ? _b64f(lp.a) : null } : null;
+        const _self = lp.selfAtt ? { selfAtt: 1, a: lp.a ? _b64f(lp.a) : null, aPhi: lp.aPhi || 0 } : null;   // aPhi = the angle `a` was BUILT with; an adopter needs it as its _holdPhi0 (see the [STORE-ψATT] note) and it cannot be re-derived from dop+obj the way a probe att can
         if (lp._dmg == null) return _self ? { ...raw, ..._self } : raw;   // undamaged plate → ship as-is (no pristine to carry)
         // a DAMAGED plate ships its PRISTINE (p0/w00) + the damage marker _dmg so a JOINER can re-damage/heal NON-
         // DESTRUCTIVELY from the SAME clean bytes as the leader (else the joiner's re-drag would occlude from the
         // already-damaged p → its future damage forks the field). The current damaged p ships as `raw.p` (unchanged).
         return { ...raw, ...(_self || {}), _dmg: lp._dmg, p0: lp.p0 ? _b64f(lp.p0) : null, w00: lp.w00 ? _b64f(lp.w00) : null }; }),   // pristine rides ONLY for damaged plates
-      descSlots: _sb.slots.map((s) => s.desc ? { pos: s.descPos ? [...s.descPos] : null, obj: s.descObj || null, bar: s.descBar | 0, base: s.descBase ? _b64f(s.descBase) : null, hold: s.descHold ? _b64f(s.descHold) : null, posCap: s.descPosCap ? [...s.descPosCap] : null, capBar: s.descCapBar ?? null, e0: s.descE0 ?? null, live: s.descLive ? 1 : 0, attg: s.descAttG ? { dop: { ...s.descAttG.dop }, obj: s.descAttG.obj || null } : null, phi0: s.descPhi0 || 0, selfHold: s._attHold ? _b64f(s._attHold) : null, selfHoldPos: s._attHoldPos ? [...s._attHoldPos] : null, selfPhi0: s._holdPhi0 || 0, selfDigest: s._digestLeft | 0 } : null),   // + the ψATT hold/digest (the PIN TARGET — a joiner without it forks the field)   // 𝔸-slot state (desc mode + coords + ω-time cursor + the dressed base/birth angle) — a joiner must resume the identical precession AND reconstruction
+      // THE PER-SLOT REGISTER OPERATORS (2026-07-31). _lensOp carries each slot's phase/prec/omega/beta/kx/ky — the
+      //   U(1) register itself — and it was NEVER shipped: a joiner started from DEFAULTS and rebuilt every
+      //   phase-derived quantity from there. The field bytes transfer exactly (SNAP-SENT/RECV agree on W and V), so
+      //   the joiner ends up holding the right amplitude at the WRONG GLOBAL PHASE — measured: |ψ|² agreeing to 9
+      //   figures while Σψ differed by 0.27 rad and argPin by 0.18 rad, i.e. the rotated ring seen on screen. A
+      //   global phase is conserved by the dynamics (the pin chases a rotating target; the cap is amplitude-only),
+      //   so the offset never decays — exactly the stable mismatch observed. regH matched throughout because the
+      //   register HASH is over shared verb state, not over this local op array.
+      lensOps: _lensOp.map((o) => ({ ...o })),
+      descSlots: _sb.slots.map((s) => s.desc ? { pos: s.descPos ? [...s.descPos] : null, obj: s.descObj || null, bar: s.descBar | 0, base: s.descBase ? _b64f(s.descBase) : null, hold: s.descHold ? _b64f(s.descHold) : null, posCap: s.descPosCap ? [...s.descPosCap] : null, capBar: s.descCapBar ?? null, e0: s.descE0 ?? null, live: s.descLive ? 1 : 0, attg: s.descAttG ? { dop: { ...s.descAttG.dop }, obj: s.descAttG.obj || null } : null, phi0: s.descPhi0 || 0, leash: s.leash?.save ? s.leash.save() : null, selfHold: s._attHold ? _b64f(s._attHold) : null, selfHoldPos: s._attHoldPos ? [...s._attHoldPos] : null, selfPhi0: s._holdPhi0 || 0, selfDigest: s._digestLeft | 0, selfKeyN: s._holdKeyN | 0 } : null),   // + the ψATT hold/digest (the PIN TARGET — a joiner without it forks the field)   // 𝔸-slot state (desc mode + coords + ω-time cursor + the dressed base/birth angle) — a joiner must resume the identical precession AND reconstruction   // + the per-slot LEASH via its own codec (all 9 fields: go/tx/ty/gx/gy/ll/l0/lt/lk). Only W's leash rode the wire before (engine setTransP), so a joiner's A-slot sat at a DEFAULT position while the leader's had drifted: _descPose renders ox/oy = leash - descPos, so the joiner painted the same bytes at a different offset. Found because a RECALL fixed it instantly - recall re-seeds the leash.
       tauK: _tauK ? _tauK.save() : null,
       turboOn: _turboOn ? 1 : 0,   // (the pre-capture sync ran at the top of _takeSnap — descSlots above already hold the synced bytes)
       linearMode: _linearMode | 0,
+      pinB: _pinBeta,   // THE GLOBAL PIN STRENGTH (2026-08-03): scales ψ += β·att every step for every slot, so it is physics and MUST ride the join — a joiner defaulting to _TRANSPORT_BETA while the leader sits at a slider-set value injects a differently-scaled complex vector per step → permanent global-phase fork (|ψ|² equal, argPin apart). Not in regH (that covers _lensOp[].beta, the per-slot refAmp).
+      slotBirth: _sb.slots.map((s2) => (s2?._birth ? { ...s2._birth } : null)),   // WHICH recall path birthed each slot (+ its lift args). The two births are not interchangeable — see the recipe note in _recallFrom — and the join replay must re-run the one the leader actually used, or it derives a different reconstruction from the same plate.
+      wLeash: W.leash?.save ? W.leash.save() : null,   // W's FULL leash via its own codec (2026-08-03). The engine slice carries only gx/gy (transPx/transPy) — the TARGET (tx/ty), the `go` flag and the lag terms never rode the wire at all, and in a ⌀PDE world even gx/gy were dropped because restoreEngine declines the slice. V/P1/P2 have shipped their full leash since 2026-07-31 (descSlots[].leash); this is the same codec for W, so an in-flight transport resumes identically instead of the joiner's W sitting still at the right position.
       shiftSeen: _siShift.saveCursor(), regSeen: _siReg.saveCursor(),   // the shift + register-verb cursors (+ pending stamped entries ride tauK.save via the 'shift'/'reg' queues — a mid-slide joiner applies them at their startSteps)
-      lastTgt: [_lastTgtX, _lastTgtY], driveMode: _driveMode, autoCompN: _autoCompN, tempoDiv: _tempoDiv, xatt: _xattOn, fieldMix: _fieldMix ? 1 : 0, virtT: _VIRT_T, occFrac: _occFrac, occMode: _occMode, livePlate: _recalledInto[3], recalledInto: [..._recalledInto], pinHold: _pinHold, lensObj: _lensObj, pinK: _sb.slots.map((s) => (s._pinK == null ? null : s._pinK)),   // lensObj = WHAT the pin holds (the probe geometry; every slot's att regenerates from it — a joiner must match or its pin target differs)   // pinHold + each slot's birth step: the pin fade must resume IDENTICALLY on a joiner (it scales the pin → in regH)   // fieldMix rides the snap (defaults ON → a joiner must adopt a leader that turned it OFF, else the edge-mixed field forks); virtT = the hologram depth (leg must match the leader's for recall); occFrac/occMode = the damage dial + method (so a JOINER's slider shows the real level); livePlate = which plate lives in P2 (the live-plate button state)
+      slotKv: _sb.slots.map((s2) => (s2?.kv | 0)), slotBorn: _sb.slots.map((s2) => (s2?.born ? 1 : 0)),   // V's OWN step counter: kv drives its trajectory (see the vKv note at the recall drain), and it is NOT in the slot-bank codec (which carries descBase/descAtt/descE0 only) nor in descSlots. A joiner starting kv at 0 while the leader's has climbed runs a DIFFERENT number of steps for the same shared step — the exact "vKv=14 vs 21 at the same solStep" fork already recorded in this file.
+      lastTgt: [_lastTgtX, _lastTgtY], driveMode: _driveMode, autoCompN: _autoCompN, tempoDiv: _tempoDiv, xatt: _xattOn, fieldMix: _fieldMix ? 1 : 0, virtT: _VIRT_T, occFrac: _occFrac, occMode: _occMode, livePlate: _recalledInto[3], recalledInto: [..._recalledInto], recallK: _sb.slots.map((s2) => (s2._pinK == null ? null : s2._pinK)), recallAt: _sb.slots.map((s2) => (s2.descPos ? [...s2.descPos] : null)), pinHold: _pinHold, lensObj: _lensObj, pinK: _sb.slots.map((s) => (s._pinK == null ? null : s._pinK)),   // lensObj = WHAT the pin holds (the probe geometry; every slot's att regenerates from it — a joiner must match or its pin target differs)   // pinHold + each slot's birth step: the pin fade must resume IDENTICALLY on a joiner (it scales the pin → in regH)   // fieldMix rides the snap (defaults ON → a joiner must adopt a leader that turned it OFF, else the edge-mixed field forks); virtT = the hologram depth (leg must match the leader's for recall); occFrac/occMode = the damage dial + method (so a JOINER's slider shows the real level); livePlate = which plate lives in P2 (the live-plate button state)
       // THE IFS KERNEL THE LEADER WAS STEPPING THROUGH AT THE SNAPSHOT STEP — version-matched to the shipped field. The
       // joiner MUST step through THIS ring, NOT the node's live ring: if the fractal clock advanced the ring version between
       // the leader's capture and the joiner's apply (a join landing at/after a kernel bump), the node's ring is a DIFFERENT
@@ -1243,6 +1708,27 @@ function makeMediumU1Renderer(core) {
       kernelVer: _E.kernelVer, ring: _E.ringCache ? { r: Array.from(_E.ringCache.r), w: Array.from(_E.ringCache.w), o: (_E.ringCache.o || []).map((tier) => Array.from(tier || [])) } : null,
     }; };
     const _restoreSnap = (s, n) => { if (!s) return;
+      // ── ADOPT THE PROBE GEOMETRY FIRST (2026-08-03) — THE OBJECT-SWITCH JOIN HOLE ────────────────────────────
+      //   _lensObj names the probe field every attractor is regenerated from (_plateAtt → _psiBaseOf(obj), memoised
+      //   in _baseCache). It DID ride the snapshot, but it was adopted ~180 lines BELOW the descSlots loop — and
+      //   that loop is what rebuilds each living slot's pin target:
+      //       sl.descAtt = _plateAtt(sl.descAttG.dop, sl.descPos, sl.descAttG.obj)
+      //   Running that first meant _baseCache was populated from the JOINER'S CURRENT object — the boot default
+      //   'letterA' — and the descAtt built from it was never recomputed when _lensObj later became the leader's
+      //   'ring'. _plateAtt also falls back to _lensObj whenever a slot's descAttG.obj is absent, so a legacy or
+      //   partially-filled descAttG resolves against the wrong geometry outright.
+      //   THE REPRODUCTION THIS EXPLAINS (user-reported): the page boots with the 'A' symbol, the LEADER switches
+      //   the UI to 'ring', then a peer joins. The joiner shows a ring (the shipped descBase bytes ARE the ring)
+      //   but its PIN TARGET was built from letterA — so it chases a different attractor than the leader from step
+      //   one. The pin is a contraction, so the two peers settle toward different fixed points and never
+      //   reconverge: same |ψ|² (the cap is amplitude-only), permanently different global phase. It matches the
+      //   measured signature exactly, and it is INTERMITTENT in the way reported — it only bites when the object
+      //   was switched away from the default before the join.
+      //   Adopt the geometry BEFORE anything can regenerate an attractor, and drop the memoised bases so every
+      //   later _psiBaseOf call in this restore builds from the leader's object.
+      if (s.lensObj && _PROBE_OBJS.includes(s.lensObj) && _lensObj !== s.lensObj) {
+        const _objPrev = _lensObj; _lensObj = s.lensObj; _baseCache.clear(); _rebuildBase();
+        console.log(`[JOIN-OBJ] probe geometry '${_objPrev}' → '${_lensObj}' adopted BEFORE any attractor is rebuilt — every descAtt/_plateAtt in this restore now regenerates from the LEADER's object. (Adopting this after the descSlots loop, as before, left the joiner pinned to its boot-default geometry while painting the leader's bytes.)`); }
       const _engOk = _E.restoreEngine({ ...s.eng, psiLensed: _f64b(s.eng?.psiLensed) }, { setStepClkC0: (c0) => { _stepClk.c0 = c0; }, setTorbE0: (e0) => { W.e0 = e0; }, setTransP: (x, y) => { W.leash.state.gx = x; W.leash.state.gy = y; } });
       // ⌀PDE JOIN: an abstract-register leader ships NO ψ (psiLensed null) → restoreEngine declines the slice. The
       // REGISTER IS the state — restore the engine counters by hand so the joiner resumes the abstract drive at the
@@ -1250,39 +1736,313 @@ function makeMediumU1Renderer(core) {
       if (!_engOk && Array.isArray(s.descSlots) && s.descSlots.some((d) => d)) { _E.solInit = true; _E.snapConsumed = true;
         _E.solSteps = s.eng?.solSteps | 0; _E.kwSteps = (typeof s.eng?.kwSteps === 'number') ? (s.eng.kwSteps | 0) : (s.eng?.solSteps | 0);
         if (typeof s.eng?.stepClkC0 === 'number') _stepClk.c0 = s.eng.stepClkC0;
-        W.e0 = (typeof s.eng?.torbE0 === 'number') ? s.eng.torbE0 : 1; }
+        W.e0 = (typeof s.eng?.torbE0 === 'number') ? s.eng.torbE0 : 1;
+        // W's LEASH MUST BE RESTORED HERE TOO (2026-08-03) — the ⌀PDE join hole. On the NORMAL path restoreEngine
+        //   applies the transport position via setTransP(x,y) → W.leash.state.gx/gy. This ABSTRACT fallback exists
+        //   precisely because restoreEngine DECLINES the slice (psiLensed is null — the register IS the state), and
+        //   it hand-restored solSteps/kwSteps/c0/torbE0 but NOT the leash. So in a ⌀PDE world W's transport position
+        //   silently lands at DEFAULT on the joiner while the leader's has drifted.
+        //   Why that shows up on V/P1/P2 and not on W: W's descPos is re-anchored to its own leash every bar, so W
+        //   self-corrects and looks right — but W's leash feeds the pin target and the cross-slot coupling that the
+        //   other slots chase, and nothing re-anchors those. The per-slot leash for V/P1/P2 was fixed on 2026-07-31
+        //   by shipping descSlots[].leash; W's rode ONLY inside the engine slice, which an abstract world never uses.
+        //   This is the same class as that fix, in the one path it was never applied to.
+        if (typeof s.eng?.transPx === 'number') W.leash.state.gx = s.eng.transPx;
+        if (typeof s.eng?.transPy === 'number') W.leash.state.gy = s.eng.transPy;
+        console.log(`[JOIN-⌀PDE] abstract register restore (no ψ) @solStep=${_E.solSteps} · W leash=[${W.leash.state.gx.toPrecision(17)},${W.leash.state.gy.toPrecision(17)}] (from the wire: ${typeof s.eng?.transPx === 'number' ? 'YES' : '⚠ MISSING — legacy snapshot, W transport falls back to this peer\'s default and the slots that chase W will differ'}) · c0=${_stepClk.c0.toFixed(4)} torbE0=${W.e0.toExponential(3)}`); }
+      // W's FULL leash (see the takeSnap note) — applied AFTER both engine paths so it supersedes the gx/gy-only
+      //   restore with the complete 9-field state (target, go flag, lag terms). Legacy snapshots have no wLeash and
+      //   keep the gx/gy behaviour above. This is what makes an IN-FLIGHT W transport resume on a joiner.
+      if (s.wLeash && W.leash?.restore) { W.leash.restore(s.wLeash);
+        console.log(`[JOIN-WLEASH] W leash restored in full · pos=[${W.leash.state.gx.toPrecision(17)},${W.leash.state.gy.toPrecision(17)}] tgt=[${W.leash.state.tx},${W.leash.state.ty}] go=${W.leash.state.go ? 1 : 0} — the engine slice ships only gx/gy, so without this a joiner's W stops at the right place but forgets where it was HEADED, and every slot whose pin chases W's pose follows a different target`); }
       if (s.stepClk) { _stepClk.rate = s.stepClk.rate ?? 1; _stepClk.ratePrev = s.stepClk.ratePrev ?? 1; }
       _bank.restore(s.bank); _sb.restore(s.slots);
+      // RESTORE RECEIPT: print the hash of every field the joiner actually took, so it can be compared against the
+      //   LEADER's own [SNAP-SENT] line. If sent==restored but fieldH still differs later, the divergence is AFTER
+      //   the restore (something re-seeds or re-quantizes); if they already differ here, the payload is the problem.
+      try { console.log(`[SNAP-RECV] solStep=${s.eng?.solSteps | 0} · psiLensed=${s.eng?.psiLensed ? _hashField(_f64b(s.eng.psiLensed)) : 'NULL'} · descBase=[${(s.descSlots || []).map((d, i) => d?.base ? `${SLOTN[i]}:${_hashField(_f64b(d.base))}` : `${SLOTN[i]}:—`).join(' ')}] · slotFields=[${(s.slotFields || []).map((f, i) => f ? `${SLOTN[i]}:${_hashField(_f64b(f))}` : `${SLOTN[i]}:—`).join(' ')}]`); } catch (e) {}
       for (let i = 0; i < _sb.slots.length; i++) { _sb.slots[i].field = s.slotFields?.[i] ? _f64b(s.slotFields[i]) : _sb.slots[i].field;
         _sb.slots[i].att = s.slotAtt?.[i] ? _f64b(s.slotAtt[i]) : _sb.slots[i].att; }
       W.field = _E.psiLensed;   // the engine slice restored psiLensed = W's field (they are the same store)
       _K.edge = s.K?.edge ? s.K.edge.map((r) => [...r]) : null; _K.capPh = s.K?.capPh ?? -1; _K.capStep = s.K?.capStep ?? -1;
       for (let i = 0; i < 4; i++) _K.src[i] = s.K?.src?.[i] ? _f64b(s.K.src[i]) : null;
       _holo.restore(s.plates, { deserialize: _f64b });   // the bank rebuilds the plate SHAPE; the app decodes the f32-base64 wire
-      (s.plates || []).forEach((raw, i) => { const pl = _plates[i]; if (pl) { pl.a = raw.a ? _f64b(raw.a) : _plateAtt(pl.dop, pl.pos, pl.obj); pl.selfAtt = !!raw.selfAtt; if (raw._dmg != null) pl._dmg = raw._dmg;   // selfAtt: this plate's `a` is a captured FIELD (shipped), so recall re-enters ψATT instead of the probe pin
+      (s.plates || []).forEach((raw, i) => { const pl = _plates[i]; if (pl) { pl.a = raw.a ? _f64b(raw.a) : _plateAtt(pl.dop, pl.pos, pl.obj); pl.selfAtt = !!raw.selfAtt; if (typeof raw.aPhi === 'number') pl.aPhi = raw.aPhi; if (raw._dmg != null) pl._dmg = raw._dmg;   // aPhi rides with `a`: the adopter's _holdPhi0 must be the angle the bytes were built with, not its own op angle   // selfAtt: this plate's `a` is a captured FIELD (shipped), so recall re-enters ψATT instead of the probe pin
         if (raw.p0) pl.p0 = _f64b(raw.p0); if (raw.w00) pl.w00 = _f64b(raw.w00); } });   // regenerate the live-only att + carry the damage marker + restore the PRISTINE (p0/w00) so the joiner re-damages/heals from the SAME clean bytes as the leader (byte-identical future damage)
       for (let i = 0; i < _sb.slots.length; i++) { const d = s.descSlots?.[i], sl = _sb.slots[i];   // 𝔸-slot restore: desc mode + coords + ω-time cursor + the dressed base (its 6 floats ride the bank)
         sl.desc = !!d; sl.descPos = d?.pos ? [...d.pos] : null; sl.descObj = d?.obj || null; sl.descBar = d?.bar | 0;
         sl.descBase = d?.base ? _f64b(d.base) : null; sl.descPhi0 = d?.phi0 || 0;
+        // THE PER-SLOT LEASH (2026-07-31). Only W's leash rode the wire (via the engine slice's setTransP); V/P1/P2
+        //   leashes were never shipped, so a joiner's 𝔸-slot started at a DEFAULT position while the leader's had
+        //   drifted. _descPose renders ox/oy = leash − descPos, so the joiner painted the same bytes at a different
+        //   offset/phase — permanent, because nothing re-syncs it. Diagnostic that found it: a RECALL made the peers
+        //   match instantly, and recall re-seeds the leash (V.leash.state.gx = V.descPos[0]) — so the leash was the
+        //   state the join was missing and the recall was repairing.
+        if (d?.leash && sl.leash?.restore) sl.leash.restore(d.leash);
         sl.descHold = d?.hold ? _f64b(d.hold) : (d?.base ? _f64b(d.base) : null);   // the living-declaration ANCHOR (legacy snapshots: anchor = base)
-        sl._attHold = d?.selfHold ? _f64b(d.selfHold) : null; sl._attHoldPos = d?.selfHoldPos ? [...d.selfHoldPos] : null; sl._holdPhi0 = d?.selfPhi0 || 0; sl._digestLeft = d?.selfDigest | 0; sl._holdSl2 = sl._attHold ? _mkSl2(sl._attHold) : null; sl._holdRef = null; sl._holdRefBar = sl._attHold ? ((_E?.frameBar | 0) + _HOLD_MIN) : -1; sl._holdRefPrev = null; sl._holdRefN = 0; sl._holdRefStuck = false;   // a joiner re-settles its own reference (relaxation is a local transient, not shared state)   // identity RECOMPUTED, not shipped: sl2 is a pure fn of the hold bytes + the live stencil, so a joiner derives the same charges without wire cost   // ψATT: the field-borne pin target resumes identically on the joiner
+        sl._attHold = d?.selfHold ? _f64b(d.selfHold) : null; sl._holdKeyN = (d?.selfKeyN | 0); sl._holdBytesKey = null; sl._attCache = null; sl._shiftCache = null; sl._attHoldPos = d?.selfHoldPos ? [...d.selfHoldPos] : null; sl._holdPhi0 = d?.selfPhi0 || 0; sl._digestLeft = d?.selfDigest | 0; sl._holdSl2 = sl._attHold ? _mkSl2(sl._attHold) : null; sl._holdRef = null; sl._holdRefBar = sl._attHold ? ((_E?.frameBar | 0) + _HOLD_MIN) : -1; sl._holdRefPrev = null; sl._holdRefN = 0; sl._holdRefStuck = false;   // ψATT join: the field-borne PIN TARGET must resume identically — bytes + POSE + birth phase + digest, or the joiner's pin differs and the field forks. selfKeyN adopts the leader's counter; the shift cache is keyed on the hold BYTES (shared), never on a peer-local counter. sl2 is RECOMPUTED (pure fn of bytes + stencil, no wire cost); the settle reference is peer-local telemetry and re-settles locally.
         sl.descPosCap = d?.posCap ? [...d.posCap] : (d?.pos ? [...d.pos] : null); sl.descCapBar = d?.capBar ?? null;
         sl.descE0 = d?.e0 ?? (sl.descBase ? (() => { let e = 0; for (let j = 0; j < sl.descBase.length; j++) e += sl.descBase[j] * sl.descBase[j]; return e || 1; })() : null);   // the register engine's cap level (legacy: recompute from the shipped base — same f32 bytes ⇒ same sum)
         sl.descDisp = sl.descBase ? Float64Array.from(sl.descBase) : null;   // display buffer seeded from the shipped state (bar-grid film from frame one)
         sl.descLive = !!d?.live; sl.descAttG = d?.attg ? { dop: { ...d.attg.dop }, obj: d.attg.obj || null } : null;
-        sl.descAtt = (sl.descLive && sl.descAttG && sl.descPos) ? _plateAtt(sl.descAttG.dop, sl.descPos, sl.descAttG.obj) : null; }   // a living slot's pin target REGENERATED (pure register fn — identical bytes; the att itself never rides the wire)
+        // ψATT SLOTS PIN TO THEIR HOLD, NOT TO A REGENERATED PLATE (2026-08-02). This rebuilt descAtt from
+        //   _plateAtt(dop,pos,obj) for every live slot — but a slot that has ADOPTED (ψATT) is pinned to its
+        //   field-borne hold, and _selfHold() is what the leader actually chases. Regenerating a probe attractor here
+        //   gave the joiner a DIFFERENT pin target from the leader while _attHold itself shipped correctly, so both
+        //   peers contracted toward different fixed points with every other column identical. The hold is restored
+        //   just above; leave descAtt null for such a slot and let the bar loop rebuild it with _selfHold(), exactly
+        //   as the leader does. Non-adopted live slots keep the plate regeneration, which is right for them.
+        sl.descAtt = (sl.descLive && !sl._attHold && sl.descAttG && sl.descPos) ? _plateAtt(sl.descAttG.dop, sl.descPos, sl.descAttG.obj) : null; }   // a living slot's pin target REGENERATED (pure register fn — identical bytes; the att itself never rides the wire)
       if (_tauK && s.tauK) { _tauK.restore(s.tauK); _siShift.reattach(); _siReg.reattach(); }   // restore replaces the queue RECORDS → re-attach BOTH handles (they closed over the old records); pending mid-slide shifts + register verbs now drain at their stamped startSteps
-      _turboOn = !!s.turboOn; _turboArmed = false; _tbCur = -1;   // adopt the world's executor (replicated dial); never auto-fire the boot-turbo on a joiner
+      if (Array.isArray(s.lensOps)) for (let li4 = 0; li4 < Math.min(4, s.lensOps.length); li4++) { const src = s.lensOps[li4]; if (src) Object.assign(_lensOp[li4], src); }   // THE REGISTER OPS — see the takeSnap note: without these the joiner runs the right field at the wrong global phase
+      // (the ψATT descAtt seed lives in _recallPlateLive itself now — the birth function sets a ψATT slot's pin to its
+      //  HOLD, not a probe, so both a live recall and the JOIN-REPLAY below are self-consistent; see the note there.)
+      _turboOn = !!s.turboOn; _turboArmed = false;
+      // ANCHOR THE TURBO CURSOR TO THE RESTORED SHARED STEP (2026-08-01). _tbCur is the texture's step cursor, and it
+      //   was lazily initialised as `if (_tbCur < 0) _tbCur = k` on the FIRST advance — where k = _base + i is the
+      //   PEER'S OWN cursor at that instant. A joiner therefore anchored wherever it happened to be when turbo first
+      //   ran, and then advanced in lockstep forever: MEASURED with mu1.tbTrace, both peers stepping 7/block with a
+      //   CONSTANT 112-step offset that never converges. Every receipt matched (bytes, ring, register, cap) because
+      //   they were all correct — they just described moments 112 steps apart, which near a contracting fixed point
+      //   looks exactly like a small frozen phase/amplitude difference. The restored solSteps IS the shared step the
+      //   snapshot bytes belong to, so anchor there instead of at a peer-local k.
+      _tbCur = (_E.solSteps | 0) || -1;
+      console.log(`[JOIN-TBCUR] turbo cursor anchored at the restored shared step ${_tbCur} (was: lazily set to this peer's own k on the first advance — the source of a constant step offset between peers)`
+        + ` · Q-grid: ${_tbCur % Q === 0 ? 'ALIGNED (offset 0)' : `OFF by ${_tbCur % Q}/${Q}`} — compare with the LEADER's [SNAP-ALIGN]. Both peers off the grid by the SAME amount is fine (they stay in phase); a MISMATCH means their Q blocks are permanently offset, which shifts when the refreshed pin target enters the step loop → the |ψ|²-equal / argPin-apart rotation`);
+      // JOIN MUST INVALIDATE THE GPU TEXTURES (2026-07-31 — the same omission as the turbo verb, in the other place
+      //   it matters). The restore has just replaced every descBase with the LEADER'S bytes, but _tbAdvanceAll only
+      //   primes when `_tbTexStep[i] < 0 || _texDirty`. A joiner whose textures still carry _tbTexStep >= 0 from
+      //   before the join SKIPS the prime and steps from its own stale texture instead of the restored state — so it
+      //   starts mismatched and never converges. Symptom that located it: toggling CPU→GPU made the peers match
+      //   (that path forces a re-prime) while a fresh browser join started mismatched from the first frame.
+      for (let ti3 = 0; ti3 < 4; ti3++) { _tbTexStep[ti3] = -1; const st3 = _sb.slots[ti3]; if (st3) st3._texDirty = true; }
+      // PRIME THE FIELD-MODE W TEXTURE (2026-07-31). _tbPrime is the ONLY path that uploads CPU bytes to a slot's GPU
+      //   texture, and _tbAdvanceAll calls it only for slots passing _tbLive(i) — which requires `sl.desc`. A W in
+      //   FIELD mode has desc=false, so it is never primed: on a turbo join the register and W.field restore fine on
+      //   the CPU while the GPU keeps the joiner's PRE-JOIN eye texture, and turbo then steps THAT. The CPU executor
+      //   is unaffected because it steps W.field directly — which is exactly the reported symptom (CPU restore
+      //   correct, turbo restore wrong, for W as well as V). Upload the restored bytes into the default eye buffer
+      //   so the first turbo advance starts from the leader's state.
+      // PRIME EVERY RESTORED SLOT DIRECTLY (2026-07-31). Marking _texDirty/_tbTexStep=-1 and trusting _tbAdvanceAll
+      //   to notice does NOT work on a joiner: measured with mu1.primeTrace, the leader logs [PRIME] but the joiner
+      //   logs NOTHING — the advance loop's `_tbLive(i)` gate is not satisfied at the moment it first runs, so the
+      //   prime is skipped and never revisited, and turbo steps the browser's PRE-JOIN texture while descBase holds
+      //   the leader's bytes. The CPU executor is immune (it steps descBase directly) — exactly the reported
+      //   asymmetry. So upload here, unconditionally, right after the bytes land.
+      if (_turboOn && _gpu) { for (let pi = 0; pi < 4; pi++) { const ps = _sb.slots[pi];
+        if (!ps?.desc || !ps.descBase || !ps.descE0) continue;
+        if (pi > 0 && !ps.descLive) continue;
+        // WRITE BOTH HALVES OF THE PING-PONG (2026-08-03) — THE PARITY FORK, measured.
+        //   Each slot's eye is a texture PAIR with a `src` marker naming the half that currently holds the field.
+        //   That marker is per-GPU-CONTEXT state, advanced by however many ops THIS peer has run on the slot since
+        //   boot — it is not replicated and does not ride the snapshot. Measured at solStep=6153: the leader logged
+        //   [SNAP-PARITY] W:B V:A while the joiner logged [JOIN-PARITY] W:A V:A — OPPOSITE parity on W. (An earlier
+        //   run had them agree, which is exactly why the symptom is INTERMITTENT.)
+        //   setEyePsi writes ONLY the half `src` names, so the OTHER half keeps this peer's stale PRE-JOIN content.
+        //   Any op that reads the pair at the other parity — or any later flip — then propagates bytes the leader
+        //   never had, while every CPU-side hash (regH, attH, e0, descBase) still matches because each peer is
+        //   internally consistent. W's parity is the one that matters most even when V's agrees: V's pin target and
+        //   the cross-slot coupling are built from W's state.
+        //   setEyePsiBoth writes the field into BOTH halves, which makes the restored state parity-INDEPENDENT: it
+        //   no longer matters which half either peer happens to be on. Cost is one extra texture upload per slot,
+        //   once, at join.
+        try { _gpu.selectEyeSlot(pi); (_gpu.setEyePsiBoth || _gpu.setEyePsi).call(_gpu, ps.descBase); _gpu.commitEyeSlot(pi); _gpu.markEyeSlotPrimed(pi);
+          ps._texDirty = false; _tbTexStep[pi] = (_E.solSteps | 0);   // the texture now HOLDS the restored bytes, which belong to the restored shared step — say so, so the first _tbAdvanceAll does NOT re-prime (a re-prime would reset parity mid-flight) and advances from the correct cursor
+          // AND SAY THE READBACK IS CURRENT (2026-08-03). _tbSyncSlot early-outs on
+          //   `_texStepSynced === _tbTexStep[i]`, and this block leaves _texStepSynced at the joiner's PRE-JOIN
+          //   value. Two ways that bites, both observed as "every shared column matches, the texture differs":
+          //    • stale != solSteps → the first sync READS BACK the texture over the freshly restored descBase.
+          //      Harmless only if the texture is already exact; at join it is the leader's bytes re-quantized
+          //      through the f32 upload, so the readback silently REPLACES the wire bytes with a round-tripped
+          //      copy — and descE0 (the cap level) still refers to the pre-round-trip bytes.
+          //    • stale == solSteps by coincidence → the first real sync is SKIPPED and descBase stays behind
+          //      the texture for a whole Q-block.
+          //   The texture and descBase are equal RIGHT NOW by construction, so stamp both cursors together.
+          ps._texStepSynced = (_E.solSteps | 0);
+          // seed the engine-energy meter FROM the restored bytes rather than nulling it: _engE feeds ⟲coevo's
+          //   gain gate (leashGainEnergy) when unpinned, and a null there falls back to descE0 — a DIFFERENT value
+          //   than the leader's live meter, i.e. a peer-local input to W's leash advance, which every other slot's
+          //   pin chases. Computing it here makes it a pure fn of the restored (shared) bytes.
+          { let _eJ = 0; for (let _j = 0; _j < ps.descBase.length; _j++) _eJ += ps.descBase[_j] * ps.descBase[_j]; ps._engE = _eJ; }
+          console.log(`[JOIN-PRIME] ${SLOTN[pi]} descBase uploaded to its GPU texture · H=${_hashField(ps.descBase)} · texStep=texSynced=${_E.solSteps | 0} — without this the joiner's turbo steps its PRE-JOIN texture (CPU mode was unaffected: it steps descBase directly)`); } catch (e) { console.warn('[JOIN-PRIME] failed', SLOTN[pi], e); } }
+        _gpu.selectEyeSlot(null); }
+      if (_turboOn && _gpu && !W.desc && W.field) { try { _gpu.selectEyeSlot(null); (_gpu.setEyePsiBoth || _gpu.setEyePsi).call(_gpu, W.field); _gpu.selectEyeSlot(null);   // BOTH halves — same parity fork as the slot prime above (the default eye buffer has its own src marker)
+        console.log(`[JOIN-PRIME] field-mode W uploaded to the GPU eye buffer · fieldH=${_hashField(W.field)} — without this, turbo steps the joiner's pre-join texture (CPU mode was unaffected because it steps W.field directly)`); } catch (e) { console.warn('[JOIN-PRIME] failed', e); } }
+      _filmStep = [-1, -1, -1, -1]; if (_gpu?.dropFilm) for (let fi3 = 0; fi3 < 4; fi3++) _gpu.dropFilm(fi3);   // films are captures of the PRE-JOIN state — retire them with the textures
       _linearMode = Math.max(0, Math.min(2, s.linearMode | 0));   // adopt the world's linear mode
+      if (typeof s.pinB === 'number') { const _pbPrev = _pinBeta; _pinBeta = Math.max(0, Math.min(1, s.pinB));   // the leader's GLOBAL pin strength — see the takeSnap note: an unadopted β is a permanent global-phase fork
+        if (_pbPrev !== _pinBeta) console.log(`[JOIN-PIN] β ${_pbPrev.toFixed(2)} → ${_pinBeta.toFixed(2)} adopted from the leader — this scales ψ+=β·att at EVERY step, so a joiner keeping its own β injects a differently-scaled complex vector per step: |ψ|² stays equal (the cap is a real scale) while the GLOBAL PHASE drifts permanently apart`); }
       _siShift.restoreCursor(s.shiftSeen | 0); _siReg.restoreCursor(s.regSeen | 0);
+      if (Array.isArray(s.slotKv)) for (let ki = 0; ki < _sb.slots.length && ki < s.slotKv.length; ki++) { const sk = _sb.slots[ki]; if (sk) sk.kv = s.slotKv[ki] | 0; }
+      if (Array.isArray(s.slotBorn)) for (let ki = 0; ki < _sb.slots.length && ki < s.slotBorn.length; ki++) { const sk = _sb.slots[ki]; if (sk) sk.born = !!s.slotBorn[ki]; }
+      if (Array.isArray(s.slotBirth)) for (let ki = 0; ki < _sb.slots.length && ki < s.slotBirth.length; ki++) { const sk = _sb.slots[ki]; if (sk) sk._birth = s.slotBirth[ki] ? { ...s.slotBirth[ki] } : null; }   // the birth recipe rides the wire so a SECOND join still reproduces the original recall path
       _lastTgtX = s.lastTgt?.[0] ?? NaN; _lastTgtY = s.lastTgt?.[1] ?? NaN; if (typeof s.driveMode === 'string') _driveMode = s.driveMode;
       _autoCompN = s.autoCompN | 0; _tempoDiv = Math.max(1, s.tempoDiv | 0); _autoClose = false; _xattOn = !!s.xatt; _fieldMix = (s.fieldMix == null) ? true : !!s.fieldMix; _VIRT_T = (s.virtT | 0) || 16;
       if (typeof s.occFrac === 'number') _occFrac = s.occFrac; if (s.occMode) _occMode = s.occMode | 0;   // the damage dial + method (joiner's slider shows the leader's real damage level)
       _pinHold = (s.pinHold | 0) || 0;   // the ⌛pin-fade dial (replicated: it scales the pin, which is in regH)
-      if (s.lensObj && _PROBE_OBJS.includes(s.lensObj)) { _lensObj = s.lensObj; _baseCache.clear(); _rebuildBase(); }   // WHAT the pin holds — a joiner must regenerate every att from the SAME probe geometry
+      // (_lensObj is now adopted EARLY — see the note at the top of _restoreSnap. Kept here as a no-op guard for the
+      //  case where the early adopt did not fire; re-running it is harmless because it only re-derives from bytes.)
+      if (s.lensObj && _PROBE_OBJS.includes(s.lensObj) && _lensObj !== s.lensObj) { _lensObj = s.lensObj; _baseCache.clear(); _rebuildBase();
+        console.warn(`[JOIN-OBJ] ⚠ late lensObj adopt → '${_lensObj}' (the early adopt did not fire; any att regenerated before this point used the WRONG probe geometry)`); }
       if (Array.isArray(s.pinK)) for (let i = 0; i < _sb.slots.length; i++) { const v = s.pinK[i]; if (v != null) _sb.slots[i]._pinK = v | 0; }   // each slot's birth step → the fade resumes at the identical phase on the joiner
-      if (Array.isArray(s.recalledInto)) for (let i = 0; i < 4; i++) _recalledInto[i] = (s.recalledInto[i] ?? -1) | 0;   // which plate EACH slot holds (any slot can host a live plate) — so a joiner's damage-relift + button state are right
+      if (Array.isArray(s.recalledInto)) for (let i = 0; i < 4; i++) _recalledInto[i] = (s.recalledInto[i] ?? -1) | 0;
       else if (typeof s.livePlate === 'number' && s.livePlate >= 0) _recalledInto[3] = s.livePlate | 0;   // legacy snapshots carried only P2's   // adopt the world's mode + replicated dials (fieldMix defaults ON for pre-toggle snapshots; virtT defaults 16)
+      // ── REPLAY THE RECALL INSTEAD OF COPYING ITS RESULT (2026-07-31) ────────────────────────────────────────────
+      //   THE CLASS OF BUG THIS ENDS: a recall is a REPLICATED VERB — every peer runs _recallPlateLive/_recallFrom
+      //   from the same bank and derives the same state, which is why "do a recall" always re-synced the peers. A
+      //   JOIN is not: it ships V's state as DATA, so anything the recall DERIVES rather than STORES is missing
+      //   unless the snapshot enumerates it. We found those one at a time — lensOps, then the per-slot leash — and
+      //   that method never terminates: the next unlisted derived field is always waiting.
+      //   THE FIX: the joiner re-runs the SAME function with the SAME plate. _recallPlateLive(idx, ti, k) rebuilds
+      //   descBase / descPhi0 / descPos / descE0 / descAttG / descAtt / the ψATT hold / the leash from the plate
+      //   alone, and every input is already replicated (the bank ships; _recalledInto ships; k is shared). So the
+      //   joiner DERIVES what the leader derived, including fields nobody has enumerated. This is the same law the
+      //   rest of the arc runs on — a stamped verb replayed from shared state, not a serialized copy of results.
+      //   Only for slots that are LIVING recalls (idx >= 0 and the plate exists); everything else keeps the
+      //   byte-restore above. The aging anchor (_pinK) and placement (descPos) ride the wire so the replayed slot
+      //   resumes at the leader's birth step and position rather than the plate's default.
+      // ── ADOPT THE KERNEL BEFORE THE REPLAY (2026-08-03) — MEASURED: the replay was SILENTLY DOING NOTHING ──────
+      //   The lift is a PROPAGATION: _recallPlateLive → _holo.lift → specLeg → lambda(), and lambda() reads
+      //   ctx.ringCache() / ctx.kernelVer(). Those were adopted ~65 lines BELOW this loop, so at replay time the
+      //   joiner still had its pre-join ring — or none at all. lambda() returns null without a ring, so specLeg
+      //   returns null, so _holo.lift returns null, and _recallPlateLive hits its own guard
+      //       const lift = _holo.lift(pl, {scale:'all'}); if (!lift) return;
+      //   and RETURNS BEFORE WRITING ANYTHING. No derived descPos/leash, no descAttG, no descAtt, no ψATT hold —
+      //   the slot kept only the raw byte-restore while [JOIN-A] cheerfully reported those leftovers as "derived".
+      //   MEASURED: the joiner logged `[JOIN-LIFT] liftVer=-1` — kernelVer at its sentinel, i.e. no kernel present.
+      //   That is why shape A changed nothing, and why the reconstruction renders at a different SCALE: the joiner
+      //   never re-derived the reconstruction at all. Same ordering class as the _lensObj hole — state adopted
+      //   after the code that consumes it.
+      //   Adopt ringCache/kernelVer here (the GPU setRings stays below — that is a GPU-side concern, and the λ-grid
+      //   is pure CPU). Idempotent: the block below re-assigns the identical values.
+      { const _preOffTot = (s.ring?.o) ? s.ring.o.reduce((a, t) => a + ((t?.length || 0) >> 1), 0) : 0;
+        const _preJr = (s.ring && s.ring.r && s.ring.r.length && _preOffTot > 0) ? s.ring : (n.cachedRadii?.length ? { r: n.cachedRadii, w: n.cachedWeights, o: n.cachedOffsets } : null);
+        if (_preJr) { _E.ringCache = { r: _preJr.r, w: _preJr.w, o: _preJr.o };
+          _E.kernelVer = (_preJr === s.ring && typeof s.kernelVer === 'number') ? s.kernelVer : (n.cachedRadiiVersion | 0);
+          console.log(`[JOIN-KERNEL] ring+kernelVer=${_E.kernelVer} adopted BEFORE the recall replay (src=${_preJr === s.ring ? 'SNAPSHOT' : 'NODE'}) — the lift propagates through this λ-grid; without it lambda() returns null, _holo.lift returns null, and _recallPlateLive returns WITHOUT WRITING ANYTHING (the silent no-op that made shape A ineffective)`); }
+        else console.warn(`[JOIN-KERNEL] ⚠ no ring available before the replay (snapshot ring empty AND node ring empty) — the lift will return null and every living slot will keep only its byte-restore`); }
+      try {
+        for (let ri = 0; ri < 4; ri++) { const idx = _recalledInto[ri];
+          if (idx < 0 || !_plates[idx]?.p) continue;
+          const sl2 = _sb.slots[ri]; if (!sl2 || !sl2.desc || !sl2.descLive) continue;   // only living 𝔸-recalls; a field-mode or parked slot keeps its restored bytes
+          const rk = (Array.isArray(s.recallK) && s.recallK[ri] != null) ? (s.recallK[ri] | 0) : (_E.solSteps | 0);
+          const rat = (Array.isArray(s.recallAt) && s.recallAt[ri]) ? s.recallAt[ri] : null;
+          // PRESERVE THE EVOLVED BYTES, RE-DERIVE THE REST. The field itself transfers correctly (SNAP-SENT ==
+          //   SNAP-RECV on every receipt) and it has LIVED since the recall — pinned, stepped, ω-aged for
+          //   solSteps−recallK steps. Replaying the recall wholesale rebuilds V as it was AT BIRTH and clobbers that
+          //   evolution with a stale reconstruction. What the join actually loses is the DERIVED register/pose state
+          //   around the bytes (descAttG, descAtt, descPhi0, descE0, the ψATT hold, the leash) — the fields nobody
+          //   enumerated. So: run the same code the leader ran to re-derive those, then put the restored bytes back.
+          // ── THE REPLAY MUST RESTORE EVERY *AGED* FIELD, NOT JUST THE BYTES (2026-08-02) ──────────────────────
+          //   THE BUG THIS FIXES: "W syncs on join, V/P1/P2 do not — but a fresh recall re-syncs them instantly."
+          //   _recallPlateLive is a BIRTH function: it writes the slot as it was AT RECALL TIME. This block only put
+          //   FIVE things back (descBase/descE0/descDisp/leash/descPos), so every OTHER field it touches stayed at
+          //   BIRTH on the joiner while the leader's had aged for solSteps−recallK steps. W was immune only because
+          //   W is never in _recalledInto, so it never enters this loop at all — exactly the reported asymmetry.
+          //   The clobbered aged state, and why each one forks the field:
+          //    • descBar — the AGING CURSOR. Reset to floor(rk/21) = the BIRTH bar. The very next bar boundary runs
+          //      `nbD = barA − descBar` (the bar loop) and catches up HUNDREDS of bars in one frame: _lensOp.phase
+          //      jumps by nbD·ω and the leash advances nbD times. This is the dominant term — it alone re-poses and
+          //      re-phases the slot on the joiner's first bar, which is why the divergence appears immediately and
+          //      never heals. (descPosCap/descCapBar are the same cursor's capture stamp.)
+          //    • _lensOp[ri].phase/prec/omega — the U(1) REGISTER OP, reset to ∠pl.dop/0/pl.dop.omega. The leader's
+          //      phase has been ticking +ω every bar since birth. It is BOTH the render's dphi (∠now − descPhi0) and
+          //      the rotation applied to the ψATT pin target via _holdOp — so a wrong op is a wrong PIN, and the pin
+          //      is a contraction: the two peers then converge to DIFFERENT fixed points and freeze there. Note this
+          //      also undid the `lensOps` restore done above, which is the very state that restore exists to carry.
+          //    • descPhi0 — the aging REFERENCE (∠now − descPhi0). _recallPlateLive sets ∠pl.dop, but a slot born via
+          //      _recallFrom carries descPhi0 = 0, and a materialized slot carries the op angle at capture. Forcing
+          //      the plate's value gives the joiner a different zero for the same rotation.
+          //    • _attHold/_holdPhi0/_holdKeyN/_holdSl2 — the ψATT hold is re-derived from pl.a, discarding the AGED
+          //      hold that descSlots.selfHold shipped correctly. Same class as the descAtt fix above: the leader
+          //      chases its evolved hold, the joiner chases a birth copy.
+          //    • descHold — nulled; it is the living-declaration ANCHOR the restore had just decoded.
+          //   So: snapshot the restored (aged) state, run the replay purely to re-derive what the wire does NOT
+          //   carry (descAttG and the descObj/born/desc flags), then put ALL of the aged state back.
+          // ── SHAPE A: DERIVE EVERYTHING, ADOPT ONLY THE BYTES AND THE ω-TIME CURSOR (2026-08-03) ──────────────
+          //   THE LAW (user's framing, and the arc's own): the PLATE is the transferable object; the ⌀PDE register
+          //   moves it in HOLOGRAPHY TIME. A joiner does not need the leader's history — it needs the same plate and
+          //   the same ω-time cursor, and it re-derives the rest by running the SAME code the leader ran.
+          //   WHAT WAS WRONG BEFORE: this block already replayed _recallPlateLive (good) and then restored TWELVE
+          //   fields on top of it (bad) — leash, descPos, descBar, descPosCap/descCapBar, descPhi0, descHold, the
+          //   whole ψATT hold group, and the entire _lensOp. Each was added to fix one symptom, and each put
+          //   LEADER-COPIED state where DERIVED state belongs, so the two peers' V's were assembled by different
+          //   rules. That is the "the next unlisted derived field is always waiting" trap the replay exists to end,
+          //   re-entered from the other side. It is also exactly why a fresh RECALL fixes the slot permanently
+          //   (recall derives all of it from the plate on EVERY peer) while a JOIN does not.
+          //   WHAT WE ADOPT, and why only these two:
+          //    • descBase/descE0/descDisp — THE BYTES. The field has lived (solSteps−rk) steps since birth and a
+          //      birth-time lift cannot reproduce that. This is state, not a derived quantity.
+          //    • _lensOp[ri].phase (+prec) — THE ω-TIME CURSOR: where in its oscillation V currently is. Not
+          //      derivable from the plate (it advances +ω per bar since birth), and it is what "sync the timing to
+          //      the living field" means. descBar is set to the CURRENT bar so the bar loop does not then replay
+          //      hundreds of catch-up ω ticks on top of the cursor we just adopted.
+          //   EVERYTHING ELSE STAYS DERIVED: descPos/leash (re-seeded from the plate, as recall does), descPhi0
+          //   (the plate's birth angle — the reference the cursor is measured against), descAttG/descAtt and the
+          //   ψATT hold (rebuilt from the plate, including selfAtt inheritance), descHold, descPosCap/descCapBar.
+          //   ω is carried by _lensOp too and IS derived (pl.dop.omega), so it is not re-adopted.
+          const _bIn = sl2.descBase ? _hashField(sl2.descBase) : '—';   // what the restore left in the slot, BEFORE the replay touches it
+          const _keepBase = sl2.descBase, _keepE0 = sl2.descE0, _keepDisp = sl2.descDisp;
+          const _keepPhase = _lensOp[ri]?.phase, _keepPrec = _lensOp[ri]?.prec;   // the ω-time cursor ONLY (not the whole op)
+          // ── ADOPT THE CURSOR *BEFORE* THE BIRTH, NOT AFTER (2026-08-03) ────────────────────────────────────────
+          //   _recallPlateLive DERIVES state from _lensOp[ri] as it stands when it runs — in particular
+          //       V1._holdPhi0 = lensU1.angle(_lensOp[ti])
+          //   which is the ψATT hold's ROTATION REFERENCE: _holdOp rotates the pin target by (∠now − _holdPhi0)
+          //   every bar, so it is physics, and it feeds regH through the pin.
+          //   Adopting the leader's cursor AFTER the birth left _holdPhi0 anchored to the BIRTH phase while the op
+          //   jumped straight to the AGED phase — so the joiner's pin target was rotated by a different amount than
+          //   the leader's, whose _holdPhi0 and op aged together from the same instant. Two peers then chase
+          //   differently-rotated attractors: a small, permanent, visible difference that a fresh recall clears
+          //   (both peers re-anchor together) — exactly the reported behaviour.
+          //   Setting the cursor first makes every phase-derived quantity inside the birth consistent with it.
+          if (typeof _keepPhase === 'number') _lensOp[ri].phase = _keepPhase;
+          if (typeof _keepPrec === 'number') _lensOp[ri].prec = _keepPrec;
+          { const _bRec = (Array.isArray(s.slotBirth) ? s.slotBirth[ri] : null) || sl2._birth || null;
+            _recallPlateLive(idx, ri, rk, rat, { ...(_bRec || { via: 'plateLive', scale: 'all', shift: null, atPos: null }), replay: true }); }   // reproduce the ORIGINAL birth recipe (which recall path, which lift args, which phase convention) — see the note in _recallFrom; replay:true keeps the aged cursor installed above
+          if (_keepBase) { sl2.descBase = _keepBase; sl2._texDirty = true;   // the evolved field wins over the birth lift
+            if (_keepE0 != null) sl2.descE0 = _keepE0;                        // and its cap level, measured from those bytes
+            sl2.descDisp = _keepDisp || Float64Array.from(_keepBase);
+            sl2._holdBytesKey = null; sl2._shiftCache = null; sl2._attCache = null; }   // caches keyed on the hold/bytes must not survive the swap
+          // THE TIMING SYNC — adopt the ω-time cursor from the leader.
+          //   descBar is NOT stamped to "now" any more: it is now STORE-ANCHORED (floor(pl.k/21), set by the birth
+          //   fn from the plate's own step), which is identical on every peer by construction. Overwriting it here
+          //   would re-introduce exactly the recall-anchored quantity the store-anchoring removes — and the bar loop
+          //   catch-up it was guarding against is not a problem for a store-anchored cursor, because the leader's
+          //   descBar is the SAME value: both peers have already aged from the same anchor, so nothing is replayed.
+          console.log(`[JOIN-BYTES] ${SLOTN[ri]} · payload=${(s.descSlots?.[ri]?.base) ? _hashField(_f64b(s.descSlots[ri].base)) : '—'} · afterRestore=${_bIn} · afterReplay=${sl2.descBase ? _hashField(sl2.descBase) : '—'} · e0=${(sl2.descE0 ?? 0).toPrecision(17)} — payload==afterRestore==afterReplay is REQUIRED; the first column that changes is where the bytes are being altered`);
+          console.log(`[JOIN-REPLAY] ${SLOTN[ri]} re-derived from plate ${idx + 1}/${_plates.length} (birth k=${rk}${rat ? ` pos=[${rat[0]},${rat[1]}]` : ''}) — DERIVED state replayed from the same code the leader ran; the EVOLVED descBase from the snapshot is kept (it has lived ${Math.max(0, (_E.solSteps | 0) - rk)} steps since birth and the replay cannot reproduce that)`);
+          // AGED-STATE RECEIPT: every column here is what the BIRTH replay would have reset and this block put back.
+          //   Each `kept≠birth` is a fork the joiner would otherwise have taken. Compare against the leader's
+          //   [PAINT] line at the SAME bar: φ/descPhi0/attH must all match there, and descBar must equal
+          //   floor(solStep/21) — a descBar still at the BIRTH bar means the bar loop is about to catch up
+          //   `barA − descBar` bars in one frame and re-pose the slot.
+          // THE SHAPE-A SPLIT, made auditable: exactly TWO things are adopted from the leader (the bytes and the
+          //   ω-time cursor); every other column below was DERIVED by _recallPlateLive from the plate, i.e. by the
+          //   same code path a replicated recall runs on every peer. If a column here differs between peers, it is
+          //   derived from an input that itself differs (the plate, _lensObj, or the bank) — NOT from a missing
+          //   snapshot field, and the fix belongs at that input rather than in another restore line.
+          // ── THE LIFT'S PROPAGATOR IS NOT IN THE PLATE (2026-08-03) — the candidate that explains "same energy,
+          //    different ring SIZE". _recallPlateLive → _holo.lift → specLeg → lambda(), and lambda() is cached on
+          //    ctx.kernelVer(): the lift propagates the plate through the λ-grid of the kernel version CURRENT AT
+          //    LIFT TIME. The plate records p/m/dop/pos/obj/w0/bw/k — the interference pattern — but NOT the
+          //    propagator that made it. The fractal clock advances kernelVer continuously (observed 176→407), so:
+          //      • a REPLICATED recall is exact — every peer lifts at the SAME shared kernelVer;
+          //      • a JOIN is not — the leader's V was lifted at the version current when it recalled, while the
+          //        joiner re-lifts NOW, at a different version ⇒ a different propagator ⇒ the reconstruction
+          //        focuses at a different SCALE. A hologram read at the wrong depth changes size, not energy —
+          //        which is why |ψ|², e0, regH and attH all match while the ring is visibly a different radius,
+          //        and why a fresh recall on both peers fixes it permanently.
+          //    Shape A makes this STRUCTURAL rather than masked: under A the lift IS the derivation, so it can no
+          //    longer be papered over by adopting the leader's bytes.
+          //    Logged, not yet corrected: the honest fix is for the plate to carry its store-time kernelVer and for
+          //    the lift to use THAT λ-grid (a plate is a record of a propagation; the propagation belongs with it).
+          //    liftVer==storeVer on BOTH peers ⇒ this is not the cause; a difference ⇒ it is.
+          try { console.log(`[JOIN-ANCHOR] ${SLOTN[ri]} · storeK=${_plates[idx].k ?? '—'} (the plate's own step — the ω-time ANCHOR) · recallK=${rk} · joinK=${_E.solSteps} · _pinK=${sl2._pinK} descBar=${sl2.descBar} descCapBar=${sl2.descCapBar} — _pinK/descCapBar MUST equal floor(storeK) values on BOTH peers: they are derived from the plate, not from when anyone recalled. A recall RESURRECTS a stored moment, so the store step is the accurate instant; the recall step is peer/timing-dependent and cannot survive a join.`); } catch (e) {}
+          try { console.log(`[JOIN-LIFT] ${SLOTN[ri]} · plate ${idx + 1} stored at k=${_plates[idx].k ?? '—'} · liftVer=${_E.kernelVer} (the λ-grid this lift used) · plate carries NO kernelVer — compare liftVer with the LEADER's kernelVer AT ITS RECALL: a difference means the two peers propagated the SAME plate through DIFFERENT propagators, which changes the reconstruction's SCALE at constant energy (|ψ|²/e0/regH/attH all still match — none of them encode spatial extent)`); } catch (e) {}
+          console.log(`[JOIN-A] ${SLOTN[ri]} · ADOPTED: baseH=${sl2.descBase ? _hashField(sl2.descBase) : '—'} e0=${(sl2.descE0 ?? 0).toPrecision(17)} · cursor φ=${(_lensOp[ri].phase || 0).toPrecision(17)} prec=${(_lensOp[ri].prec || 0).toPrecision(17)} · descBar=${sl2.descBar} (=floor(${_E.solSteps | 0}/21), stamped to NOW so the bar loop adds no catch-up ω)`
+            + ` || DERIVED from plate ${idx + 1}: ω=${(_lensOp[ri].omega || 0).toPrecision(17)} descPhi0=${(sl2.descPhi0 || 0).toPrecision(17)} pos=[${sl2.descPos?.[0]},${sl2.descPos?.[1]}] leash=[${sl2.leash.state.gx.toPrecision(17)},${sl2.leash.state.gy.toPrecision(17)}] att=${sl2._attHold ? `ψATT H=${_hashField(sl2._attHold)}` : sl2.descAtt ? `plate H=${_hashField(sl2.descAtt)}` : 'probe'} holdPhi0=${(sl2._holdPhi0 || 0).toPrecision(17)} digest=${sl2._digestLeft | 0}`
+            + ` — the plate is the transferable object; the register moves it in ω-time. Only the bytes and the cursor cannot be re-derived.`); }
+      } catch (e) { console.warn('[JOIN-REPLAY] failed, keeping the byte-restore', e); }   // which plate EACH slot holds (any slot can host a live plate) — so a joiner's damage-relift + button state are right
       // THE REGISTER IS THE DEFAULT even across a physics-mode excursion (user request): a world restored in
       // FIELD mode re-arms the close — it fires 1 bar after restore (the state is already dressed, so the
       // capture is immediate and good). mu1.autoClose(false) right after load keeps classic. Idempotent under
@@ -1308,12 +2068,76 @@ function makeMediumU1Renderer(core) {
       const _jrVer = (_jr === s.ring && typeof s.kernelVer === 'number') ? s.kernelVer : (n.cachedRadiiVersion | 0);
       if (_jr) { _gpu.setRings(_jr.r, _jr.w, _jr.o); _E.ringCache = { r: _jr.r, w: _jr.w, o: _jr.o }; }
       _E.kernelVer = _jrVer;
+      try { const _rh2 = _jr ? _hashNums([].concat(Array.from(_jr.r || []), Array.from(_jr.w || []), ...(_jr.o || []).map((t) => Array.from(t || [])))) : '—';
+        console.log(`[SNAP-RING] (joiner) kernelVer=${_jrVer} · ringH=${_rh2} · tiers=${_jr?.r?.length ?? 0} · offTot=${_snapOffTot} — ringH MUST equal the leader's [SNAP-RING]; a mismatch means the joiner steps the leader's field through a DIFFERENT kernel and forks on step one`); } catch (e) {}
       console.log(`[MU1-JOINRING] used ${_jr === s.ring ? 'SNAPSHOT' : 'NODE'} ring · ver=${_jrVer} · snapOffTot=${_snapOffTot} nodeVer=${n.cachedRadiiVersion | 0} snapVer=${s.kernelVer}`);
+      // ── GENERATIVE JOIN: DEFER, DON'T REPLAY (2026-08-03, user's call) ────────────────────────────────────────
+      //   THE PROBLEM: the snapshot ring is version-matched to the shipped FIELD (right for step one), but it also
+      //   puts the joiner BEHIND kernelQueue's oldest entry — and the far-behind branch then cold-snaps the kernel
+      //   at a PEER-LOCAL FRAME, which is the one path in this file that applies a per-step physics input off the
+      //   shared step. Measured: the peers' kernelVer diverge and stay diverged, giving a permanent phase
+      //   difference at constant energy.
+      //   THE GENERATIVE FIX (rather than shipping more history): the fractal clock is a GENERATOR — every peer can
+      //   derive the same kernel from the shared clock. So a joiner does not need the intermediate versions it
+      //   missed; it needs to STOP STEPPING until the shared clock reaches a swap it can stage from, then advance
+      //   by the same law as everyone else. That is alignment with the generator, not a replay of its output.
+      //   _kernHold marks the joiner as not-yet-aligned. The drive loop refuses to step the soliton while it is set
+      //   (the field simply waits — no stepping means no divergence to accumulate), and the staging branch clears
+      //   it the moment a queued swap lands at its shared step, which is the first instant both peers are
+      //   provably on the same kernel at the same step. From there the normal shared-step staging carries them.
+      { const _q0 = Array.isArray(n.kernelQueue) ? n.kernelQueue : [];
+        const _oldest0 = _q0.length ? Math.min(..._q0.map((e) => e.ver | 0)) : (_jrVer + 1);
+        _kernHold = (_KHOLD_MAX > 0 && _jrVer < _oldest0 - 1) ? { since: _E.solSteps | 0, ver: _jrVer, need: _oldest0 } : null;   // mu1.kHold(0) disables the deferral (A/B against the old cold-snap behaviour)
+        if (_kernHold) console.log(`[JOIN-KHOLD] kernel HOLD armed: this peer is at ver=${_jrVer} but the queue's oldest replayable is ${_oldest0} — the gap CANNOT be derived, so the soliton will NOT step until a queued swap lands at its shared step (deferral, not replay). Without this the far-behind branch cold-snaps at a peer-local frame and the peers propagate through different kernels at the same step: permanent phase difference at constant energy.`);
+        else console.log(`[JOIN-KHOLD] no hold needed — ver=${_jrVer} is within the queue's replayable range (oldest=${_oldest0}, depth=${_q0.length}, nodeVer=${n.cachedRadiiVersion | 0}, gap=${(n.cachedRadiiVersion | 0) - _jrVer} versions to stage); the normal shared-step staging aligns the kernel. If ver later DRIFTS between peers anyway, the staging is racing the queue's arrival rather than the gap being unreplayable — a different problem from the one the hold solves.`); }
       _solSeeded = true; _joinBurstLog = true; _joinAnchor = true;   // a restored joiner has W's field verbatim → do NOT re-seed; first-frame decides whether to ease a big backlog (c0 kept verbatim)
       // JOIN DIAGNOSTIC: hash the restored field at the restore step. Compare to the LEADER's [DET] solH at the SAME
       // solStep= (the leader logs solH every Q-boundary). If they MATCH → the restore is exact, the fork is in the drive
       // afterward (GPU-context). If they DIFFER → the field transfer itself is lossy (the fork is at join, not drive).
-      console.log(`[MU1-JOIN] restored @ solStep=${_E.solSteps} · restoredFieldH=${_hashField(W.field)} (compare to the LEADER's [DET] solH at solStep=${_E.solSteps}) · c0=${_stepClk.c0.toFixed(4)} rate=${_stepClk.rate} born=[${_sb.slots.filter((x) => x.born).map((x) => x.name).join(',')}]`); };
+      console.log(`[MU1-JOIN] restored @ solStep=${_E.solSteps} · restoredFieldH=${_hashField(W.field)} (compare to the LEADER's [DET] solH at solStep=${_E.solSteps}) · c0=${_stepClk.c0.toFixed(4)} rate=${_stepClk.rate} born=[${_sb.slots.filter((x) => x.born).map((x) => x.name).join(',')}]`);
+      // ARM THE BISECTOR HERE, NOT FROM THE CONSOLE (2026-08-03). mu1.forkDet's original instruction was "run on
+      //   BOTH peers before joining" — which a JOINER can never do: mu1 does not exist until the app is up, and by
+      //   then this restore has already run. The joiner's own state begins at THIS line, so this is exactly the
+      //   right place to start hashing. Auto-arm on any join that restored a living 𝔸-slot (the case the whole
+      //   store/recall join concerns); the leader is armed by hand, at any time, because the log keys off the
+      //   SHARED bar — a leader armed later still emits the same hashes at the same bars and the two logs pair up.
+      //   Off with mu1.forkDet(0). Costs one readback per armed slot per 8 bars.
+      // THE PHASE RECEIPT AT THE RESTORE INSTANT (2026-08-03). The surviving symptom is a PURE GLOBAL ROTATION:
+      //   with the [PAINT] scalars finally reading the painted buffer, |ψ|² agrees to 0.0–0.2× the f32 floor while
+      //   argPin=arg⟨att,ψ⟩ differs by 0.009–0.036 rad — same magnitude, different phase, and a global phase is
+      //   conserved by the dynamics (the cap is amplitude-only), so it never decays. `att` is byte-identical on
+      //   both peers, so the rotation is in ψ ITSELF. Print argPin for every restored living slot AT THE RESTORE,
+      //   from the bytes that just came off the wire, BEFORE a single step runs. Then compare to the leader's
+      //   [PAINT] argPin at the SAME solStep:
+      //     • already different HERE  ⇒ the rotation is IN THE PAYLOAD (the f32 wire quantization of descBase, or
+      //       the leader shipping a buffer captured at a different sub-step than the one it reports);
+      //     • equal here, diverging later ⇒ the two peers' first steps rotate differently (a per-step phase term:
+      //       the pin superpose, the SPM, or the cap's f32 scale).
+      //   That single bit is what separates "the join delivered a rotated field" from "the join delivered the right
+      //   field and the drive rotated it", and no existing receipt answers it.
+      try { for (let pi2 = 1; pi2 < 4; pi2++) { const ps2 = _sb.slots[pi2];
+        if (!ps2?.desc || !ps2.descLive || !ps2.descBase) continue;
+        const a3 = ps2.descAtt || ps2._attHold; if (!a3 || a3.length !== ps2.descBase.length) continue;
+        let rr2 = 0, ii2 = 0, e3 = 0; const f3 = ps2.descBase;
+        for (let j3 = 0; j3 < f3.length; j3 += 2) { e3 += f3[j3] * f3[j3] + f3[j3 + 1] * f3[j3 + 1];
+          rr2 += a3[j3] * f3[j3] + a3[j3 + 1] * f3[j3 + 1]; ii2 += a3[j3] * f3[j3 + 1] - a3[j3 + 1] * f3[j3]; }
+        console.log(`[JOIN-PHASE] ${SLOTN[pi2]} @solStep=${_E.solSteps} · argPin=${Math.atan2(ii2, rr2).toPrecision(17)} · |ψ|²=${e3.toPrecision(17)} · baseH=${_hashField(f3)} attH=${_hashField(a3)} att=${ps2._attHold ? 'ψATT' : 'plate'} · eyeParity=${_gpu?.eyeSlotParity ? _gpu.eyeSlotParity(pi2) : '?'} — compare to the LEADER's [PAINT] argPin at this SAME solStep: DIFFERENT here ⇒ the rotation rode the wire (payload); EQUAL here but diverging later ⇒ the drive rotates the two peers differently`); } } catch (e) {}
+      // THE PING-PONG PARITY IS PEER-LOCAL STATE THAT NOTHING SYNCS (2026-08-03 — the remaining candidate).
+      //   Each slot's eye is a TEXTURE PAIR (A/B) with a `src` marker saying which half currently holds the field;
+      //   every GPU op reads src and writes the other, then commitEyeSlot stores the flipped parity back. That
+      //   marker is created per GPU CONTEXT and advanced by however many ops this peer has run on the slot — the
+      //   joiner has its own op history since boot, the leader a different one. The join uploads the right BYTES
+      //   (proven: [SNAP-PHASE]/[JOIN-PHASE] agree to 13 figures) but says nothing about WHICH half of the pair
+      //   they land in, so two peers can sit at OPPOSITE parity at the same shared step. Both are internally
+      //   consistent — which is exactly why every CPU-side hash (regH, attH, e0, descBase) matches — but the two
+      //   fields then take different physical paths through the pair each step. This is the only input to the GPU
+      //   step that is (a) not in regH, (b) never compared across peers, and (c) still unexplained after the
+      //   payload, the Q-block alignment, the ring, the pin bytes and the clock were all proven identical.
+      //   NOT YET CONFIRMED — logged so the two peers' parity can be diffed at the join instant.
+      try { console.log(`[JOIN-PARITY] ${_sb.slots.map((x, i) => `${SLOTN[i]}:${_gpu?.eyeSlotParity ? _gpu.eyeSlotParity(i) : '?'}`).join(' ')} @solStep=${_E.solSteps} — compare with the LEADER's [SNAP-PARITY] at the same step. OPPOSITE parity on a slot whose bytes/attH/regH all match is the remaining candidate for the |ψ|²-equal / argPin-apart rotation.`); } catch (e) {}
+      if (!_forkDetEvery) { const _fs = _sb.slots.findIndex((x, i) => i > 0 && x?.desc && x.descLive && x.descBase);
+        if (_fs > 0) { _forkDetEvery = 8; _forkDetSlot = _fs; _forkDetBar = -1;
+          console.log(`[FORK] auto-armed on ${SLOTN[_fs]} at the join (every 8 bars) — a joiner cannot be armed "before joining", so the restore arms it. Arm the LEADER with mu1.forkDet(8,'${SLOTN[_fs]}') (any time; lines pair by bar=), then compare: the FIRST bar where baseH differs brackets the fork to 21 steps. mu1.forkDet(0) to stop.`); } } };
     // leader fills the WS snapshot when asked; joiner restores it on _snapshotApplied (handled in the frame)
     if (world?.ps?.app) world.ps.app._snapHook = (worldSnap) => { if (_solSeeded && (W.field || W.desc)) { worldSnap.medSnapU1 = _takeSnap();   // an ABSTRACT leader has no W.field — the register (descSlots) IS the state and ships fine
       const _wireKB = (JSON.stringify(worldSnap.medSnapU1).length / 1024) | 0;   // cheap now (b64 strings pass through); the join-freeze watch number
@@ -1330,7 +2154,36 @@ function makeMediumU1Renderer(core) {
     // (a display choice, peer-independent, like the old scope) — only BORN slots are selectable.
     const _viewSel = document.createElement('select'); Object.assign(_viewSel.style, { background: '#222', color: '#9cf', border: '1px solid #0004', borderRadius: '4px', padding: '3px 4px', fontSize: '9px', fontFamily: 'ui-monospace,monospace', cursor: 'pointer' });
     for (const nm of SLOTN) { const o = document.createElement('option'); o.value = nm; o.textContent = `view:${nm}`; _viewSel.appendChild(o); }
-    _viewSel.onchange = () => { _viewSlot = Math.max(0, SLOTN.indexOf(_viewSel.value)); }; bar1.appendChild(_viewSel);
+    // A VIEW SWITCH MUST LEAVE THE NEW SLOT WITH A VALID DISPLAY SOURCE (2026-08-02). Setting _viewSlot alone
+    //   reopens, on every switch, the same gap that was fixed at join: _skipCopy immediately stops refreshing the
+    //   newly-viewed slot's descDisp (because the film is "on"), while its film does not exist yet and only starts
+    //   capturing at the next _dispTick — so the slot paints a STALE descDisp in between. It also matters because
+    //   the default view is W: every peer necessarily joins on W and switches to V afterwards, so this path is on
+    //   the critical path for every join. Refresh descDisp from the current bytes and drop the OLD slot's film.
+    _viewSel.onchange = () => { const prev = _viewSlot;
+      _viewSlot = Math.max(0, SLOTN.indexOf(_viewSel.value));
+      if (prev !== _viewSlot) {
+        if (_gpu?.dropFilm && _filmStep[prev] >= 0) { _gpu.dropFilm(prev); _filmStep[prev] = -1; }   // the slot we left keeps no film (nothing captures it any more — a stale one would be served to any reader)
+        const ns = _sb.slots[_viewSlot];
+        if (ns?.descBase) ns.descDisp = Float64Array.from(ns.descBase);   // seed the new slot's display source NOW, so it never paints a stale buffer while waiting for its first film capture
+        // CAPTURE THE NEW SLOT'S FILM IMMEDIATELY (2026-08-03) — the RELOAD-ONLY visual mismatch. Seeding descDisp
+        //   (above) stops the slot painting a STALE buffer, but it leaves the two peers rendering the SAME slot
+        //   through DIFFERENT SOURCES, which is the actual defect:
+        //     • the peer that has been viewing V all along has a live V FILM → _useFilm is true → the shader samples
+        //       the GPU film, current at the shared step;
+        //     • a RELOADED peer had every film dropped by _restoreSnap (films are pre-join captures) and boots on W,
+        //       so when you switch to V it has no V film → _useFilm is FALSE → it renders the setDescBase fallback
+        //       from descDisp, which only refreshes at BAR cadence while the film refreshes every Q.
+        //   Same state, two display paths, different pixels — and [PAINT]'s fieldH hashes whichever source is in
+        //   use (src=FILM(gpu) vs baseArr), so the hash mismatches too. That is exactly the reported signature:
+        //   live store/recall on two connected peers is fine (both have films); only a RELOAD breaks it, only for
+        //   V/P1/P2 (W is the boot view, so its film always exists), and it appears the moment you switch to V.
+        //   Capturing here puts the reloaded peer back on the film path on the same frame it switches.
+        if (_filmOn && _turboOn && _gpu?.filmCapture && _tbLive(_viewSlot) && _filmStep[_viewSlot] < 0) {
+          try { _gpu.selectEyeSlot(_viewSlot); _gpu.filmCapture(_viewSlot); _gpu.selectEyeSlot(null); _filmStep[_viewSlot] = _tbTexStep[_viewSlot] >= 0 ? _tbTexStep[_viewSlot] : (_E.solSteps | 0);
+            console.log(`[VIEW] ${SLOTN[_viewSlot]} film captured at the switch (step ${_filmStep[_viewSlot]}) — without this a peer whose films were dropped at join renders this slot from descDisp (bar cadence) while a peer that never reloaded renders it from its film (Q cadence): same state, different pixels AND a different [PAINT] fieldH`); } catch (e) { _gpu.selectEyeSlot(null); } }
+        _descTexKey = null; _lastPaintSig = ''; }
+    }; bar1.appendChild(_viewSel);
     // view cycle: raw ψ → ∠lens (ψ through readOp) → 𝔸desc (the descriptor projection — see _dials). LOCAL display toggle.
     const _VIEWS = ['raw', 'lens', 'desc'], _VIEWLBL = { raw: 'view:raw', lens: 'view:∠lens', desc: 'view:𝔸desc' };
     const _lvBtn = mkBtn('view:raw', false, () => { _dials.view = _VIEWS[(_VIEWS.indexOf(_dials.view) + 1) % _VIEWS.length];
@@ -1429,6 +2282,18 @@ function makeMediumU1Renderer(core) {
     //   re-draws the clean symbol over any damage (measured: a 90%-damaged field ends 0.73 like the SYMBOL, 0.13 like
     //   the damaged data). Raise it and the drive FADES after birth, so what you see is the medium's own state and
     //   damage stays visible. Replicated (the pin is in regH). Applies on release.
+    // ⏱ WORLD PROPER-TIME DIVISOR (the §7.44 spiral brake, as a UI dial). When supply < demand — a shared GPU, a
+    //   weak peer, several living slots — the wall-clock target asks for more steps than can execute, the backlog
+    //   grows, and the deficit SPIRALS (measured once at todo pinned to the 1024 cap, backlog 200→5847). Dividing
+    //   demand slows MATTER'S OWN CLOCK so the backlog cannot outrun supply: fewer steps per wall-second, physics
+    //   per step unchanged. Replicated as a STAMPED verb (`tempo`, clamped 1–8 in the world reducer), so the divisor
+    //   flips at a SHARED step on every peer and the register stays byte-identical — a peer-local divisor would fork
+    //   proper time itself. The auto-tempo governor drives the same verb; this slider is the manual override, and
+    //   because both actuate through the reducer they compose rather than fight (last-wins on the same shared state).
+    //   Apply on RELEASE (change, not input): each drag position would otherwise stamp a verb on every peer.
+    const _sTempo = mkSlider('⏱÷', 1, 8, 1, 1, () => {});
+    _sTempo.input.addEventListener('change', () => injectEvent?.({ type: 'mediumVirt', mode: 'tempo', amp: +_sTempo.input.value }));
+    bar2.appendChild(_sTempo.wrap);
     // ⌛pin slider REMOVED (2026-07-26): it dialled a DECOHERENCE EXPERIMENT, not a normal control — 0 (drive forever)
     // is the correct setting for every ordinary use, so a live slider mostly offered a way to dissolve the soliton by
     // accident. The mechanism is untouched and still replicated (_pinHold / _pinFac / the `pinhold` verb / the snap
@@ -1849,7 +2714,7 @@ function makeMediumU1Renderer(core) {
         // every displayed image belongs to ONE shared sequence — the identical film, ≤1 bar wall-offset. Applies to
         // W (field), the mirror, AND the 𝔸 pose (frac→0). Costs the between-bar smoothness — that smoothness IS the
         // peer-local sampling. Same-GPU caveat for field images; the 𝔸 film is exact up to colormap rounding.
-        frameLock: (on = true, grid = 21) => { _frameLock = !!on; _frameLockGrid = Math.max(Q, Math.round((grid | 0) / Q) * Q); if (!on) { _dispW = null; _dispV = null; _lastPaintSig = ''; }
+        frameLock: (on = true, grid = 21) => { _frameLock = !!on; _frameLockGrid = Math.max(Q, Math.round((grid | 0) / Q) * Q); if (!on) { _dispW = null; _dispV = null; _dispDesc = [null, null, null, null]; _dispDescK = [-1, -1, -1, -1]; _lastPaintSig = ''; }   // drop the desc lock films too — a stale one would keep painting after unlocking
           return `[FRAMELOCK] ${on ? `ON — the shared film at every ${_frameLockGrid} steps (grid=${Q} ≈ 8fps · grid=21 bars ≈ 2.7fps) · SUBTICK-DRIVEN paint (one paint per shared index; rAF = polling only) · film@k stamped: identical k ⇒ identical pixels across peers` : 'OFF — smooth peer-local sampling of the shared trajectory (every frame is STILL a shared-film member; only the index is peer-sampled)'}`; },
         // subtickView(on) — the SUBTICK-DRIVEN RENDERER, named: frameLock at the finest shared grid (Q) + paint
         // gating. The canvas paints exactly the shared-boundary film, at most one paint per index — paint content
@@ -2211,6 +3076,20 @@ function makeMediumU1Renderer(core) {
         // name); this asks the medium itself what it is carrying, in the charges the anchors cannot move. Use it to
         // separate the two failure modes of a stalled recall: dV≈0 + gap>0 = the same state, transport short;
         // dV moving = the pin+SPM built something else. Identity CHECK only — ~3 invariants cannot regenerate a field.
+        // rbTrace(secs) — WHO forces the GPU readbacks? readPixels is a hard pipeline stall (profiled at 91.8% of
+        //   frame time with 3 living slots on two peers); with two browsers on one GPU each stall drains the SHARED
+        //   queue, so it degrades superlinearly in peers and vanishes when one browser closes. This counts the calls
+        //   per slot and attributes each to its caller, so the fix targets the real source instead of a guess.
+        rbTrace: (secs = 5) => { _rbTrace = true; _rbN = [0, 0, 0, 0]; _rbSrc = {}; _rbT0 = performance.now();
+          setTimeout(() => { _rbTrace = false; const dt = (performance.now() - _rbT0) / 1000;
+            const tot = _rbN.reduce((a, b) => a + b, 0);
+            console.log(`[RB] ${tot} readbacks in ${dt.toFixed(1)}s = ${(tot / dt).toFixed(1)}/s · 128KB each ⇒ ~${(tot / dt * 0.128).toFixed(1)} MB/s of pipeline-stalling transfer`);
+            console.log(`[RB] per slot: ${SLOTN.map((nm, i) => `${nm}=${_rbN[i] | 0} (${(_rbN[i] / dt).toFixed(1)}/s)`).join(' · ')}`);
+            const src = Object.entries(_rbSrc).sort((a, b) => b[1] - a[1]);
+            console.log(`[RB] by caller:`); for (const [k, v] of src) console.log(`       ${String(v).padStart(5)}  ${(100 * v / (tot || 1)).toFixed(0).padStart(3)}%  ${k}`);
+            console.log(`[RB] viewSlot=${SLOTN[_viewSlot]} viewAll=${_viewAllOn} living=${_sb.slots.map((s2, i) => (i === 0 || s2.descLive) && s2.desc ? SLOTN[i] : null).filter(Boolean).join(',')}`);
+          }, Math.max(1, secs) * 1000);
+          return `[RB] tracing readbacks for ${secs}s — leave the tab focused and let it run`; },
         holdId: (slot) => { const raw = [];
           for (let i = 0; i < _sb.slots.length; i++) { const s2 = _sb.slots[i];
             if (!s2?._attHold) continue;
@@ -2303,6 +3182,51 @@ function makeMediumU1Renderer(core) {
         // non-quadratic band, numerical dispersion, everything (no paraxial slice, no packet averaging). Also runs
         // the kCut-TRUNCATED propagation — the clock's own passband as a COMPRESSION LAW for descriptor plates
         // (fidelity + kept-mode ratio = the honest compression number). useW:true tests the real dressed soliton.
+        // gpuDet(steps) — IS THE GPU PATH ITSELF DETERMINISTIC BETWEEN TWO WINDOWS ON ONE MACHINE?
+        //   Everything the join can control is now verified identical between peers (ver, regH, attH/holdH, e0,
+        //   descPhi0, pos, leash, parity, payload, kernel staging, plate, backlog) — yet argPin sits 0.02–0.04 rad
+        //   apart, which is 3% of |pin|, far above the f32 floor and NOT explainable by SPM integrating the
+        //   amplitude noise (that gives 1.7e-7 rad over 20k steps). The user tests both peers on the SAME machine
+        //   and SAME GPU, so hardware/driver divergence is excluded too.
+        //   This isolates the remaining unknown: build a field from a FIXED analytic recipe (no world state at all),
+        //   upload it, run N engine steps with the CURRENT ring, and hash the result. Two windows must print the
+        //   SAME hash. If they do, the GPU path is deterministic and the offset is still in state we have not
+        //   compared. If they DIFFER, the medium cannot be phase-exact across contexts by construction, and the
+        //   honest position is that argPin equality is not achievable — the lock, not fieldH, is the convergence
+        //   measure (which is what the status line has claimed all along).
+        //   Peer-local by design; run it in BOTH consoles and compare the printed hashes.
+        //   THE RING MUST BE PINNED, NOT SAMPLED (2026-08-03). The first version hashed with the CURRENT ring and
+        //   asked the user to run both windows "at the same ver" — impractical: the fractal clock advances ver
+        //   continuously, so four runs came back at ver 127/258/125/253 and their differing outH proved nothing
+        //   (a different ver IS a different propagator). Build a FIXED synthetic ring from the recipe below so the
+        //   propagator is identical in both windows regardless of what the clock is doing. Now the ONLY difference
+        //   between the two runs is the GPU context itself, which is exactly what the test is for.
+        gpuDet: (steps = 21) => { if (!_gpu) return '[GPUDET] gpu not ready';
+          const n2 = steps | 0, c = GRID / 2, sg = 8;
+          // fixed 4-tier ring: radii 3,7,13,21 with equal weights, offsets = the integer circle at each radius.
+          const _rr = [3, 7, 13, 21], _rw = _rr.map(() => 1 / _rr.length), _ro = _rr.map((r) => {
+            const pts = []; const nA = Math.max(8, Math.round(2 * Math.PI * r));
+            for (let a = 0; a < nA; a++) { const th = 2 * Math.PI * a / nA;
+              pts.push(Math.round(r * Math.cos(th)), Math.round(r * Math.sin(th))); }
+            return pts; });
+          const f0 = new Float64Array(2 * N_CELLS);
+          for (let y = 0; y < GRID; y++) for (let x = 0; x < GRID; x++) { const dx = x - c, dy = y - c;
+            const a = Math.exp(-(dx * dx + dy * dy) / (2 * sg * sg));
+            if (a > 1e-12) { const i = (y * GRID + x) * 2, ph = 0.15 * dx; f0[i] = a * Math.cos(ph); f0[i + 1] = a * Math.sin(ph); } }
+          const q0 = Float64Array.from(Float32Array.from(f0));   // f32-quantize so the UPLOAD is identical on both peers
+          let e0q = 0; for (let j = 0; j < q0.length; j++) e0q += q0[j] * q0[j];
+          const save = _gpu.readEyePsi(), liveRing = _E.ringCache;
+          try { _gpu.setRings(_rr, _rw, _ro);   // PIN the propagator — see the note above
+            _gpu.selectEyeSlot(null); (_gpu.setEyePsiBoth || _gpu.setEyePsi).call(_gpu, q0);
+            const hUp = _hashField(_gpu.readEyePsi());
+            for (let i = 0; i < n2; i++) { _gpu.stepEyeN(1, DT);
+              _gpu.applyEyeNlSpm(-_SOL_GAMMA, _SOL_ISAT, DT); (_gpu.applyEyeEnergyCapNS || _gpu.applyEyeEnergyCap).call(_gpu, e0q); }   // always full-medium, so linMode cannot differ between windows
+            const out = _gpu.readEyePsi(); let e2 = 0, sr = 0, si2 = 0;
+            for (let j = 0; j < out.length; j += 2) { e2 += out[j] * out[j] + out[j + 1] * out[j + 1]; sr += out[j]; si2 += out[j + 1]; }
+            const ringH = _hashNums([].concat(_rr, _rw, ..._ro));
+            return `[GPUDET] ${n2} steps · FIXED seed + FIXED ring (nothing sampled from the world) · uploadH=${hUp} ringH=${ringH} · outH=${_hashField(out)} · |ψ|²=${e2.toPrecision(17)} · Σψ=${Math.atan2(si2, sr).toPrecision(17)} — uploadH and ringH MUST be equal in both windows (they are constants); if they are and outH DIFFERS, the GPU pipeline is not reproducible between contexts on this machine and cross-peer phase equality is unachievable by construction. If outH MATCHES, the GPU is exact and the argPin offset is still in state we have not compared.`;
+          } catch (e) { return `[GPUDET] failed: ${e}`; }
+          finally { try { if (liveRing?.r?.length) _gpu.setRings(liveRing.r, liveRing.w, liveRing.o); _gpu.setEyePsi(save); } catch (e2) {} } },
         specTest: ({ T = _VIRT_T, sigma = 8, useW = false, kCut = 0 } = {}) => {
           if (!_gpu || !_E.ringCache?.r?.length) return '[SPECTEST] gpu/kernel not ready';
           const rc = _E.ringCache;
@@ -2346,12 +3270,188 @@ function makeMediumU1Renderer(core) {
         // regTrace(on) — the DETERMINISM GATE instrument: log [REGH] step=… regH=… fieldH=… on a SHARED cadence (every
         // 200 steps, a pure fn of the shared step so both peers log at the SAME step= values). Compare the two consoles:
         // regH MUST match line-for-line at equal step= (the contract); fieldH may differ (benign). Off by default.
+        // detField(n) — how many DET ticks between FIELD-hash syncs. Each sync is a full 4-slot GPU readback and
+        //   readPixels STALLS the pipeline; profiled at 40% of all readbacks with W/V/P1 living, and on a shared GPU
+        //   two peers' stalls serialize against each other (the "lag when the 2nd browser is open" symptom).
+        //   regH — the actual shared contract — needs no field bytes and rides EVERY tick regardless. n=1 restores
+        //   the old per-tick behaviour for a fork hunt; the default 8 keeps the check while paying 1/8 the readbacks.
+        // paintDet(n) — CAN'T COMPARE TWO BROWSERS BY EYE. Screenshots are taken tens of ms apart and `frac`
+        //   advances continuously, so SOME visual difference is guaranteed even when everything is correct — the
+        //   eyeball test cannot separate "peer-local sampling phase" from a real fork. This prints, every n bars,
+        //   the exact RENDER INPUTS stamped with the SHARED index, so two peers are compared as NUMBERS AT EQUAL k:
+        //     · frac/dphi/ox/oy — the sub-tick interpolation. These are PEER-LOCAL BY DESIGN (frac comes from each
+        //       peer's own monClock sampling moment) and are EXPECTED to differ unless mu1.frameLock(true) is set
+        //       on BOTH peers. A difference here is the smooth-glide window, not a fault.
+        //     · fieldH — the hash of the bytes being displayed. This MUST match at equal k. If it differs, the
+        //       state forked; if it matches while the picture differs, the difference is sampling phase only.
+        paintDet: (n = 4) => { _paintDetEvery = Math.max(0, n | 0);
+          return `[PAINT] ${_paintDetEvery ? `ON — every ${_paintDetEvery} bars. Compare peers at EQUAL k: fieldH MUST match (state); frac/dphi/ox/oy may differ (peer-local sampling) unless frameLock is on for both.` : 'OFF'}`; },
+        // clockDet(n) — STEP-CLOCK FORK LOCATOR. Use when [TBSTEP] shows both peers stepping the SAME number of
+        //   steps per block with cursors a CONSTANT distance apart (the "everything matches but they're at
+        //   different steps" signature). That is never a byte fork: solSteps chases `target`, so it self-corrects
+        //   unless `target` itself is offset — and target = floor((monClock − c0)·spp/rate). This prints every term
+        //   of that equation, so a constant offset of N steps can be attributed to its cause instead of inferred:
+        //     • monClock/rate match, c0 DIFFERS  → the join did not keep c0 verbatim. Δc0 = N·rate/spp. Look for a
+        //       [RATEFLIP] line on one peer only (reanchor rewrites c0 by k·(ratePrev−r)/spp).
+        //     • c0 matches, target differs        → the peers sampled the oscillating world clock on opposite
+        //       phases; check monDir.
+        //     • every term matches                → the offset is downstream of the clock (the turbo cursor).
+        // forkDet(n) — THE BISECTOR. Everything else here samples a WINDOW (tbTrace) or the painted buffer
+        //   (paintDet); this is the always-on one: at every n-th SHARED bar it syncs the slot's texture and hashes
+        //   descBase. Turn it on BEFORE the join on both peers, let them run, then find the FIRST bar whose baseH
+        //   differs — that bar brackets the fork to 21 steps, which is what no other instrument here gives you.
+        //   Use when tbTrace shows identical inputs (attH/ringH/ver/cadence all matching) but descBaseH ALREADY
+        //   different at the first traced block: that means the fork happened EARLIER and the trace is only
+        //   watching two already-forked fields evolve correctly. Costs one readback per slot per n bars.
+        //   YOU CANNOT ARM A JOINER "BEFORE THE JOIN" — mu1 does not exist until the app is up, and by then the
+        //   restore has already run. So the JOIN ARMS IT ITSELF: _restoreSnap turns this on automatically (see
+        //   _forkDetArm at the end of the restore), starting at the exact bar the joiner's own state begins. On the
+        //   LEADER, which never restores, arm it by hand at any time — it is stateless per bar, so a leader armed
+        //   late still emits the same hashes at the same bars and the two logs pair up by bar= regardless.
+        //   So the real procedure is: arm the LEADER whenever you like, then just join. Both sides log from then on.
+        // IS THE RESIDUAL A FORK OR THE GPU NOISE FLOOR? (2026-08-03) — the question left after the join was proven
+        //   exact. Read the SHAPE of the argPin gap across many bars, not its value at one bar:
+        //     • BOUNDED and OSCILLATING (wanders up and down, no trend)  ⇒ the f32 GPU floor. Two peers running the
+        //       same register around the same attractor, out of step by accumulated rounding. This app's own status
+        //       line already states fieldH "never goes byte-identical on GPUs — the lock is the honest convergence
+        //       measure". Nothing to fix; compare `lock→A` instead, which should sit near 1 on both.
+        //     • MONOTONE GROWING, or settling to a NON-ZERO CONSTANT                ⇒ a real residual fork; the pin
+        //       is contracting the two peers toward DIFFERENT fixed points and some input still differs.
+        //   Measured after the lensObj + parity fixes: 0.0071 → 0.0210 → 0.0255 → 0.0034 rad over four bars — i.e.
+        //   oscillating, which is the first shape. Sample over dozens of bars before concluding either way.
+        // mapDet(slot) — WHERE IN THE FIELD does it differ? Every other instrument here reduces the field to ONE
+        //   number (a hash, |ψ|², argPin), which cannot distinguish "the whole field is rotated" from "one region
+        //   is driven differently while the rest matches" — the reported symptom. This prints a coarse 4×4 tile map
+        //   of |ψ|² and argPin over the PAINTED buffer, so the two peers' maps can be diffed tile by tile:
+        //     • every tile differs by a similar small amount ⇒ global (phase/noise) — look at the drive
+        //     • ONE or a FEW tiles differ, the rest match to ~1e-9 ⇒ genuinely regional. Note WHICH tiles: a
+        //       contiguous block points at a scissor/region path, a scattered set at per-element reconstruction.
+        //   Run on both peers at the same bar (it keys off the shared bar like [FORK]) and compare.
+        mapDet: (slot = 'V', n = 8) => { _mapDetSlot = Math.max(0, SLOTN.indexOf(slot)); _mapDetEvery = Math.max(0, n | 0); _mapDetBar = -1;
+          return `[MAP] ${_mapDetEvery ? `ON — ${SLOTN[_mapDetSlot]} every ${_mapDetEvery} bars, 4×4 tiles over the painted buffer. Compare peers TILE BY TILE at equal bar: a few differing tiles = regional, all differing = global.` : 'OFF'}`; },
+        // kHold(bars) — JOIN-TIME TUNING for the kernel deferral. At a join whose kernelVer is older than
+        //   kernelQueue can replay, the peer DEFERS (stops stepping) until a queued swap lands at its shared step,
+        //   rather than cold-snapping the kernel at a peer-local frame (which permanently forks the propagator).
+        //   This sets how long it will wait before giving up and snapping anyway — the stall guard, not the
+        //   expected wait: a live fractal clock re-rings every few bars, so the release is normally quick.
+        //     • RAISE it if you see `[JOIN-KHOLD] ⚠ TIMED OUT` (the clock is quiet; waiting longer costs only a
+        //       frozen field, while snapping costs a permanent phase offset)
+        //     • LOWER it if the join pause is too long to be usable and you would rather accept the offset
+        //   Returns the current setting. Argument is in BARS (21 steps each); 0 disables the deferral entirely
+        //   (restoring the old cold-snap behaviour, for A/B).
+        // burstCap(steps) — THE argPin-OFFSET A/B. A joiner catches up its backlog at up to `steps` per frame; the
+        //   leader ran those same steps at the steady-state cadence (one Q-block per _tbAdvanceAll call). att4 (the
+        //   pin target) is captured ONCE PER CALL, so a big burst injects the pin against a target sampled far less
+        //   often — same steps, same kernel, same bytes, different integration path. That is a phase difference at
+        //   constant energy, established once during catch-up and then CONSERVED (nothing damps a global phase).
+        //   Run `mu1.burstCap(7)` on BOTH peers before joining: if the residual argPin offset collapses, the call
+        //   cadence is the mechanism and the fix is to make it shared (at the cost of join latency). Default 1024.
+        kHold: (bars) => { if (typeof bars === 'number') _KHOLD_MAX = Math.max(0, (bars | 0)) * 21;
+          return `[KHOLD] deferral limit = ${(_KHOLD_MAX / 21) | 0} bars (${_KHOLD_MAX} steps)${_KHOLD_MAX === 0 ? ' — DISABLED: a far-behind joiner cold-snaps the kernel at a peer-local frame and carries a permanent phase offset' : ''} · hold now: ${_kernHold ? `ACTIVE since k=${_kernHold.since} (ver=${_kernHold.ver}, waiting for ≥${_kernHold.need})` : 'none'}`; },
+        forkDet: (n = 8, slot = 'V') => { _forkDetEvery = Math.max(0, n | 0); _forkDetSlot = Math.max(0, SLOTN.indexOf(slot)); _forkDetBar = -1;
+          return `[FORK] ${_forkDetEvery ? `ON — ${SLOTN[_forkDetSlot]} every ${_forkDetEvery} bars. A JOINER arms this automatically at restore; arm the LEADER by hand (any time — lines pair by bar=). The FIRST bar where baseH differs brackets the fork to 21 steps.` : 'OFF'}`; },
+        clockDet: (n = 4) => { _clockDetEvery = Math.max(0, n | 0); _clockDetBar = -1;
+          return `[CLOCK] ${_clockDetEvery ? `ON — every ${_clockDetEvery} bars. Compare peers at EQUAL bar: monClock, rate and c0 MUST all match. A c0 difference of Δ is a PERMANENT target offset of Δ·spp/rate steps — that is the constant-offset [TBSTEP] signature.` : 'OFF'}`; },
+        // wattDet(n) — ψATT FORK LOCATOR. Prints, at a SHARED bar, every input the pin target is built from, so two
+        //   peers can be diffed line by line instead of guessing which term drifted. The target is
+        //   _xattBuild(_holdOp(∠,φ0), _holdDx, _holdDy, _attHold); a fork in ANY of these forks the field, because
+        //   the pin target is in regH. Run on both peers and compare at EQUAL bar=.
+        wattDet: (every = 4) => { _wattDetEvery = Math.max(0, every | 0);
+          return `[ψDET] ${_wattDetEvery ? `ON — every ${_wattDetEvery} bars, at the shared bar. Compare the two peers' lines at EQUAL bar=; the FIRST differing column is the fork.` : 'OFF'}`; },
+        // syncDec(n, slot) — the LAST asymmetry: both peers now have identical tbCur/texStep, yet one peer's
+        //   texSynced trails the other's by a Q-block on every row. This logs every _tbSyncSlot DECISION with its
+        //   caller line, so the two peers can be diffed on WHICH call reaches the sync first inside the frame.
+        syncDec: (n = 30, slot = 'V') => { _syncTraceLeft = Math.max(0, n | 0); _syncTraceSlot = Math.max(0, SLOTN.indexOf(slot));
+          return `[SYNCDEC] logging ${_syncTraceLeft} sync decisions for ${SLOTN[_syncTraceSlot]} — compare the CALLER LINES and the SKIP/SYNC pattern between peers`; },
+        // attCad(n, slot) — WHY IS W SMOOTH *AND* IDENTICAL WHILE V IS SMOOTH *AND* DIVERGENT? W's pin target
+        //   (_regAttC) is rebuilt in the PER-STEP loop; a desc slot's descAtt is rebuilt only at the BAR. The film is
+        //   captured every Q (7 steps). If V is stepped against a target that only refreshes every 21 steps, then
+        //   WHICH Q tick you capture at changes the result — while W, whose target tracks every step, is insensitive
+        //   to capture timing. This prints both cadences so the asymmetry is measured, not assumed.
+        attCad: (n = 12, slot = 'V') => { _attCadLeft = Math.max(0, n | 0); _attCadSlot = Math.max(0, SLOTN.indexOf(slot));
+          return `[ATTCAD] tracing ${_attCadLeft} target refreshes of ${SLOTN[_attCadSlot]} — BAR lines = a 21-step cadence; STEP lines (W) = per-step`; },
+        // tbTrace(n, slot) — TURBO-LOOP step receipt. stepTrace only instruments the CPU executor, so it prints
+        //   nothing under turbo. This hashes the slot's GPU TEXTURE after each advance block, next to descBase.
+        //   Run on BOTH peers after a join: a joiner whose texH never moves while `cur→upTo` climbs is being stepped
+        //   on paper only — the upload/parity bookkeeping is wrong, not the physics.
+        // tbTrace(n, slot, from) — trace n turbo advance blocks. THE WINDOW PROBLEM (2026-08-03): with no `from`,
+        //   tracing starts at the moment the verb is TYPED, which is a different wall-clock instant in each console
+        //   — so the two peers capture DIFFERENT step windows of the same trajectory and there is no equal cur= to
+        //   compare (measured: one peer 9597→9737, the other 9429→9569, zero overlap). Worse, the windows look
+        //   "a constant N steps apart" and invite a divergence verdict when nothing is wrong.
+        //   PASS `from` — a SHARED step — and both peers start tracing at the same cur, so every line pairs up:
+        //     mu1.tbTrace(20, 'V', 12000)   ← run on BOTH peers with the SAME number, ahead of the current step
+        //   Read the current step from any [CLOCK]/[PAINT]/[TBSTEP] line (solStep=/cur=) and pick a value a few
+        //   hundred steps ahead; the returned string also prints where you are now and how far the target is.
+        // k() — the current SHARED step. Every alignment argument in these instruments is expressed in it, and there
+        //   was no way to read it: `mu1.tbTrace(20,'V',<shared step>)` left you to find a number with no accessor.
+        k: () => _E.solSteps | 0,
+        tbTrace: (n = 12, slot = 'W', from = null) => { _tbTraceLeft = Math.max(0, n | 0); _tbTraceSlot = Math.max(0, SLOTN.indexOf(slot));
+          // A NEGATIVE `from` means "this many steps FROM NOW" — the usable form. Both consoles run the same call
+          //   within a few seconds and resolve to the same absolute step (solSteps is shared), so the windows align
+          //   without anyone reading a number off a log first. Absolute values still work; null = start immediately.
+          const _rel = (typeof from === 'number' && from < 0);
+          _tbTraceFrom = (from == null) ? -1 : (_rel ? ((_E.solSteps | 0) + Math.abs(from | 0)) : (from | 0));
+          // round UP to a Q boundary: advances only ever land on multiples of Q, so an off-grid target would arm on
+          //   the first block PAST it — which can be a different block in each window if they straddle the boundary.
+          if (_tbTraceFrom > 0) _tbTraceFrom = Math.ceil(_tbTraceFrom / Q) * Q;
+          return `[TBSTEP] tracing ${_tbTraceLeft} turbo advance blocks of ${SLOTN[_tbTraceSlot]}${_tbTraceFrom >= 0 ? ` STARTING AT SHARED STEP ${_tbTraceFrom} (now ${_E.solSteps}${_tbTraceFrom <= _E.solSteps ? ' — ⚠ ALREADY PAST: the trace starts immediately and the windows will NOT align; use a negative offset like -500' : `, ~${_tbTraceFrom - _E.solSteps} steps ≈ ${((_tbTraceFrom - _E.solSteps) / 21).toFixed(0)} bars away`})` : ' starting NOW — ⚠ the two consoles start at DIFFERENT steps, so the windows may not overlap; pass -500 (steps from now) as the 3rd arg to align them'} — run the SAME call in both consoles, then compare at EQUAL cur=, never by line position: descBaseH/attH/ringH must match`; },
+        // primeTrace(n) — does the GPU actually RECEIVE the restored bytes? _tbPrime is the only upload path; this
+        //   hashes what goes up and reads it straight back. A MISMATCH means turbo steps a texture the restore never
+        //   wrote — the CPU executor is unaffected because it steps descBase directly, which is exactly the reported
+        //   asymmetry (CPU join correct, turbo join wrong).
+        primeTrace: (n = 8) => { _primeTrace = Math.max(0, n | 0); return `[PRIME] tracing the next ${_primeTrace} texture primes — reload the joiner with this armed`; },
+        // stepTrace(n, slot) — BISECT THE DIVERGENCE. Every INPUT is now verified identical across peers (payload,
+        //   ring content, register ops, cap, shared step) yet the fields differ. So the split happens INSIDE the
+        //   stepping. This hashes a slot's descBase after EVERY engine step for n steps and prints (solStep, hash):
+        //   run it on both peers, line up the solStep columns, and the FIRST step whose hash differs is the exact
+        //   operation that forks — no more hypotheses, just the step index. Peer-local diagnostic; no state written.
+        stepTrace: (n = 40, slot = 'V') => { _stepTraceLeft = Math.max(0, n | 0); _stepTraceSlot = Math.max(0, SLOTN.indexOf(slot));
+          return `[STEP] tracing ${_stepTraceLeft} engine steps of ${SLOTN[_stepTraceSlot]} — compare the two peers at EQUAL solStep=; the first differing hash is the forking step`; },
+        // drive() — READ-ONLY spiral check (the §7.44 question, at the readback layer). The mux spiral's signature is
+        //   a backlog that KEEPS GROWING across seconds while todo pins at the cap; a fixed overhead shows a bounded,
+        //   flat backlog. This reports the governor's own live measurement so the two can be told apart, and prints
+        //   the tempo divisor (NOTE: mu1.tempo(n) is a SETTER — calling it bare injects tempo=2 on every peer).
+        drive: () => { const r = { tempoDiv: _tempoDiv, autoTempo: _autoTempoOn, backlogMax: _at.bMax, backlogPrev: _at.bPrev,
+            deficitMs: _at.defMs, headroomMs: _at.headMs, todoMax: _at.todoMax, viewSlot: SLOTN[_viewSlot],
+            living: _sb.slots.map((s2, i) => ((i === 0 || s2.descLive) && s2.desc) ? SLOTN[i] : null).filter(Boolean) };
+          console.log(`[DRIVE] tempoDiv=${r.tempoDiv}${r.tempoDiv > 1 ? ' ⚠ matter\'s clock is SLOWED (governor acted, or mu1.tempo(n) was called — mu1.tempo(1) restores)' : ''} · autoTempo=${r.autoTempo ? 'ON' : 'OFF'}`);
+          console.log(`[DRIVE] backlog max=${r.backlogMax} prev=${r.backlogPrev} · todoMax=${r.todoMax}${r.todoMax >= 1024 ? ' ⚠ PINNED AT THE CAP — the spiral signature' : ''}`);
+          console.log(`[DRIVE] deficit=${r.deficitMs}ms (≥4000 ⇒ the governor raises the divisor) · headroom=${r.headroomMs}ms · living=${r.living.join(',')} · view=${r.viewSlot}`);
+          console.log(`[DRIVE] ⇒ ${r.todoMax >= 1024 || r.deficitMs >= 4000 ? 'SUPPLY < DEMAND: this is the §7.44 spiral shape, not a fixed cost — the readback stalls are eating the step budget.' : 'backlog BOUNDED: supply meets demand, so the readback cost is steady overhead, NOT a spiral. Throttle it, do not govern it.'}`);
+          return r; },
+        // film(on) — TEXTURE-DIRECT DISPLAY (default ON, 2026-07-30). OFF falls back to the old readback path
+        //   (texture → readPixels → descBase → descDisp → upload) for an A/B comparison. The readback was profiled
+        //   at 83–91% of all GPU readbacks and, because readPixels STALLS the pipeline, two peers on one GPU
+        //   serialize on it — the "lag with a second browser open" symptom. Display-only: the film never re-enters
+        //   the register, so this changes no physics and no determinism (descDisp was never in the contract).
+        film: (on = true) => { _filmOn = !!on; _filmStep = [-1, -1, -1, -1]; _descTexKey = null;
+          return `[FILM] texture-direct display ${_filmOn ? 'ON — the viewed slot renders straight from its GPU film + GPU-reduced peak; nothing is read back' : 'OFF — legacy readback path (readPixels per refresh)'}. mu1.rbTrace(5) to compare.`; },
+        // dispRate(n) — Q-blocks between DISPLAY readbacks of the viewed slot. 1 = 3x/bar (smoothest, default),
+        //   3 = 1x/bar. This is THE dominant GPU cost (83-91% of readbacks profiled); each readPixels stalls the
+        //   pipeline and, on a shared GPU, two peers' stalls serialize. Purely render-side — descDisp is not in regH.
+        dispRate: (n = 1) => { _dispEvery = Math.max(1, Math.min(21, n | 0));
+          return `[DISP] film refresh every ${_dispEvery} Q-block(s) = ${(3 / _dispEvery).toFixed(1)}x/bar · readbacks scale by 1/${_dispEvery}. Try dispRate(3) with two peers and compare smoothness against the lag.`; },
+        detField: (n = 8) => { _detFieldEvery = Math.max(1, n | 0);
+          return `[DET] field-hash sync every ${_detFieldEvery} DET tick(s) — regH still every tick (that is the contract; the envelope hashes are the secondary check). Lower for a fork hunt, raise for speed.`; },
         regTrace: (on = true, every = 4) => { _regTraceOn = !!on; _detEvery = Math.max(1, every | 0); return `[DET] trace ${_regTraceOn ? `ON — every ${_detEvery * Q} steps · compare regH + solH across peers at equal solStep= (regTrace(true,1) = every ${Q} steps to find the first fork)` : 'OFF — field ENFORCEMENT dropped: W runs AS ITS OWN MIRROR (deterministic by construction, verified never; the register/regH stays the whole contract — the mirror-mode performance, on the live W canvas)'}`; },
         // pin(β) — the IMAGE-CONVERGENCE tuner (finding_pin_injection_lock): raise β to tighten lock→A. A tight lock means
         // each peer's ψ ≈ the shared attractor A ≈ every peer's ψ → the images converge (no field exchange, pure local
-        // lock to a regH-shared reference). Watch 'lock→A' in the status climb toward 1 as you raise β. Set the SAME β on
-        // both peers to compare fairly (it's a local render dial, not replicated). Original capped ~0.45; try 0.3–0.45.
-        pin: (b) => { if (typeof b === 'number') _pinBeta = Math.max(0, Math.min(1, b)); return `[PIN] β=${_pinBeta.toFixed(2)} · lock→A now ${_E.lockNow.toFixed(3)} (→1 = images converge to the shared attractor)`; },
+        // β IS PHYSICS, NOT A RENDER DIAL — REPLICATED (2026-08-03). The old comment here said "it's a local render
+        //   dial, not replicated", and that was WRONG in a way that produced the reload-only V/P1/P2 mismatch:
+        //   _pinBeta multiplies applyEyeSuperpose (ψ += β·att) at every step of every slot (see beta(), and the
+        //   superpose calls in the drive), so it sets the INJECTION STRENGTH of the pin. Two peers at different β
+        //   add a differently-scaled COMPLEX vector each step; the cap (a real scale) then restores amplitude
+        //   exactly — leaving |ψ|² equal to float noise and the GLOBAL PHASE permanently offset. Measured: header
+        //   β 0.25 on one peer vs 0.30 on the other, with ΔargPin 0.009–0.036 rad and Δ|ψ|² inside the f32 floor.
+        //   regH never caught it because regH covers _lensOp[].beta (the per-slot refAmp, which IS replicated and
+        //   DOES ride the snapshot as lensOps) — NOT this global multiplier. The effective strength is the product
+        //   _pinBeta · _lensOp[i].beta, and only half of it was shared.
+        //   Now stamped through the same replicated path as every other physics dial, so it lands at the identical
+        //   shared step on every peer. It also rides the join snapshot (see takeSnap/restoreSnap `pinB`).
+        pin: (b) => { if (typeof b !== 'number') return `[PIN] β=${_pinBeta.toFixed(2)} · lock→A now ${_E.lockNow.toFixed(3)} (→1 = images converge to the shared attractor)`;
+          injectEvent?.({ type: 'mediumVirt', mode: 'pinbeta', amp: Math.max(0, Math.min(1, b)) });
+          return `[PIN] β→${Math.max(0, Math.min(1, b)).toFixed(2)} REPLICATED (lands at the shared step on every peer; it scales ψ+=β·att, so an unshared β is a permanent global-phase fork)`; },
         // ⟲coevo(on) — the honest ℂ* EINSTEIN LOOP: matter's energy state throttles its own transport ("matter tells
         // geometry how far it may go"). ON = the leash advance is gated by a gain observable; OFF = open-loop (the target
         // never waits for matter — the pure DOP replay). Watch 'coevo g' in the status: 1 = matter kept up (full advance),
@@ -2423,6 +3523,110 @@ function makeMediumU1Renderer(core) {
         pinBeta: (v = 1, slot) => { const nm = slot || _regSlot; injectEvent?.({ type: 'mediumVirt', mode: 'refamp', src: nm, amp: +v });
           const held = _sb.slots[Math.max(0, SLOTN.indexOf(nm))]?._attHold;
           return `[REFAMP] β(${nm}) → ${(+v).toFixed(2)}${held ? ' · ψATT is ADOPTED on this slot, so β is DAMPING (target = the field itself): low β + higher ω is the lively regime' : ''}`; },
+        // synthHold(N, kfrac) — SYNTHESISE → ADOPT. Rebuilds the live slot's field from its own N strongest modes
+        //   below kfrac·kKnee and adopts it directly: no probe, no injection, no digest (there are no injected pixels
+        //   to disperse — a synthesised field never was a glyph). THE THIRD DESCRIPTION FORM: `dop`+obj is compact but
+        //   foreign (a shared generator); a ψATT byte-hold is native but ungenerative (128KB on the wire); a MODE LIST
+        //   is both, because Fourier is this medium's own eigenbasis. Measured: N=64 → 1024 B, shape 0.90; N=128 →
+        //   2048 B, shape 0.94 (vs 131072 B for the f32 hold ⇒ ~64×); saturates at N≈256. kfrac default 0.5 sits at
+        //   the measured identity floor (V tracks the full state to 0.35–0.5·kKnee, scrambles below 0.25).
+        synthHold: (N = 128, kfrac = 0.5) => { injectEvent?.({ type: 'mediumVirt', mode: 'synthspec', amp: +N, gx: Math.round(100 * (+kfrac || 0.5)) });
+          return `[SYNTH] → ${Math.max(0, Math.min(4096, Math.round(+N)))} modes below ${(+kfrac || 0.5).toFixed(2)}·kKnee, adopted directly (replicated). Pixels are the OUTPUT now, never the input — set ω via mu1.lensTau(0.2) for living precession, mu1.holdId() to verify identity.`; },
+        // specCost(N, kfrac) — READ-ONLY: what would a recipe of N modes cost and how faithful would it be? Runs the
+        //   same _specSynth the verb runs, on W's live bytes, WITHOUT touching the medium. Use it to pick N before
+        //   committing: the shape/size curve has a knee (0.90 at 64, 0.94 at 128, flat past 256).
+        specCost: (N = 128, kfrac = 0.5) => { if (!W.descBase) return '[SPEC] no field on W';
+          const kc = _kKnee() * (+kfrac || 0.5), r = _specSynth(W.descBase, Math.max(1, Math.round(+N)), kc);
+          if (!r) return '[SPEC] synthesis failed (no ring?)';
+          const sh = _ampCorr(r.field, W.descBase), v0 = _mkSl2(W.descBase), v1 = _mkSl2(r.field);
+          console.log(`[SPEC] ${r.modes}/${r.pool} modes below k=${kc.toFixed(3)} (${(100 * (+kfrac || 0.5)).toFixed(0)}% of kKnee=${_kKnee().toFixed(3)}) · recipe ${r.modes * 16} B vs field ${W.descBase.length * 4} B (f32) = ${(W.descBase.length * 4 / (r.modes * 16)).toFixed(0)}× smaller · shape(ampCorr)=${sh.toFixed(4)}${(v0 && v1) ? ` · identity dV=${(100 * (v1.V / v0.V - 1)).toFixed(2)}%` : ''} — READ-ONLY, the medium is untouched`);
+          return { modes: r.modes, bytes: r.modes * 16, shape: sh, dV: (v0 && v1) ? (v1.V / v0.V - 1) : null }; },
+        // basinTest(amp, bars, seed) — IS THE HELD STATE AN ATTRACTOR, OR JUST A STORED PICTURE?
+        //   THE QUESTION. Spectral truncation failed (live: the COMPLETE low band = 421/421 modes reproduces only 0.30
+        //   of the state, dV −90%) because SPM is diagonal in POSITION and dense in k — a state that has lived under it
+        //   is high-k by construction, and no linear-basis truncation describes it. So the compact form, if one exists,
+        //   is not a basis expansion but a BASIN RECIPE: (pin target, β, ω, ring, cap E₀) → run to convergence. That is
+        //   exact rather than lossy — the medium regenerates the state by running its own dynamics. This tests the
+        //   premise that claim rests on: does the state RETURN after a kick, or does it merely sit where it was put?
+        //
+        //   THE TRAP THIS AVOIDS. Under ψATT the pin target IS the state, so "perturb → the pin drags it back" is a
+        //   TAUTOLOGY — it would return no matter what, and prove nothing about attractors. So the run is done on a
+        //   SCRATCH COPY with the pin held FIXED at the unperturbed target while the STATE is kicked. Recovery then
+        //   measures the medium's own dynamics (dispersion + SPM + cap) pulling the state back to a fixed point, not
+        //   the pin being redefined around wherever the state happens to be.
+        //
+        //   THE CONTROL (what makes it a test rather than a demo). β=0 is run alongside: same kick, same steps, NO pin.
+        //   · both recover        ⇒ the medium alone re-forms it: a genuine attractor of the dynamics
+        //   · only pinned recovers ⇒ the pin is doing the work; the state is a DRIVEN equilibrium, not a free attractor
+        //     (still a valid basin recipe — the pin is part of the recipe — but a weaker claim, and honest to say so)
+        //   · neither recovers    ⇒ not an attractor at all: the hold is a stored picture and the basin idea is dead
+        //   READ-ONLY: runs on copies, never touches descBase/_attHold. Deterministic (makeRng on the given seed, no
+        //   Math.random), so the same seed replays identically — but PEER-LOCAL by design: it is a measurement.
+        basinTest: (amp = 0.3, bars = 24, seed = 1) => {
+          const s0 = _sb.slots[0]; if (!s0.descBase || !s0.descE0) return '[BASIN] no field on W';
+          const tgt = _liveAtt(0) || s0.descAtt || _regAttC;
+          if (!tgt) return '[BASIN] no pin target — adopt (mu1.selfAtt) or pin first';
+          const base = Float64Array.from(s0.descBase), E0 = s0.descE0;
+          const rng = makeRng(seed | 0, 0xba51, 0x11fe, 0x5eed); rng.next(); rng.next();   // warm-up: the first draw is dominated by s0+s3
+          // the KICK: broadband complex noise at `amp` × the state's own rms — deliberately NOT low-k, since the
+          // question is whether the medium re-forms structure across the whole band it actually occupies.
+          let rms = 0; for (let j = 0; j < base.length; j++) rms += base[j] * base[j];
+          rms = Math.sqrt(rms / base.length);
+          const kick = Float64Array.from(base);
+          for (let j = 0; j < kick.length; j++) kick[j] += amp * rms * (2 * rng.next() - 1);
+          const run = (f, beta) => { let e = 0; for (let j = 0; j < f.length; j++) e += f[j] * f[j];
+            const sl = { descBase: Float64Array.from(f), descE0: E0, _eng: null, leash: s0.leash };
+            for (let b = 0; b < bars; b++) for (let n = 0; n < STEPS_PER_PHASE; n++) _regStep1(sl, beta ? tgt : null, beta);
+            return Float64Array.from(Float32Array.from(sl.descBase)); };
+          const d0 = _ampCorr(kick, base);                       // how far the kick threw it
+          const pin = run(kick, _lensOp[0].beta || 1), free = run(kick, 0);
+          const ctlP = run(base, _lensOp[0].beta || 1);           // UNKICKED controls: the state also drifts on its own
+          const ctlF = run(base, 0);                              //   (relaxation), so recovery must beat THIS, not 1.0
+          const sh = (f) => _ampCorr(f, base), vv = (f) => { const q = _mkSl2(f); return q ? q.V : null; };
+          const v0 = vv(base);
+          const pct = (f) => v0 ? `${(100 * (vv(f) / v0 - 1)).toFixed(2)}%` : '?';
+          console.log(`[BASIN] kick amp=${amp} (shape after kick ${d0.toFixed(4)}) · ${bars} bars × ${STEPS_PER_PHASE} steps · β=${(_lensOp[0].beta || 1).toFixed(2)}`);
+          console.log(`  PINNED  recovered shape ${sh(pin).toFixed(4)} (dV ${pct(pin)})  · unkicked control ${sh(ctlP).toFixed(4)} (dV ${pct(ctlP)})`);
+          console.log(`  FREE    recovered shape ${sh(free).toFixed(4)} (dV ${pct(free)})  · unkicked control ${sh(ctlF).toFixed(4)} (dV ${pct(ctlF)})`);
+          // ── THE BASELINE IS THE UNKICKED CONTROL, NOT THE KICK (corrected 2026-07-27 — the first version compared
+          //    against the post-kick shape and printed the OPPOSITE conclusion on data that showed a clean basin).
+          //    Why the kick is the wrong baseline: the state RELAXES on its own, so the unkicked run lands at ~0.93,
+          //    not 1.0. At a small kick the post-kick shape (0.998) sits ABOVE that equilibrium, so converging to it
+          //    scores as a "loss" when the state is simply arriving where it always goes. Convergence to the SAME
+          //    PLACE regardless of the kick IS the attractor signature — that is what must be measured.
+          const cvP = sh(pin) - sh(ctlP), cvF = sh(free) - sh(ctlF);   // ≈0 ⇒ the kick was forgotten (converged to the control)
+          const TOL = 0.02;
+          console.log(`  ⇒ CONVERGENCE (kicked vs unkicked — ≈0 means the kick was forgotten): PINNED ${cvP >= 0 ? '+' : ''}${cvP.toFixed(4)} · FREE ${cvF >= 0 ? '+' : ''}${cvF.toFixed(4)} — ${Math.abs(cvF) <= TOL && sh(ctlF) > 0.5 ? 'the MEDIUM ALONE re-forms it ⇒ genuine attractor of the dynamics (the basin recipe is exact and pin-INDEPENDENT)' : Math.abs(cvP) <= TOL ? `DRIVEN EQUILIBRIUM with a real basin: the pinned run converges to its unkicked equilibrium (${sh(ctlP).toFixed(4)}) whatever the kick, but the FREE run collapses to ${sh(ctlF).toFixed(4)} — so this is a fixed point of dispersion+SPM+cap+PIN, not of the medium alone. The pin is PART of the recipe, not scaffolding.` : `OUTSIDE THE BASIN at amp=${amp}: the kicked run lands ${Math.abs(cvP).toFixed(4)} from its equilibrium — the basin has an edge and this kick is past it (sweep amp down to find it).`}`);
+          return { kickShape: d0, pinned: sh(pin), free: sh(free), ctlPinned: sh(ctlP), ctlFree: sh(ctlF), convPinned: cvP, convFree: cvF }; },
+        // basinTarget(N, kfrac, bars) — CAN A CHEAP TARGET CONVERGE TO AN EXPENSIVE STATE?
+        //   The question basinTest makes well-posed. Under ψATT the basin recipe is exact but CIRCULAR: the pin target
+        //   IS the state, so "run to convergence" reads "the state that converges to itself". It stops being circular
+        //   only if the target can be cheaper than the state. basinTest showed the basin tolerates STATE error (a kick
+        //   to 0.3×rms is forgotten); this asks whether it also tolerates TARGET error — pin to a degraded, compact
+        //   target (the N-mode low-band reconstruction, which alone scores ~0.30 live) and see where the medium lands.
+        //     converges near the true state ⇒ REAL COMPRESSION: N modes + the dynamics regenerate what N modes cannot
+        //     converges near the degraded target ⇒ the pin just reproduces whatever it is given; no compression
+        //   READ-ONLY: copies only, the medium is untouched.
+        basinTarget: (N = 421, kfrac = 4, bars = 24) => {
+          const s0 = _sb.slots[0]; if (!s0.descBase || !s0.descE0) return '[BASIN-T] no field on W';
+          const base = Float64Array.from(s0.descBase), E0 = s0.descE0;
+          const r = _specSynth(base, Math.max(1, Math.round(+N)), _kKnee() * (+kfrac || 4));
+          if (!r) return '[BASIN-T] synthesis failed (no ring?)';
+          const beta = _lensOp[0].beta || 1;
+          const run = (f, tgt) => { const sl = { descBase: Float64Array.from(f), descE0: E0, _eng: null };
+            for (let b = 0; b < bars; b++) for (let n = 0; n < STEPS_PER_PHASE; n++) _regStep1(sl, tgt, beta);
+            return Float64Array.from(Float32Array.from(sl.descBase)); };
+          const sh = (a, b) => _ampCorr(a, b);
+          const tgtShape = sh(r.field, base);                       // how degraded the cheap target is, alone
+          const fromDeg = run(r.field, r.field);                    // start AND pin at the degraded target (the honest cheap-recipe run)
+          const trueEq = run(base, base);                           // the true state's own equilibrium — the thing to beat
+          const a = sh(fromDeg, base), b = sh(fromDeg, r.field);
+          console.log(`[BASIN-T] cheap target = ${r.modes} modes (${r.modes * 16} B) below ${(+kfrac || 4).toFixed(2)}·kKnee · alone it scores ${tgtShape.toFixed(4)} vs the true state · β=${beta.toFixed(2)}, ${bars} bars`);
+          console.log(`  converged from/on the cheap target → ${a.toFixed(4)} vs the TRUE state · ${b.toFixed(4)} vs the cheap target itself`);
+          console.log(`  the true state's own equilibrium → ${sh(trueEq, base).toFixed(4)} (the ceiling any recipe can reach)`);
+          const lift = a - tgtShape;
+          console.log(`  ⇒ the dynamics ${lift > 0.05 ? `LIFT the cheap target by ${lift.toFixed(4)} toward the true state ⇒ REAL COMPRESSION: ${r.modes * 16} B + the medium's own dynamics regenerate what ${r.modes} modes alone cannot` : `add ${lift >= 0 ? '+' : ''}${lift.toFixed(4)} — NO LIFT: the medium reproduces whatever target it is given, so a degraded target yields a degraded state and the recipe cannot be cheaper than the state`}`);
+          return { modes: r.modes, bytes: r.modes * 16, targetAlone: tgtShape, converged: a, vsTarget: b, trueEq: sh(trueEq, base), lift }; },
         selfAtt: (bars = 3) => { injectEvent?.({ type: 'mediumVirt', mode: 'selfatt', amp: +bars });
           const v = Math.max(0, Math.min(64, Math.round(+bars)));
           return `[ψATT] → ${v ? `digest ${v} bars then ADOPT the field as the attractor (set ω via mu1.lensTau(0.1..0.3) for living precession)` : 'OFF — the probe pin re-asserts the injected symbol'} (replicated)`; },
@@ -2551,13 +3755,42 @@ function makeMediumU1Renderer(core) {
         // caught: solH matched through kV=51 then forked exactly at 51→52). Staging keys the swap to the shared step.
         const q = Array.isArray(n.kernelQueue) ? n.kernelQueue : [];
         const oldestQ = q.length ? Math.min(...q.map((e) => e.ver | 0)) : (_kernVer + 1);
-        if (_E.kernelVer < oldestQ - 1) { const qs = _gpu.readEyePsi(); _gpu.setRings(n.cachedRadii, n.cachedWeights, n.cachedOffsets); _gpu.setEyePsi(qs); _E.kernelVer = _kernVer; _E.ringCache = { r: n.cachedRadii, w: n.cachedWeights, o: n.cachedOffsets }; _pendKern.length = 0;
-          console.log(`[MU1-KSNAP] cold-snap kernel ver=${_kernVer} at frame (solSteps=${_E.solSteps}, oldestQ=${oldestQ}) — far behind, queue can't replay the gap`); }
-        else { for (const e of q) { if ((e.ver | 0) > _E.kernelVer && !_pendKern.some((p) => (p.ver | 0) === (e.ver | 0))) {
-              const _off = (e.o || []).map((tier) => Array.from(tier || []));   // deep-copy tiers (survive the node→setRings path intact)
-              _pendKern.push({ startStep: _kernStep(e.time ?? 0), r: e.r, w: e.w, o: _off, ver: e.ver | 0 }); } }
-          _pendKern.sort((a, b) => a.startStep - b.startStep); }
+        // DEFER RATHER THAN COLD-SNAP WHEN A HOLD IS ARMED (2026-08-03). A joiner arrives with _kernHold set (see
+        //   [JOIN-KHOLD]): its version is older than the queue can replay, so the gap is genuinely underivable.
+        //   Cold-snapping here would apply a per-step physics input at a PEER-LOCAL FRAME — the one thing the
+        //   staging discipline exists to prevent — and the peers then propagate through different kernels at the
+        //   same step forever. Instead we WAIT: the soliton does not step (see the drive gate), and the staging
+        //   branch below clears the hold as soon as a queued swap lands at its shared step, which is the first
+        //   instant both peers are provably on the same kernel at the same step. Generative, not historical: the
+        //   joiner re-derives from the clock rather than replaying what it missed.
+        if (_kernHold) { /* held — fall through to staging below; no peer-local swap, no stepping */ }
+        else if (_E.kernelVer < oldestQ - 1) { const qs = _gpu.readEyePsi(); _gpu.setRings(n.cachedRadii, n.cachedWeights, n.cachedOffsets); _gpu.setEyePsi(qs); _E.kernelVer = _kernVer; _E.ringCache = { r: n.cachedRadii, w: n.cachedWeights, o: n.cachedOffsets }; _pendKern.length = 0;
+          // A JOINER IS ALWAYS "FAR BEHIND" (2026-08-03) — so this escape hatch fires on essentially every join, and
+          //   it is the ONE path in the kernel logic that applies a swap at a PEER-LOCAL FRAME rather than at the
+          //   shared step. The note above already names that as the fork it exists to prevent; the guard just does
+          //   not cover the join case, because a joiner restores kernelVer from the snapshot while the node's live
+          //   version has moved on and kernelQueue only retains recent entries.
+          //   MEASURED CONSEQUENCE: the two peers' kernelVer diverge and STAY diverged (leader 310,312,312,313,314,
+          //   316,318,320 vs joiner 306,308,312,313,316,318,322,325 at the same bars). The kernel is a PER-STEP
+          //   physics input, so a different λ-grid at the same step is a different propagation — giving a permanent
+          //   phase difference at constant energy (|ψ|² within 0.04× the f32 floor, argPin ~0.015 rad apart,
+          //   oscillating and NOT decaying) with regH/attH/holdH/e0 all matching. Exactly the reported symptom.
+          console.warn(`[MU1-KSNAP] ⚠ cold-snap kernel ver=${_E.kernelVer}→${_kernVer} applied at a PEER-LOCAL FRAME (solSteps=${_E.solSteps}, oldestQ=${oldestQ}, queue=${q.length}) — the queue cannot replay the gap, so this peer swaps at a step the other peer never swaps at. From here the two peers propagate through DIFFERENT kernels at the same step: a permanent phase difference at constant energy. This fires on essentially every JOIN (a joiner restores an old kernelVer while the node has advanced); until the join adopts the kernel through the shared-step queue, V/P1/P2 will not be phase-exact.`); }
+        else _stageKern(q);
       }
+      // ── STAGING MUST NOT BE GATED ON "MY VERSION DIFFERS RIGHT NOW" (2026-08-03) — the residual ver DRIFT ──────
+      //   The whole block above is entered only when `_E.kernelVer !== _kernVer`, i.e. when this peer's version
+      //   differs from the node's AT THIS FRAME. But staging is about FUTURE swaps: an entry whose startStep lies
+      //   ahead must be queued regardless of what version we happen to hold now. A peer whose frame lands while the
+      //   two are momentarily equal skips staging entirely and never picks those entries up; the other peer, whose
+      //   frame landed a moment earlier or later, does. Different _pendKern contents ⇒ the swaps land at different
+      //   steps ⇒ the 1–2 version slip measured between peers (518,521,524,525,528,530 matching, then 532 vs 534).
+      //   MEASURED CONTEXT that rules out the other explanation: the queue is NOT too shallow — even on a slow
+      //   connection the joiner reported `gap=2 versions to stage, depth=24`, so the unreplayable-gap case (which
+      //   the _kernHold deferral handles) simply does not arise here. This race is the real residual.
+      //   Staging is idempotent (the `some()` dedupe) and cheap, so run it EVERY frame from the shared queue: both
+      //   peers then hold the same _pendKern regardless of when their frames sample it.
+      if (_kernRunning && !_kernHold) _stageKern(Array.isArray(n.kernelQueue) ? n.kernelQueue : []);
 
       // ── S6 VERB DRAIN (record/store/recall/aphase/lenstau — the register + holography verbs) — replayed from the
       //    replicated log at the frame (they mutate at the shared drain; the field-plate GPU round-trips are pure) ──
@@ -2632,7 +3865,17 @@ function makeMediumU1Renderer(core) {
       // MIRROR the step-clock rate flip onto the τ KERNEL when the live-slot count changes (V born → nSl 1→2). Factored into
       // medium-core.syncClockRate — without it _tauK keeps the old rate while the drive runs at nSl proper-rate → verb stamps
       // land ~nSl× ahead of the drive → a growing backlog → store/recall fire seconds late (see the helper's comment).
-      syncClockRate(_stepClk, _tauK, _E.solSteps, _nSl * _tempoDiv);   // rate = live slots × the world tempo (both replicated → the flip lands identically on every peer)
+      // RATE-FLIP RECEIPT (2026-08-03). `reanchor` REWRITES c0 by k·(ratePrev−r)/spp, and c0 is the one quantity the
+      //   join is required to keep VERBATIM (every stamped startStep is floor((t·rate−c0)·spp)). A flip that fires on
+      //   one peer and not the other — or fires on both at a DIFFERENT k — shifts that peer's whole `target` curve and
+      //   the peers then accumulate solSteps at a CONSTANT offset that never converges: exactly the [TBSTEP] signature
+      //   (both stepping 7/block, cursors a fixed distance apart, every byte-level column identical). _nSl is
+      //   recomputed LOCALLY from slot state each frame while ratePrev arrives from the wire, so the two can disagree
+      //   at join even when the slot state is right. Log every flip with the k it fired at and the c0 it produced;
+      //   the peers' [RATEFLIP] lines must match line-for-line, k for k.
+      { const _rWant = _nSl * _tempoDiv, _c0Pre = _stepClk.c0, _rPrev = _stepClk.ratePrev;
+        if (syncClockRate(_stepClk, _tauK, _E.solSteps, _rWant))
+          console.log(`[RATEFLIP] k=${_E.solSteps} · rate ${_rPrev}→${_rWant} (nSl=${_nSl} tempoDiv=${_tempoDiv}) · c0 ${_c0Pre.toPrecision(17)}→${_stepClk.c0.toPrecision(17)} (Δ=${(_stepClk.c0 - _c0Pre).toPrecision(17)}) · born=[${_sb.slots.map((s2, i2) => (s2.born ? `${SLOTN[i2]}${s2.desc ? '(desc)' : ''}` : '')).filter(Boolean).join(',')}] — MUST fire at the SAME k with the SAME Δ on every peer; a flip on one peer only leaves a permanent target offset of Δ·spp/rate steps`); }
       let target = _stepClk.target(_E.monClock);
       // COLD-START BURST CLAMP (first-load lag fix): a fresh page's world clock advances BEFORE the GPU+kernel are
       // ready, so the first DRIVEN frame can owe a huge backlog (target ≫ solSteps=0) → a 1024-step burst in one frame
@@ -2647,6 +3890,24 @@ function makeMediumU1Renderer(core) {
       // CAP the per-frame catch-up while easing: c0 stays the leader's (stamped startSteps identical), and the backlog is
       // consumed over several frames — byte-identical at every shared boundary (whole-quanta), just spread in wall-time.
       if (_joinAnchor && (target - _E.solSteps) > 1024) _joinEaseN = 40;   // big backlog at join → ease it; else no ease needed
+      // THE JOIN BURST IS A DIFFERENT INTEGRATION PATH (2026-08-03) — the argPin-offset candidate.
+      //   A joiner restores solSteps mid-run, so `target` is ahead and it runs the gap as a BURST (up to 1024
+      //   steps/frame, or 28 under the ease) while the leader ran those same steps over dozens of frames.
+      //   Whole-quanta chunking makes the STEP BOUNDARIES shared, but not the per-call context: _tbAdvanceAll
+      //   captures att4 ONCE PER CALL and holds it for the whole block, so a 1024-step burst is one call with one
+      //   att4 where the leader had many calls with att4 re-read between them. Same steps, same kernel, same target
+      //   bytes — but the pin is injected against a target sampled at a different cadence, and the cap renormalizes
+      //   at different points. That is a phase difference at constant energy, established ONCE during the catch-up
+      //   and then conserved (nothing damps a global phase) — which matches the measured signature exactly:
+      //   |ψ|² within 0.03× the f32 floor, argPin 0.02–0.04 rad apart, permanent, with every hash agreeing.
+      //   Logged, not yet corrected: the fix would be to cap the per-frame catch-up to the Q-block the leader used
+      //   (making the call cadence shared too), which costs join latency — measure before choosing.
+      // THE JOIN BACKLOG — how far behind the shared clock this peer restored. MEASURED 2026-08-03: backlog=10
+      //   steps, i.e. the joiner arrives essentially IN STEP (under two Q-blocks) and absorbs it in the same number
+      //   of _tbAdvanceAll calls the leader used. So the "catch-up burst integrates differently" hypothesis is
+      //   FALSIFIED: there is no burst to speak of, and the residual argPin offset is not explained by it.
+      if (_joinAnchor) { const _bl = target - _E.solSteps;
+        console.log(`[JOIN-BURST] backlog=${_bl} steps at join (target=${target}, solSteps=${_E.solSteps}) · ease=${_joinEaseN > 0 ? `ON (28/frame for ${_joinEaseN} frames)` : 'OFF'} · ≈${Math.max(1, Math.ceil(_bl / Q))} Q-blocks to absorb — a SMALL backlog here means the joiner integrates the gap the same way the leader did, so the catch-up path is NOT a source of divergence`); }
       _joinAnchor = false;
       // WHOLE-QUANTA CHUNKING (the solH frame-rate-independence, ported from the oracle line 2311): step ONLY in whole
       // Q=7-quanta, so every peer batches its GPU work at IDENTICAL shared step boundaries {0,7,14,21,…} regardless of
@@ -2669,6 +3930,16 @@ function makeMediumU1Renderer(core) {
       // reachable ≫ Q → the joiner runs a huge todo in ONE frame while the leader ran those steps over dozens of frames.
       // Whole-quanta chunking SHOULD make that byte-identical, but this trace confirms whether the joiner actually bursts.
       if (_joinBurstLog && todo > 0) { _joinBurstLog = false; console.log(`[MU1-FIRSTDRIVE] solSteps→${_E.solSteps} todo=${todo} target=${target} reachable=${reachable} monClock=${_E.monClock.toFixed(3)} c0=${_stepClk.c0.toFixed(4)} rate=${_stepClk.rate} · ringLen=${_E.ringCache?.r?.length ?? 'NULL'} ringCount=${_gpu._ringCount ?? '?'} offTot=${_E.ringCache?.o ? _E.ringCache.o.reduce((s, o) => s + (o?.length >> 1 || 0), 0) : 'NULL'} nodeOffTot=${n.cachedOffsets ? n.cachedOffsets.reduce((s, o) => s + (o?.length >> 1 || 0), 0) : 'NULL'} kernelVer=${_E.kernelVer}/node=${n.cachedRadiiVersion|0} psiBase=${_psiBase ? 'ok' : 'NULL'} Wfield=${W.field ? W.field.length : 'NULL'} We0=${W.e0.toExponential(3)}`); }
+      // ── THE CLOCK METER (mu1.clockDet(n)) — WHY solSteps CAN HOLD A CONSTANT OFFSET ─────────────────────────
+      //   solSteps chases `target`, so it is normally SELF-CORRECTING: a peer that falls behind catches up next
+      //   frame. It can only hold a FIXED offset if `target` itself is offset, and target = floor((mon−c0)·spp/rate).
+      //   mon (the world clock) and rate are shared, so a constant step offset means a constant c0 difference of
+      //   Δc0 = offset·rate/spp. This prints every term of that equation at a shared bar, so the offset can be
+      //   attributed instead of inferred: identical mon + identical rate + DIFFERENT c0 ⇒ the join did not keep c0
+      //   verbatim (look for a [RATEFLIP] on one peer only). Identical c0 + different target ⇒ the peers sampled
+      //   the world clock on different phases (check monDir). Everything identical ⇒ the offset is downstream.
+      if (_clockDetEvery && (_E.frameBar % _clockDetEvery) === 0 && _clockDetBar !== _E.frameBar) { _clockDetBar = _E.frameBar;
+        console.log(`[CLOCK] bar=${_E.frameBar} · solSteps=${_E.solSteps} target=${target} reachable=${reachable} todo=${todo} · monClock=${_E.monClock.toPrecision(17)} monDir=${_E.monDir} · c0=${_stepClk.c0.toPrecision(17)} rate=${_stepClk.rate} ratePrev=${_stepClk.ratePrev} spp=${STEPS_PER_PHASE} · nSl=${_nSl} tempoDiv=${_tempoDiv} joinEase=${_joinEaseN} — compare peers at EQUAL bar: monClock/rate/c0 MUST all match; a c0 difference of Δ means a permanent target offset of Δ·spp/rate steps`); }
 
       // TRANSPORT target: DRAINED FROM THE STAMPED QUEUE inside the drive loop (see below) → applied at the shared step,
       // not here at the peer-local frame. objorbit's target IS deterministic already (θ = solSteps·gain, a pure fn of the
@@ -2706,7 +3977,33 @@ function makeMediumU1Renderer(core) {
           : (W.descBase && W.movAtt) ? W.movAtt(W.leash.state.gx, W.leash.state.gy) : null;
         for (let i = 0; i < todo; i++) { const k = _base + i; let _cpuSnap = null;
           while (_pendKern.length && k >= _pendKern[0].startStep) { const pk = _pendKern.shift(); _E.kernelVer = pk.ver; _E.ringCache = { r: pk.r, w: pk.w, o: pk.o };
-            _kernApplied.push({ atStep: k, r: pk.r, w: pk.w, o: pk.o }); }   // version BOOKKEEPING (the register engine reads the ring via the λ-grid cache) + the schedule for a live MIRROR
+            _kernApplied.push({ atStep: k, r: pk.r, w: pk.w, o: pk.o });   // version BOOKKEEPING (the register engine reads the ring via the λ-grid cache) + the schedule for a live MIRROR
+            // A STAGED SWAP LANDING AT ITS SHARED STEP IS THE ALIGNMENT POINT — release the join hold here. This is
+            //   the first instant a deferred joiner is PROVABLY on the same kernel as every other peer at the same
+            //   step, derived from the shared clock rather than copied. From here the ordinary staging carries it.
+            if (_kernHold) { _gpu.setRings(pk.r, pk.w, pk.o);
+              console.log(`[JOIN-KHOLD] RELEASED at k=${k} ver=${pk.ver} — a queued swap landed at its shared step, so this peer is now on the same kernel as the others at the same step (held ${k - (_kernHold.since | 0)} steps since the join, from ver=${_kernHold.ver}). Stepping resumes; the gap was never replayed — the clock regenerated it.`);
+              _kernHold = null; } }
+          // ── THE DEFERRAL GATE (see [JOIN-KHOLD]) ───────────────────────────────────────────────────────────────
+          //   While held, this peer knows its kernel is NOT the one the others are stepping through, and it cannot
+          //   derive the versions it missed. Rather than propagate the field through a kernel it knows to be wrong
+          //   (which is what the cold-snap did, permanently), it advances the SHARED CURSOR only: k moves, the
+          //   queue drains, verbs stamp — but no propagation happens, so no divergence can accumulate. The field
+          //   simply waits at the restored bytes until the release above. The cost is a visible pause on join; the
+          //   gain is that when stepping resumes both peers are on the same kernel at the same step, by derivation.
+          if (_kernHold) {
+            // SAFETY VALVE: the fractal clock re-rings often, so a swap normally arrives within a few hundred
+            //   steps. If one does not (a quiescent clock, or a world whose kernel has stopped changing) the hold
+            //   would stall this peer forever, which is worse than a phase offset. After _KHOLD_MAX steps, give up
+            //   on deriving and adopt the node kernel — announcing plainly that this peer is now the cold-snap
+            //   case and will carry a phase difference until the next shared swap re-aligns it.
+            if ((k - (_kernHold.since | 0)) > _KHOLD_MAX) {
+              console.warn(`[JOIN-KHOLD] ⚠ TIMED OUT after ${k - (_kernHold.since | 0)} steps with no staged swap (ver=${_E.kernelVer}, node=${n.cachedRadiiVersion | 0}) — adopting the node kernel at this frame so the peer does not stall. This IS the cold-snap case: expect a phase offset vs the other peers until a shared swap re-aligns them. If this fires routinely, the clock is not re-ringing and the deferral strategy needs a different alignment point.`);
+              if (n.cachedRadii?.length) { const _qs = _gpu.readEyePsi(); _gpu.setRings(n.cachedRadii, n.cachedWeights, n.cachedOffsets); _gpu.setEyePsi(_qs);
+                _E.kernelVer = n.cachedRadiiVersion | 0; _E.ringCache = { r: n.cachedRadii, w: n.cachedWeights, o: n.cachedOffsets }; }
+              _kernHold = null; }
+            else { if ((k % 210) === 0) console.log(`[JOIN-KHOLD] holding at k=${k} (ver=${_E.kernelVer}, waiting for a staged swap ≥ ${_kernHold.need}; pend=${_pendKern.length}) — the field is NOT stepping, so nothing diverges while we wait`);
+              _E.kwSteps++; continue; } }
           _siShift.drain(k, (e) => { if (_driveMode === 'transport') { if (!W.leash.state.go) W.virtGo(e.toX, e.toY); else W.setTarget(e.toX, e.toY); } });
           _siReg.drain(k, (e) => _applyRegVerb(e, k));
           _E.kwSteps++;
@@ -2745,6 +4042,7 @@ function makeMediumU1Renderer(core) {
           // x-space regional step (small kernels only): step W ONLY inside R, skip it in the turbo advance below.
           if (_shardXspace) { if (_turboOn && _gpu) _tbSyncSlot(0);
             let _cs = null; if (_K.edge) { let ae = false; for (let a2 = 0; a2 < 4; a2++) for (let b2 = 0; b2 < 4; b2++) if (_K.edge[a2][b2]) ae = true; if (ae) _cs = _sb.slots.map((s2) => (s2.descBase ? Float64Array.from(s2.descBase) : null)); }
+            if (_attCadLeft > 0 && _attCadSlot === 0 && (k % 7) === 0) console.log(`[ATTCAD] STEP k=${k} W · regAttC=${_regAttC ? _hashField(_regAttC) : '—'} — W's target is rebuilt in the PER-STEP loop; compare its change rate against V's [ATTCAD] BAR lines`);
             _regStepRegion(W, _coupledAtt(0, _regAttC, _cs), _lensOp[0].beta || 1, _mirRegion);
             if (_turboOn && _gpu) { W._texDirty = true; _tbTexStep[0] = k + 1; } }
           if (_turboOn && _gpu) { if (_tbCur < 0) _tbCur = k;
@@ -2753,7 +4051,33 @@ function makeMediumU1Renderer(core) {
             // reads as ~3fps choppy regardless of executor; resident textures made the one displayed-slot
             // readback cheap, so we can afford 3×/bar for it. Non-displayed slots stay bar-cadence.
             if (((k + 1) % Q) === 0) { _tbAdvanceAll(k + 1, _shardXspace ? 0 : -1);   // skip W only when x-space-sharded (stepped by regionStepX); declaration-only shard steps W whole-torus here
-              if (!_frameLock) { const vs = _viewSlot; if (_tbLive(vs)) { _tbSyncSlot(vs);
+              // DISPLAY READBACK CADENCE (mu1.dispRate). PROFILED 2026-07-30: this single line is 83-91% of ALL GPU
+              //   readbacks (~20/s, ~2.6 MB/s per peer). readPixels is a hard PIPELINE STALL, so with two peers on one
+              //   GPU the stalls serialize against each other — the measured "lag with a 2nd browser open, gone when
+              //   it closes". The 2018 comment above assumed "resident textures made the readback cheap"; the profile
+              //   says otherwise. _dispEvery counts Q-blocks between film refreshes: 1 = 3x/bar (smoothest, the old
+              //   behaviour), 3 = 1x/bar (a third of the readbacks). Render-side only — descDisp never enters regH,
+              //   so this changes smoothness, never determinism.
+              const _dispTick = (((k + 1) / Q) | 0) % _dispEvery === 0;
+              // TEXTURE-DIRECT FILM: copy the viewed slot's live texture into its display film GPU-SIDE, at this
+              //   SHARED step (exactly where descDisp used to refresh, so peers still show the same moment). No
+              //   readback ⇒ no pipeline stall. The CPU-side descDisp path below still runs when _filmOn is off.
+              // RETIRE A FILM THE MOMENT ITS SLOT STOPS BEING VIEWED (2026-08-01). filmCapture only ever runs for
+              //   _viewSlot, but the render (and fieldH) will use ANY slot that still has a film — so a slot that was
+              //   viewed earlier keeps serving a STALE film while its descBase moves on. Two peers viewing different
+              //   slots therefore paint the same slot from films captured at different moments: measured on V, whose
+              //   texSynced lagged texStep by 7–14 steps on the peer where V was not the viewed slot, with every
+              //   other column (attH, e0, regH, solStep, β/φ/ω) identical. Dropping the film makes that slot fall
+              //   back to descDisp, which the bar-cadence sync keeps current — correct, just not Q-smooth.
+              if (_filmOn && _gpu && _gpu.dropFilm) { for (let fv = 0; fv < 4; fv++) if (fv !== _viewSlot && _filmStep[fv] >= 0) { _gpu.dropFilm(fv); _filmStep[fv] = -1; } }
+              if (_filmOn && _gpu && !_frameLock && _dispTick) { const vsF = _viewSlot;
+                // RESTORE THE DEFAULT EYE SELECTION after capturing. _tbAdvanceAll ends with selectEyeSlot(null) for
+                //   exactly this reason: leaving a slot selected makes any later GPU op silently operate on that
+                //   slot's ping-pong instead of the default eye buffer. Whether a later op runs before the next
+                //   selectEyeSlot is FRAME-TIMING dependent — peer-local — which is how identical physics hashes
+                //   (holdH/targetH match on both peers) can still render differently.
+  if (_tbLive(vsF) && _gpu.filmCapture) { _gpu.selectEyeSlot(vsF); _gpu.filmCapture(vsF); _gpu.selectEyeSlot(null); _filmStep[vsF] = k + 1; } }
+              if (!_frameLock && _dispTick && !_filmOn) { const vs = _viewSlot; if (_tbLive(vs)) { _tbSyncSlot(vs);
                 // declaration-only-sharded W: the whole-torus texture evolved the OUTSIDE too — freeze it back to
                 // the declared boundary at EVERY display refresh (not just at bars), else the outside jitters
                 // (evolve at Q, snap at bar). This peer owns only R; outside is the static declaration.
@@ -2773,7 +4097,9 @@ function makeMediumU1Renderer(core) {
             if (_K.edge) { let ae = false; for (let a2 = 0; a2 < 4; a2++) for (let b2 = 0; b2 < 4; b2++) if (_K.edge[a2][b2]) ae = true;
               if (ae) _cpuSnap = _sb.slots.map((s2) => (s2.descBase ? Float64Array.from(s2.descBase) : null)); }
             _regStep1(W, _coupledAtt(0, _regAttC, _cpuSnap), _lensOp[0].beta || 1); }
-          if (!_turboOn) for (let li = 1; li <= 3; li++) { const VL = _sb.slots[li]; if (VL.desc && VL.descLive && VL.descBase && VL.descE0) _regStep1(VL, _coupledAtt(li, VL.descAtt, _cpuSnap), (_lensOp[li].beta || 1) * _pinFac(VL, k)); }   // ⌛pinHold: fade the plate-attractor drive after birth (0 = drive forever, the default)
+          if (!_turboOn) for (let li = 1; li <= 3; li++) { const VL = _sb.slots[li]; if (VL.desc && VL.descLive && VL.descBase && VL.descE0) { _regStep1(VL, _coupledAtt(li, VL.descAtt, _cpuSnap), (_lensOp[li].beta || 1) * _pinFac(VL, k));
+            if (_stepTraceLeft > 0 && li === _stepTraceSlot) { _stepTraceLeft--;
+              console.log(`[STEP] solStep=${k + 1} ${SLOTN[li]} · descBaseH=${_hashField(VL.descBase)} · attH=${VL.descAtt ? _hashField(VL.descAtt) : '—'} · e0=${(VL.descE0 ?? 0).toPrecision(17)} · beta=${((_lensOp[li].beta || 1) * _pinFac(VL, k)).toPrecision(17)}`); } } }   // ⌛pinHold: fade the plate-attractor drive after birth (0 = drive forever, the default)
           // THE KURAMOTO/XY LAW, MEDIUM-DRIVEN (v2 — the pure-descriptor version settled at the exact splay and
           // froze: a noiseless ODE parks at its equilibrium; the OLD medium's life came from the FIELDS kicking
           // the phases). Applied at Q boundaries (the old cadence, 3×/bar): each slot's phase entering the XY
@@ -2816,6 +4142,40 @@ function makeMediumU1Renderer(core) {
               // the register SCHEDULE for a live MIRROR/AUTOC — pushed UNCONDITIONALLY per processed bar (even an idle
               // leash must anchor phi at each bar: the ω tick above changed it, and end-of-frame φ is peer-frame-local)
               if (si === 0) _attApplied.push({ atStep: k + 1, gx: s.leash.state.gx, gy: s.leash.state.gy, phi: lensU1.angle(_lensOp[0]) }); }
+            // ── THE BISECTOR (mu1.forkDet) — hash the slot's ACTUAL state at a SHARED bar, always on ────────────
+            //   Every other instrument here answers "do the inputs match NOW"; this one answers "WHEN did the state
+            //   stop matching", which is the question left over when tbTrace shows identical attH/ringH/ver/cadence
+            //   but a descBaseH that ALREADY differs at the first traced block. Runs at a shared bar off shared k,
+            //   so the two peers' lines pair by bar= with no window-alignment problem (the trap that cost two
+            //   rounds of tbTrace). Syncs first: under turbo descBase is stale between Q-blocks and hashing it
+            //   unsynced would report a lag, not a fork.
+            if (_forkDetEvery && (barA % _forkDetEvery) === 0 && _forkDetBar !== barA) { _forkDetBar = barA;
+              const fs2 = _sb.slots[_forkDetSlot];
+              if (fs2?.desc && fs2.descBase) { if (_turboOn && _gpu) _tbSyncSlot(_forkDetSlot);
+                // A HASH CANNOT TELL "DIFFERENT STATE" FROM "SAME STATE, LAST MANTISSA BIT" (2026-08-03, measured).
+                //   baseH is bit-exact, and this field rides the cap at the f32 floor: |engE−e0| wanders ~1.2e-4 on
+                //   EACH peer independently, which is exactly the sqrt(32768)·2^-24·e0 = 1.8e-4 accumulation scale.
+                //   So two peers that are physically identical still hash differently, forever, and baseH alone
+                //   reports a permanent "fork" that is only float noise. Print SCALARS alongside it so the verdict
+                //   is separable: |ψ|² and the pin-projection ⟨att,ψ⟩ (magnitude AND angle). Read them as:
+                //     baseH differs + these scalars agree to ~1e-4  ⇒ f32 noise, NOT a fork (nothing to fix)
+                //     baseH differs + argPin differs at 1e-2+       ⇒ a real GLOBAL PHASE fork (the pin/register)
+                //     baseH differs + |ψ|² differs at 1e-2+         ⇒ a real AMPLITUDE/content fork (the cap/step)
+                //   dE is |engE−e0| in units of the f32 floor: ≈1 is the noise band, ≫1 is physical.
+                const _f2 = fs2.descBase; let _e2 = 0, _pr = 0, _pi = 0;
+                const _a2 = fs2.descAtt || fs2._attHold;
+                for (let j2 = 0; j2 < _f2.length; j2 += 2) { _e2 += _f2[j2] * _f2[j2] + _f2[j2 + 1] * _f2[j2 + 1];
+                  if (_a2 && _a2.length === _f2.length) { _pr += _a2[j2] * _f2[j2] + _a2[j2 + 1] * _f2[j2 + 1]; _pi += _a2[j2] * _f2[j2 + 1] - _a2[j2 + 1] * _f2[j2]; } }
+                const _floor = Math.sqrt(_f2.length >> 1) * Math.pow(2, -24) * (fs2.descE0 || 1);
+                const _dE = Math.abs((fs2._engE ?? _e2) - (fs2.descE0 ?? 0)) / (_floor || 1);
+                // TRACK argPin's OWN TREND, so a TRANSIENT is not mistaken for a FORK. The pin is a CONTRACTION
+                //   toward a shared attractor, so two peers that start apart at a join must CONVERGE — measured
+                //   0.034 → 0.032 → 0.020 → 0.007 → 0.003 rad over five sampled bars. A fork holds or grows; a
+                //   decaying series is the lock doing its job. Print the per-sample change so the direction is
+                //   visible in ONE peer's log without cross-peer diffing.
+                const _ap = _a2 ? Math.atan2(_pi, _pr) : 0;
+                const _apD = (_forkArgPrev != null) ? (_ap - _forkArgPrev) : NaN; _forkArgPrev = _ap;
+                console.log(`[FORK] bar=${barA} k=${k + 1} ${SLOTN[_forkDetSlot]} · baseH=${_hashField(_f2)} · |ψ|²=${_e2.toPrecision(17)} argPin=${_ap.toPrecision(17)} Δ=${Number.isNaN(_apD) ? '—' : _apD.toExponential(3)} |pin|=${Math.hypot(_pr, _pi).toPrecision(17)} · dE=${_dE.toFixed(2)}×f32floor · e0=${(fs2.descE0 ?? 0).toPrecision(17)} engE=${(fs2._engE ?? 0).toPrecision(17)} · attH=${fs2.descAtt ? _hashField(fs2.descAtt) : '—'} holdH=${fs2._attHold ? _hashField(fs2._attHold) : '—'} · ∠=${lensU1.angle(_lensOp[_forkDetSlot]).toPrecision(17)} pos=[${fs2.descPos?.[0]},${fs2.descPos?.[1]}] leash=[${fs2.leash.state.gx.toPrecision(17)},${fs2.leash.state.gy.toPrecision(17)}] · regH=${_regH()} ver=${_E.kernelVer} — compare |ψ|²/argPin, NOT baseH: a bit-exact hash differs on f32 noise alone (dE≈1 = the noise band)`); } }
             // ── bar boundary of THE REGISTER ENGINE (see the per-step block above): f32-quantize the envelope
             //    (the wire lattice — a joiner must land on the leader's bytes), refresh the pin target at the
             //    new leash pose, retire the sl2 spec cache. Pose is render-side ONLY as the sub-bar frac — the
@@ -2833,9 +4193,56 @@ function makeMediumU1Renderer(core) {
               // x-space-sharded W is CPU-stepped (regionStepX) → descBase already current, don't sync the stale
               // texture. Declaration-only W stepped whole-torus (texture) → sync it, then FREEZE the outside to
               // the declared boundary (this peer owns only R).
-              if (_turboOn && _gpu && _dispNeeds(si2) && !(si2 === 0 && _shardXspace)) _tbSyncSlot(si2);
+              // TEXTURE-DIRECT: with the film on, descDisp is NOT the display source any more (the shader samples
+              //   the GPU film), so this per-bar readback+copy is pure waste — and it was the LAST readback in the
+              //   display path (profiled at 31–33% of all readbacks once the Q-cadence one was removed). Other
+              //   consumers of descDisp (the ⊘/residual views, dispTrace) sync on demand, so nothing loses data.
+              // The film only EXISTS under turbo (its capture lives in the turbo branch), so the descDisp refresh may
+              //   be skipped only when turbo is actually on. Without the _turboOn term this froze the display in CPU
+              //   mode: no film captured, yet descDisp suppressed ⇒ _drawDesc kept painting a stale buffer and the
+              //   image stopped (regression from the texture-direct change, 2026-07-30).
+              // BAR-BOUNDARY descBase SYNC IS AN INVARIANT, NOT A DISPLAY DETAIL (2026-07-31, after a determinism
+              //   regression report). Before the texture-direct change, the display refresh happened to sync the
+              //   viewed slot's descBase at every bar, and everything downstream — the XY law, the DET hash, ψATT
+              //   adoption, the settle sampler — inherited a CURRENT descBase for free. Suppressing the readback for
+              //   the film removed that guarantee, leaving only the paths that carry their own guard. Rather than
+              //   audit every consumer forever, the sync is restored unconditionally at the BAR (once per bar per
+              //   living slot, not the 3×/bar Q-cadence display refresh the film actually replaced). The film still
+              //   removes the Q-cadence readbacks — the expensive ones — while the cheap bar-rate invariant stands.
+              // THE BAR-CADENCE SYNC IS UNCONDITIONAL FOR LIVING SLOTS (2026-08-01). _dispNeeds is a DISPLAY predicate
+              //   (`si2 === _viewSlot`), and _viewSlot is PEER-LOCAL — so gating the readback on it let a peer-local
+              //   choice decide WHEN replicated state is sampled. Measured on V: the peer where V was not the viewed
+              //   slot showed texSynced trailing texStep by a constant ~7 (one Q-block) on every row, and its |ψ|²
+              //   sat 8.4e-6 below the cap while the other peer's sat exactly at it — same attH, same e0, same regH,
+              //   same solStep. Display cadence may differ between peers; the SAMPLING STEP of shared state may not.
+              //   (The descDisp COPY below stays display-gated — that is genuinely a render concern.)
+              const _dispSync = true;
+              // THE SKIP MUST MATCH _useFilm EXACTLY (2026-08-01). This suppressed the descDisp copy whenever the film
+              //   was merely ENABLED, but the render only uses the film when one actually EXISTS (_useFilm also tests
+              //   hasFilm && _filmStep[si] >= 0). After a join drops the films (JOIN-PRIME → dropFilm, _filmStep=-1)
+              //   the joiner fell into the gap: no film to render from AND no descDisp refresh, so paint FROZE on the
+              //   last copy — the restored bytes — while descBase advanced underneath. Measured: the leader's nowH
+              //   changed every bar while the joiner's fieldH stayed pinned at the SHIPPED hash, yet tbTrace showed
+              //   the joiner's texture stepping normally. Same predicate on both sides, so the gap cannot reopen.
+              const _skipCopy = _filmOn && _turboOn && _gpu && si2 === _viewSlot
+                && !!(_gpu.hasFilm && _gpu.hasFilm(si2)) && _filmStep[si2] >= 0;
+              if (_turboOn && _gpu && _dispSync && !(si2 === 0 && _shardXspace)) _tbSyncSlot(si2);
               if (si2 === 0 && _wSharded && !_shardXspace) _shardFreezeOutside();
-              if (_dispNeeds(si2)) s3.descDisp = Float64Array.from(s3.descBase);
+              if (_dispNeeds(si2) && !_skipCopy) s3.descDisp = Float64Array.from(s3.descBase);   // the display COPY stays view-gated (render concern); the SYNC above does not (shared-state sampling)
+              // ── FRAME-LOCK FOR DESCRIPTOR SLOTS (2026-07-31). frameLock's contract is "identical shared index ⇒
+              //   identical pixels", but its only capture (the _dispW/_dispWk pair) lives in the FIELD-MODE loop, so
+              //   an 𝔸 descriptor slot had none: the label read film@k=-1 and locking quantized only the POSE (frac=0),
+              //   leaving descBase at whatever step _tbSyncSlot last read back — measured 7–14 steps apart between
+              //   peers, which is the residual visual difference. This captures the desc film AT THE SHARED BAR
+              //   (`(k+1)%21===0`, barA is a pure fn of the replicated step) and stamps its index, so both peers
+              //   display the same bytes from the same shared moment. Render-side only: _dispDesc never re-enters
+              //   descBase, the register, or regH — it is a display copy, exactly as descDisp is.
+              //   NOTE ON GRID: this block runs at the BAR ((k+1)%21===0), so the finest capture available here is one
+              //   per bar. A _frameLockGrid of 7 (the Q sub-bar option) cannot be honoured from this site — it would
+              //   silently degrade to bar cadence — so the effective grid is stated honestly as max(21, grid) and the
+              //   label's stamped index tells the truth about what was actually captured.
+              if (_frameLock && _dispSync && (((k + 1) % Math.max(21, _frameLockGrid)) === 0) && s3.descBase) {
+                _dispDesc[si2] = Float64Array.from(s3.descBase); _dispDescK[si2] = k + 1; }
               s3.descPos = [s3.leash.state.gx, s3.leash.state.gy];
               // ── ψATT (selfatt): digest countdown + ADOPTION at the shared bar. While digesting, the att is null
               //    (pin lifted — the medium digests the injected pixels). At 0 the slot ADOPTS its own f32 state as
@@ -2843,7 +4250,7 @@ function makeMediumU1Renderer(core) {
               //    rolled by the leash and rotated by the register's φ/ω. All at shared bars → peer-identical.
               if (s3._digestLeft > 0) { s3._digestLeft--;
                 if (s3._digestLeft === 0) { if (_turboOn && _gpu && !(si2 === 0 && _shardXspace)) { _tbAdvanceAll(k + 1); _tbSyncSlot(si2); }   // adoption reads the PIN TARGET bytes: advance the texture to the SHARED bar step first (the store-verb pattern), else peers could capture different steps
-                  s3._attHold = Float64Array.from(Float32Array.from(s3.descBase)); s3._attHoldPos = [s3.leash.state.gx, s3.leash.state.gy];
+                  s3._attHold = Float64Array.from(Float32Array.from(s3.descBase)); s3._attHoldPos = [s3.leash.state.gx, s3.leash.state.gy]; s3._holdKeyN = (s3._holdKeyN | 0) + 1; s3._attCache = null; s3._shiftCache = null; s3._holdBytesKey = null;
                   s3._holdPhi0 = lensU1.angle(_lensOp[si2]);   // the register angle AT CAPTURE — the hold is later rotated by ∠now − this (aging only), never by the absolute angle it already carries
                   // ── MEDIUM-SEMANTIC IDENTITY of the adopted symbol. Once ψATT drops the probe, `obj` (the foreign
                   //    name) no longer describes what the field carries — but sl(2) does: V and V̈ are invariant under
@@ -2881,7 +4288,43 @@ function makeMediumU1Renderer(core) {
                   if ((s3._holdRefN >= _HOLD_MIN && rel <= _HOLD_TOL) || stuck) {
                     s3._holdRef = smp; s3._holdRefStuck = stuck && rel > _HOLD_TOL;
                     console.log(`[ψATT-ID] ${SLOTN[si2]} identity reference ${s3._holdRefStuck ? 'ACCEPTED WITHOUT CONVERGENCE' : 'CONVERGED'} @bar=${barA} after ${s3._holdRefN} samples: V=${smp.V.toExponential(3)} (adopted ${s3._holdSl2 ? s3._holdSl2.V.toExponential(3) : '?'}, relaxation ${s3._holdSl2 ? (100 * (smp.V / s3._holdSl2.V - 1)).toFixed(2) + '%' : '?'}, last step ${(100 * rel).toFixed(3)}%)${s3._holdRefStuck ? ' ⚠ the state never stopped moving — verdicts against this reference are provisional' : ' — drift is judged against this from now on'}`); } } }
-              const _selfHold = () => _xattBuild(_holdOp(si2, s3), _holdDx(s3), _holdDy(s3), s3._attHold);   // aging-only rotation (_holdOp) + INTEGER roll (_holdDx)   // INTEGER shift — see _holdDx: a fractional resample of the hold rings at 13–17% and corrupts the pin target
+              // PERF (2026-07-27): the ψATT target is a pure fn of (register angle, integer offset, hold bytes) — it
+              //   changes only when one of those moves, but this ran EVERY BAR FOR EVERY ADOPTED SLOT, and each build
+              //   is 2 FFTs via spectralShift. That is the store/recall lag: the plate path it replaced (_plateAtt)
+              //   regenerates from a probe with no FFT, so adopting turned ~0 FFT/bar into 2·(living slots)/bar.
+              //   Cache on the key; the zero-offset short-circuit in _xattBuild covers the stationary case as well.
+              const _selfHold = () => { const op = _holdOp(si2, s3), dx = _holdDx(s3), dy = _holdDy(s3);
+                // SPLIT THE BUILD: spectralShift (2 FFTs, 1.5ms) depends ONLY on (dx, dy, hold bytes); the register
+                //   rotation is a scalar multiply that changes every bar with ω. So cache the SHIFTED field and apply
+                //   the rotation fresh per call — VERIFIED byte-identical to the fused build at every offset/phase
+                //   tested (0 differing values of 32768), because it is the same two ops in the same order, only the
+                //   first one memoised. 30.5× faster per call; 3 living slots go from 4.57ms/bar to 0.15ms/bar.
+                //   (Do NOT also short-circuit dx=dy=0 to a plain copy: spectralShift(b,0,0) differs from a copy by
+                //   2.7e-15 on 32686/32768 values, and this is the PIN TARGET — regH. See the _xattBuild note.)
+                // CACHE KEY = SHARED STATE ONLY (2026-07-31, after an edge+ψATT mismatch). The key must never contain a
+                //   peer-local quantity: the XY law reads this att into _lensOp[].phase, which is in regH, so a cache
+                //   that can differ between peers forks the register. _holdKeyN is bumped on adopt/recall/join — shared
+                //   EVENTS, but the counter is peer-local bookkeeping — so it is NOT admissible in the key. Identity of
+                //   the hold BYTES is what matters, so key on the bytes themselves (cheap hash of a few probes + length)
+                //   plus the integer offset. Rebuild on any change; never serve a target built from different bytes.
+                //   Sparse probing is NOT enough (measured: 8 probes miss a change between them), and this feeds regH —
+                //   so use the full-field hash the determinism layer already trusts. It is O(N) but runs only when the
+                //   key is re-derived, which is once per bar per holding slot, against a 2-FFT build it replaces.
+                if (s3._holdBytesKey == null || s3._holdBytesSrc !== s3._attHold) { s3._holdBytesKey = _hashField(s3._attHold); s3._holdBytesSrc = s3._attHold; }
+                const sk = `${dx}|${dy}|${s3._holdBytesKey}`;
+                if (s3._shiftKey !== sk || !s3._shiftCache) { s3._shiftCache = spectralShift(s3._attHold, dx, dy, GRID); s3._shiftKey = sk; }
+                const ph = lensU1.angle(op); if (!ph) return Float64Array.from(s3._shiftCache);
+                const out = Float64Array.from(s3._shiftCache), c = Math.cos(ph), sn = Math.sin(ph);
+                for (let j = 0; j < out.length; j += 2) { const r = out[j] * c - out[j + 1] * sn; out[j + 1] = out[j] * sn + out[j + 1] * c; out[j] = r; }
+                return out; };   // aging-only rotation (_holdOp) + INTEGER roll (_holdDx)   // INTEGER shift — see _holdDx: a fractional resample of the hold rings at 13–17% and corrupts the pin target
+              // ψATT FORK LOCATOR (mu1.wattDet): every input to the pin target, at a shared bar. Peer-local by
+              //   design (a console reader), but every VALUE printed must be shared — that is exactly what it tests.
+              if (_wattDetEvery && s3._attHold && !s3._digestLeft && (barA % _wattDetEvery) === 0 && _wattDetBar !== barA + si2 * 0.1) {
+                _wattDetBar = barA + si2 * 0.1;
+                const _dx = _holdDx(s3), _dy = _holdDy(s3), _op = _holdOp(si2, s3);
+                console.log(`[ψDET] bar=${barA} ${SLOTN[si2]} · gx=${s3.leash.state.gx.toPrecision(17)} gy=${s3.leash.state.gy.toPrecision(17)} · holdPos=[${s3._attHoldPos?.[0]},${s3._attHoldPos?.[1]}] · dx=${_dx} dy=${_dy} · ∠=${lensU1.angle(_lensOp[si2]).toPrecision(17)} φ0=${(s3._holdPhi0 || 0).toPrecision(17)} · opPhase=${lensU1.angle(_op).toPrecision(17)} · holdH=${_hashField(s3._attHold)} · targetH=${_hashField(_selfHold())} · digest=${s3._digestLeft | 0} keyN=${s3._holdKeyN | 0}`); }
+              if (_attCadLeft > 0 && si2 === _attCadSlot) { _attCadLeft--;
+                console.log(`[ATTCAD] BAR ${barA} k=${k} ${SLOTN[si2]} · descAtt=${s3.descAtt ? _hashField(s3.descAtt) : '—'} · attHold=${s3._attHold ? _hashField(s3._attHold) : '—'} · dphiNow=${lensU1.angle(_lensOp[si2]).toPrecision(17)} — a BAR-cadence refresh: if this hash only moves once per 21 steps while the film is captured every 7, the film samples a state stepped against a STALE target`); }
               if (si2 === 0) { if ((barA % 4) === 0) W.sl2 = null;   // sl2 refresh at the VPT cadence (a per-bar rebuild profiled at 120ms/bar with the analytic v_g — 31% of the frame)
                 _regAttC = W._digestLeft > 0 ? null : (W._attHold ? _selfHold() : W.movAtt(W.leash.state.gx, W.leash.state.gy)); }
               else if (s3._digestLeft > 0) s3.descAtt = null;
@@ -2901,8 +4344,22 @@ function makeMediumU1Renderer(core) {
             // whole shared contract) is always current — it does not depend on the field bytes.
             const _eHsynced = !_turboOn || ((k + 1) % 21) === 0;
             if (_regTraceOn && ((((k + 1) / Q) | 0) % _detEvery === 0)) {
-              if (_turboOn && _gpu && _eHsynced) _tbSyncAll();   // the hash needs bytes → sync every living slot (the determinism reader's own cost; only when _regTraceOn AND the DET cadence fires)
-              console.log(`[DET-⌀] solStep=${k + 1} · regH=${_regH()} · eH=${!_eHsynced ? '(turbo: syncs at bar)' : W.descBase ? (_shardActive ? `⚠shard[${_mirRegionName}]:` : '') + _hashField(W.descBase) : '—'}${_eHsynced ? [1,2,3].map((li) => _sb.slots[li].descLive && _sb.slots[li].descBase ? ` · e${SLOTN[li]}=${_hashField(_sb.slots[li].descBase)}` : '').join('') : ''} · bW=${_tauK ? (_tauK.beatsOf('W') ?? 0) : 0} kW=${_E.kwSteps} · kV=${_E.kernelVer} (register-only: regH + the living envelope hashes are the contract)`); }
+              // PERF (2026-07-30, profiled): this was 40% of ALL GPU readbacks — a full 4-slot drain every DET tick,
+              //   purely to hash bytes for a console line. readPixels is a hard pipeline STALL, and with two peers on
+              //   one GPU each stall drains the SHARED queue, so it degrades superlinearly in peers and vanishes when
+              //   one browser closes (measured: ~4.4 MB/s of stalling transfer per peer with W/V/P1 living).
+              //   regH — the whole shared contract — needs NO field bytes and is unaffected. The envelope hashes are
+              //   a secondary check, so they ride a COARSER cadence (_detFieldEvery DET ticks) instead of every tick.
+              //   Fork detection is preserved: regH still fires at full rate, and the field hashes still fire, rarer.
+              // PROFILED 2026-07-30 (after the display path went texture-direct): this is now ~90% of ALL GPU
+              //   readbacks — a full 4-slot drain per DET tick, ~20/s, ~2.8 MB/s per peer. readPixels STALLS the
+              //   pipeline and two peers on one GPU serialize on it. W is the DRIVEN worldline: a fork appears in
+              //   W's bytes first (V/P are pinned replicas of stored moments), so W is hashed EVERY tick — the
+              //   per-tick guarantee is kept where it earns its cost — and the other living slots ride the coarser
+              //   _detFieldEvery cadence. regH, the actual shared contract, is field-free and unaffected either way.
+              const _eHnow = _eHsynced, _eHall = _eHsynced && ((_detTickN++ % _detFieldEvery) === 0);
+              if (_turboOn && _gpu && _eHnow) { if (_eHall) _tbSyncAll(); else _tbSyncSlot(0); }
+              console.log(`[DET-⌀] solStep=${k + 1} · regH=${_regH()} · eH=${!_eHnow ? '(field hash on the coarse cadence — regH above is the contract and is current)' : W.descBase ? (_shardActive ? `⚠shard[${_mirRegionName}]:` : '') + _hashField(W.descBase) : '—'}${_eHall ? [1,2,3].map((li) => _sb.slots[li].descLive && _sb.slots[li].descBase ? ` · e${SLOTN[li]}=${_hashField(_sb.slots[li].descBase)}` : '').join('') : ''} · bW=${_tauK ? (_tauK.beatsOf('W') ?? 0) : 0} kW=${_E.kwSteps} · kV=${_E.kernelVer} (register-only: regH + the living envelope hashes are the contract)`); }
           }
         }
         if (_turboOn && _gpu && _kernApplied.length) _tbAdvanceAll(_base + todo);   // frame-end advance on SWAP frames (flushes the lag before _kernApplied resets — the pre-swap ring)
@@ -3128,7 +4585,12 @@ function makeMediumU1Renderer(core) {
       // under turbo, the sl2/vpt telemetry reads W.descBase — sync W lazily ONLY when they're about to run
       // (both are throttled: sl2 on kernelVer change, vpt every _vptEvery bars). Rare → negligible vs a
       // per-frame readback; keeps the telemetry honest (current W bytes) without stalling every frame.
-      if (_turboOn && _gpu && W.desc && ((!W.sl2 || W.sl2.kv !== _E.kernelVer) || (_vptOn && _vptLogBar !== _E.frameBar && (_E.frameBar % _vptEvery) === 0 && todo > 0))) _tbSyncSlot(0);
+      // TELEMETRY MUST NOT DECIDE WHEN STATE IS SAMPLED (2026-08-02, same defect as line ~3810). The VPT terms here
+      //   (_vptOn / _vptLogBar / _vptEvery) are ALL PEER-LOCAL, so this forced a readback of W at a moment the other
+      //   peer never sampled. W happens to match today, but two peers with different VPT settings would diverge for a
+      //   purely diagnostic reason. The sl2 re-key term IS shared (kernelVer), so keep that; drop the VPT trigger and
+      //   let the telemetry read whatever the bar-cadence sync last left — stale telemetry beats a peer-local fork.
+      if (_turboOn && _gpu && W.desc && (!W.sl2 || W.sl2.kv !== _E.kernelVer)) _tbSyncSlot(0);
       if (W.desc && W.descBase && _E.ringCache?.r?.length && (!W.sl2 || W.sl2.kv !== _E.kernelVer)) {
         const old = W.sl2; W.sl2 = old ? (_sl2Rekey(old) || _mkSl2(W.descBase)) : _mkSl2(W.descBase);
         if (old && W.sl2 && (_sl2KeyN++ % 8) === 0) console.log(`[SL2] RE-KEY kv ${old.kv}→${W.sl2.kv}: V̈ ${old.vdd.toExponential(3)}→${W.sl2.vdd.toExponential(3)} ⇒ ΔI=${(W.sl2.I - old.I).toExponential(2)} (FFT-free stencil re-sum over the compiled spectrum · logging every 8th re-key)`); }
@@ -3146,7 +4608,12 @@ function makeMediumU1Renderer(core) {
           // FFT (~120ms) — so cap the survey at the slots that actually hold, and reuse slot 0's already-computed drift.
           const hdCm = !hd ? null : _holdCommon([{ ...hd, slot: 0 }].concat(
             _sb.slots.map((s4, i) => { if (!(i > 0 && s4?._attHold && !s4._digestLeft && s4._holdSl2)) return null;
-              if (_turboOn && _gpu) _tbSyncSlot(i);   // the guard at the top of this block syncs slot 0 ONLY — the control slots need it too
+              // NO SYNC HERE (2026-08-02). This telemetry survey forced a readback on holding slots, and the VPT
+              //   cadence is PEER-LOCAL — so a diagnostic was deciding WHEN replicated state got sampled. Caught with
+              //   mu1.syncDec: peer 1 showed an extra `caller=line3810` sync at solSteps=13286 while tbCur=13265
+              //   (21 steps ahead — mid-frame), which shifted texSynced for every row after it; peer 2's log had only
+              //   the bar-loop sync. That single extra call was the entire V asymmetry. The survey now reads whatever
+              //   is current: a slightly stale control is a telemetry inaccuracy, a peer-local readback is a fork.
               return _holdDrift(i); })
               .filter(Boolean).map((d, i) => ({ ...d, slot: i + 1 }))));
           const hdTxt = !hd ? '' : ` \u00b7 \u03c8ATT-ID V=${hd.V.toExponential(3)} vs settled ref ${hd.Vref.toExponential(3)} \u21d2 dV=${(100 * hd.dV).toFixed(2)}%${(hdCm && hdCm.ok) ? ` (common-mode ${(100 * hdCm.com).toFixed(2)}% \u2014 relaxation, subtracted)` : ''}${hd.gap != null ? ` \u00b7 gap=${hd.gap.toFixed(2)}px` : ''} \u00b7 \u0394I=${hd.dI.toExponential(2)} \u2192 ${_holdVerdict(hd, hdCm)}`;
@@ -3194,7 +4661,9 @@ function makeMediumU1Renderer(core) {
         const sig = _wViaMirror ? `WV:${_dispVk}:${_colorMode}:${_dials.view}`
           : (vsl && vsl.desc) ? `A${_viewSlot}:${vsl.descBar}:${lensU1.angle(_lensOp[_viewSlot]).toFixed(9)}:${vsl.leash.state.gx.toFixed(4)},${vsl.leash.state.gy.toFixed(4)}:${_colorMode}:${_dials.view}`
           : (_viewSlot === 1 && V.mirror) ? `V:${_dispVk}:${_colorMode}:${_dials.view}`
-          : (_viewSlot === 0 && !W.desc) ? `W:${_dispWk}:${_colorMode}:${_dials.view}` : null;
+          : (_viewSlot === 0 && !W.desc) ? `W:${_dispWk}:${_colorMode}:${_dials.view}`
+          : (_sb.slots[_viewSlot]?.desc && _dispDescK[_viewSlot] >= 0) ? `D${_viewSlot}:${_dispDescK[_viewSlot]}:${_colorMode}:${_dials.view}`   // desc slots key on their OWN shared index, else the subtick paint-skip never fires for them (it keyed on _dispWk, which a desc slot never sets)
+          : null;
         if (sig) { if (sig === _lastPaintSig) _skipPaint = true; else _lastPaintSig = sig; }
       }
       const vnm = SLOTN[_viewSlot];   // used by the selector reflection BELOW the paint block too — stays outside the skip
@@ -3226,7 +4695,7 @@ function makeMediumU1Renderer(core) {
       else if (_dials.view === 'desc') vfield = (_viewSlot === 0) ? att : (vsl ? vsl.att : null);
       if (!_drawn) _drawField(outCell, _lensedView(_viewSlot, _fieldViewApply(_viewSlot, vfield)));
       const vop = _lensOp[_viewSlot];
-      outCell.setLabel(`ψ_${vnm}${(vsl && vsl.born) || _viewSlot === 0 ? '' : ' (unborn)'} · ∠${lensU1.wrap(lensU1.angle(vop)).toFixed(2)}${vop.beta !== 1 ? ` β${vop.beta}` : ''}${vop.omega ? ` ω${vop.omega}` : ''}${_wViaMirror ? ' · LIVE via MIRROR (the physics of the register; 𝔸 declaration on the view cycle)' : vsl && vsl.mirror ? ' · MIRROR: live PDE injection-locked to the register' : vsl && vsl.desc ? ' · 𝔸 PREDICTIVE slot (descriptor-only, 0 grid steps)' : _dials.view === 'lens' ? ' · ∠lens view' : _dials.view === 'desc' ? ' · 𝔸 DESCRIPTOR render (register prediction — not ψ)' : ''}${_viewSlot === 0 ? ` · transport lock ${_E.lockNow.toFixed(2)}` : ''}${_frameLock ? ` · film@k=${_viewSlot === 1 && V.mirror ? _dispVk : _dispWk} (shared index: identical k ⇒ identical pixels)` : ''}${_mirRegion && V.mirror ? ` · shard:${_mirRegionName} (outside R = the declaration)` : ''}${_edgeTag(_viewSlot)}${_viewAllOn && W.desc ? ` · Σ VIEW (linear superposition of the slot declarations — this RENDER does not couple; ${_anyEdge() ? 'but an edge IS live → the slots ARE interacting in the STATE, shown above' : 'and no edge is set → the slots are truly independent'})` : ''}`);
+      outCell.setLabel(`ψ_${vnm}${(vsl && vsl.born) || _viewSlot === 0 ? '' : ' (unborn)'} · ∠${lensU1.wrap(lensU1.angle(vop)).toFixed(2)}${vop.beta !== 1 ? ` β${vop.beta}` : ''}${vop.omega ? ` ω${vop.omega}` : ''}${_wViaMirror ? ' · LIVE via MIRROR (the physics of the register; 𝔸 declaration on the view cycle)' : vsl && vsl.mirror ? ' · MIRROR: live PDE injection-locked to the register' : vsl && vsl.desc ? ' · 𝔸 PREDICTIVE slot (descriptor-only, 0 grid steps)' : _dials.view === 'lens' ? ' · ∠lens view' : _dials.view === 'desc' ? ' · 𝔸 DESCRIPTOR render (register prediction — not ψ)' : ''}${_viewSlot === 0 ? ` · transport lock ${_E.lockNow.toFixed(2)}` : ''}${_frameLock ? ` · film@k=${(vsl && vsl.desc && _dispDescK[_viewSlot] >= 0) ? _dispDescK[_viewSlot] : (_viewSlot === 1 && V.mirror ? _dispVk : _dispWk)} (shared index: identical k ⇒ identical pixels)` : ''}${_mirRegion && V.mirror ? ` · shard:${_mirRegionName} (outside R = the declaration)` : ''}${_edgeTag(_viewSlot)}${_viewAllOn && W.desc ? ` · Σ VIEW (linear superposition of the slot declarations — this RENDER does not couple; ${_anyEdge() ? 'but an edge IS live → the slots ARE interacting in the STATE, shown above' : 'and no edge is set → the slots are truly independent'})` : ''}`);
       }
       // reflect the selector to only-born slots (W always; V/P when born — S6)
       if (_viewSel.value !== vnm) _viewSel.value = vnm;
@@ -3235,6 +4704,7 @@ function makeMediumU1Renderer(core) {
       const rsi = SLOTN.indexOf(_regSlot); if (rsi >= 0) { _sBeta.setVal(_lensOp[rsi].beta); _sOm.setVal(_lensOp[rsi].omega);
         _regReadout.textContent = ` ${_regSlot}:∠${lensU1.wrap(lensU1.angle(_lensOp[rsi])).toFixed(2)} β${_lensOp[rsi].beta.toFixed(2)} ω${_lensOp[rsi].omega.toFixed(2)}${_sb.slots[rsi].born || rsi === 0 ? '' : ' (unborn)'}`; }
       _sVirtT.setVal(_VIRT_T);   // reflect the replicated hologram depth (a peer's virtt change / a join updates the slider)
+      _sTempo.setVal(_tempoDiv);   // reflect the replicated proper-time divisor: a peer's manual change, a JOIN, or the auto-tempo governor raising it all show here (the governor is otherwise invisible)
       if (_objSel.value !== _lensObj && document.activeElement !== _objSel) _objSel.value = _lensObj;   // reflect WHAT the lock holds (set by the lensobj verb handler on every peer; restored on join)
       // reflect the DAMAGE slider + method — from _occFrac/_occMode, which the occludebank VERB HANDLER sets on EVERY
       //   peer at the shared step (and the snapshot restores on join). This is the identical mechanism as the working

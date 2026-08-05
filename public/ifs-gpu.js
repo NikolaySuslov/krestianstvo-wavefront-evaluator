@@ -181,6 +181,9 @@ export class IFSGpu {
     this._progIfsWarp     = this._compileStep(GLSL_IFS_WARP);       // full K-map IFS Hutchinson union (one GPU pass, no readbacks)
     this._progLensGenome  = this._compileStep(GLSL_LENS_GENOME);   // §7.98 genome lens phase-plate (optical chip, 1 GPU pass)
     this._progCopy        = this._compileStep(GLSL_COPY);
+    this._progFilmCopy    = this._compileStep(GLSL_FILM_COPY);   // texture-direct DISPLAY film (complex-preserving)
+    this._progFilmPeak    = this._compileStep(GLSL_FILM_PEAK);   // |ψ|² max, level 0
+    this._progPeakStep    = this._compileStep(GLSL_PEAK_STEP);   // |ψ|² max, levels 1..n (passthrough of .x)
     this._progStepRecord  = this._compileStep(GLSL_STEP_RECORD);
     this._progReconCplx   = this._compileStep(GLSL_RECON_CPLX);
     this._progStepPlate   = this._compileStep(GLSL_STEP_PLATE);
@@ -260,7 +263,7 @@ export class IFSGpu {
       renderDiff:  { psi: ul(this._progRenderDiff, 'u_psi'), obj: ul(this._progRenderDiff, 'u_obj'), alpha: ul(this._progRenderDiff, 'u_alpha'), smoothMax: ul(this._progRenderDiff, 'u_smoothMax') },
       eyeHologram: { psi: ul(this._progEyeHologram, 'u_psi'), G: ul(this._progEyeHologram, 'u_G'), mode: ul(this._progEyeHologram, 'u_mode'), param: ul(this._progEyeHologram, 'u_param'), block: ul(this._progEyeHologram, 'u_block'), seed: ul(this._progEyeHologram, 'u_seed') },
       renderPhase: { psi: ul(this._progRenderPhase, 'u_psi'), smoothMax: ul(this._progRenderPhase, 'u_smoothMax') },
-      renderDesc:  { base: ul(this._progRenderDesc, 'u_base'), G: ul(this._progRenderDesc, 'u_G'), off: ul(this._progRenderDesc, 'u_off'), center: ul(this._progRenderDesc, 'u_center'), k: ul(this._progRenderDesc, 'u_k'), phi: ul(this._progRenderDesc, 'u_phi'), smoothMax: ul(this._progRenderDesc, 'u_smoothMax'), ampView: ul(this._progRenderDesc, 'u_ampView') },
+      renderDesc:  { base: ul(this._progRenderDesc, 'u_base'), G: ul(this._progRenderDesc, 'u_G'), off: ul(this._progRenderDesc, 'u_off'), center: ul(this._progRenderDesc, 'u_center'), k: ul(this._progRenderDesc, 'u_k'), phi: ul(this._progRenderDesc, 'u_phi'), smoothMax: ul(this._progRenderDesc, 'u_smoothMax'), peakTex: ul(this._progRenderDesc, 'u_peakTex'), usePeakTex: ul(this._progRenderDesc, 'u_usePeakTex'), peakGain: ul(this._progRenderDesc, 'u_peakGain'), ampView: ul(this._progRenderDesc, 'u_ampView') },
       renderPlate: { psi: ul(this._progRenderPlate, 'u_psi'), plate: ul(this._progRenderPlate, 'u_plate'), smoothMaxPlate: ul(this._progRenderPlate, 'u_smoothMaxPlate'), smoothMaxField: ul(this._progRenderPlate, 'u_smoothMaxField'), dir: ul(this._progRenderPlate, 'u_dir') },
       waveletRecog: { scene: ul(this._progWaveletRecog,'u_scene'), G: ul(this._progWaveletRecog,'u_G'), nBands: ul(this._progWaveletRecog,'u_nBands'), nSectors: ul(this._progWaveletRecog,'u_nSectors'), bandR: ul(this._progWaveletRecog,'u_bandR'), refDesc: ul(this._progWaveletRecog,'u_refDesc'), refNorm: ul(this._progWaveletRecog,'u_refNorm'), refR: ul(this._progWaveletRecog,'u_refR'), sharpPow: ul(this._progWaveletRecog,'u_sharpPow'), energyGate: ul(this._progWaveletRecog,'u_energyGate'), disDesc: ul(this._progWaveletRecog,'u_disDesc'), disNorm: ul(this._progWaveletRecog,'u_disNorm'), disWeight: ul(this._progWaveletRecog,'u_disWeight') },
       dotRows:    { a: ul(this._progDotRows,'u_a'), b: ul(this._progDotRows,'u_b'), G: ul(this._progDotRows,'u_G') },
@@ -1223,6 +1226,12 @@ export class IFSGpu {
   // has this slot been primed with an upload since creation? (the app uploads descBase once, then keeps resident)
   eyeSlotPrimed(id) { const s = this._slotEye[id]; return !!(s && s.primed); }
   markEyeSlotPrimed(id) { const s = this._slotEye[id]; if (s) s.primed = true; }
+  // which half of the slot's ping-pong pair currently holds the field ('A'/'B'), or '-' if the slot has no eye yet.
+  // PEER-LOCAL by construction: created per GL context and flipped by every op this peer has run on the slot, so it
+  // is NOT part of the replicated state and never rides the join snapshot. Exposed for cross-peer diagnosis — two
+  // peers holding OPPOSITE parity at the same shared step step different physical textures, which no CPU-side hash
+  // (regH/attH/descBase) can reveal because each peer is internally consistent.
+  eyeSlotParity(id) { const s = this._slotEye[id]; return s ? s.src : '-'; }
   dropEyeSlot(id) { const s = this._slotEye[id]; if (!s) return; const gl = this._gl;
     gl.deleteTexture(s.A); gl.deleteTexture(s.B); gl.deleteFramebuffer(s.fA); gl.deleteFramebuffer(s.fB); delete this._slotEye[id]; }
 
@@ -1240,7 +1249,69 @@ export class IFSGpu {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
     gl.bindTexture(gl.TEXTURE_2D, null);
   }
-  renderDescField({ ox = 0, oy = 0, cx = 0, cy = 0, kx = 0, ky = 0, phi = 0, ampView = 0 } = {}, smoothMax) {
+  // ── TEXTURE-DIRECT DISPLAY FILM (2026-07-30) ──────────────────────────────
+  //   THE PROBLEM: the display path was texture → readPixels → descBase → descDisp → upload → shader. readPixels is
+  //   a hard GPU PIPELINE STALL (profiled at 83–91% of all readbacks, ~2.6 MB/s per peer), and with two peers on one
+  //   GPU each stall drains the SHARED queue, so they serialize — the measured "lag with a second browser open".
+  //   It also round-tripped DISPLAY bytes through descBase, which is in regH: a view concern touching model storage.
+  //   THE FIX: copy the slot's live texture into a per-slot FILM texture, GPU-side, AT THE SHARED STEP (the same
+  //   instant descDisp used to refresh — so peers still show the same moment, which is why descDisp existed), then
+  //   render from the film. Nothing is read back. This is what the renderDescField comment already claimed.
+  //   The film is DISPLAY-ONLY: it never re-enters the register, so GPU float precision stays a view concern.
+  filmCapture(id) {
+    const gl = this._gl, G = this._G;
+    const s = this._slotEye[id]; if (!s) return false;
+    if (!this._film) this._film = {};
+    let f = this._film[id];
+    if (!f) { const t = this._makeRGF32Tex(); const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      f = { tex: t, fbo: fb }; this._film[id] = f; }
+    const src = s.src === 'A' ? s.A : s.B;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.fbo);
+    gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progFilmCopy);
+    gl.uniform1i(gl.getUniformLocation(this._progFilmCopy, 'u_src'), 0);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._filmPeak(id);
+    return true;
+  }
+  // log-step max-reduction of |ψ|² over the film into a 1×1 texture the render shader SAMPLES (never read back).
+  _filmPeak(id) {
+    const gl = this._gl, G = this._G, f = this._film[id];
+    if (!f.pyr) { f.pyr = []; let n = G;
+      while (n > 1) { n = Math.max(1, n >> 1);
+        const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, n, n);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        f.pyr.push({ tex: t, fbo: fb, n }); } }
+    let srcTex = f.tex, srcN = G;
+    for (let i = 0; i < f.pyr.length; i++) { const lv = f.pyr[i];
+      const prog = i === 0 ? this._progFilmPeak : this._progPeakStep;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, lv.fbo);
+      gl.viewport(0, 0, lv.n, lv.n);
+      gl.useProgram(prog);
+      gl.uniform1i(gl.getUniformLocation(prog, 'u_src'), 0);
+      gl.uniform1i(gl.getUniformLocation(prog, 'u_srcN'), srcN);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+      srcTex = lv.tex; srcN = lv.n; }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  hasFilm(id) { return !!(this._film && this._film[id]); }
+  dropFilm(id) { const gl = this._gl; const f = this._film && this._film[id]; if (!f) return;
+    gl.deleteTexture(f.tex); gl.deleteFramebuffer(f.fbo);
+    for (const lv of (f.pyr || [])) { gl.deleteTexture(lv.tex); gl.deleteFramebuffer(lv.fbo); }
+    delete this._film[id]; }
+
+  // filmId (optional): render DIRECTLY from that slot's GPU film + its GPU-reduced peak — no CPU array, no upload,
+  //   no readback. Omit it and the legacy path (setDescBase + a CPU smoothMax) is used unchanged.
+  renderDescField({ ox = 0, oy = 0, cx = 0, cy = 0, kx = 0, ky = 0, phi = 0, ampView = 0, filmId = null, peakGain = 1 } = {}, smoothMax) {
     const gl = this._gl, G = this._G, u = this._u.renderDesc;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, G, G);
@@ -1252,8 +1323,13 @@ export class IFSGpu {
     gl.uniform2f(u.center, cx, cy);
     gl.uniform2f(u.k, kx, ky);
     gl.uniform1f(u.phi, phi);
-    gl.uniform1f(u.smoothMax, smoothMax);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._descTex);
+    gl.uniform1f(u.smoothMax, smoothMax || 1);
+    const film = (filmId != null && this._film) ? this._film[filmId] : null;
+    const useFilm = !!(film && film.pyr && film.pyr.length);
+    gl.uniform1i(u.usePeakTex, useFilm ? 1 : 0);
+    if (useFilm) { gl.uniform1i(u.peakTex, 1); gl.uniform1f(u.peakGain, peakGain);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, film.pyr[film.pyr.length - 1].tex); }
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, useFilm ? film.tex : this._descTex);
     gl.bindVertexArray(this._vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
@@ -3154,6 +3230,59 @@ void main() {
 }`;
 
 // Copy pass — used for RECON seed: plate → psi (plate values as Re, Im=0)
+// FILM COPY (RG, complex-preserving): the DISPLAY snapshot of a slot's live field, taken GPU-side at the SHARED
+// step. GLSL_COPY above is single-channel (.x) and would drop Im; the film must carry the full complex field
+// because renderDescField evaluates content·e^{i(...)} on it. Nothing here is ever read back — that is the point:
+// the old path was texture→readPixels→descBase→descDisp→upload, which round-tripped DISPLAY bytes through the
+// model's own storage (descBase is in regH) and stalled the GPU pipeline on every refresh.
+const GLSL_FILM_COPY = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 c      = texelFetch(u_src, coord, 0).xy;
+  fragColor   = vec4(c, 0.0, 1.0);
+}`;
+
+// FILM PEAK (log-step reduction): max |ψ|² over the film, computed GPU-side into a 1×1 texture the render shader
+// SAMPLES — never read back, so no pipeline stall. A DISPLAY quantity only (the colormap normalizer): it never
+// enters the register, so GPU float precision stays a view concern, exactly as the meta-circular split requires.
+const GLSL_FILM_PEAK = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+uniform int u_srcN;      // source edge length
+out vec4 fragColor;
+void main() {
+  ivec2 o = ivec2(gl_FragCoord.xy) * 2;
+  float m = 0.0;
+  for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
+    ivec2 c = o + ivec2(dx, dy);
+    if (c.x < u_srcN && c.y < u_srcN) {
+      vec2 v = texelFetch(u_src, c, 0).xy;
+      m = max(m, v.x * v.x + v.y * v.y);
+    }
+  }
+  fragColor = vec4(m, 0.0, 0.0, 1.0);
+}`;
+
+// PEAK PASSTHROUGH for levels after the first: the source already holds |ψ|² maxima, so take max of .x directly.
+const GLSL_PEAK_STEP = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+uniform int u_srcN;
+out vec4 fragColor;
+void main() {
+  ivec2 o = ivec2(gl_FragCoord.xy) * 2;
+  float m = 0.0;
+  for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
+    ivec2 c = o + ivec2(dx, dy);
+    if (c.x < u_srcN && c.y < u_srcN) m = max(m, texelFetch(u_src, c, 0).x);
+  }
+  fragColor = vec4(m, 0.0, 0.0, 1.0);
+}`;
+
 const GLSL_COPY = /* glsl */`#version 300 es
 precision highp float;
 uniform sampler2D u_plate;
@@ -4332,7 +4461,10 @@ uniform vec2  u_off;      // translation (cells): sample the envelope at x − o
 uniform vec2  u_center;   // wave-packet center (px) — the k-phasor reference point
 uniform vec2  u_k;        // momentum phase tilt (rad/cell) — the linOp k·x term
 uniform float u_phi;      // global register phase (φ + ω·frac, from the CPU f64 model)
-uniform float u_smoothMax;
+uniform float u_smoothMax;   // CPU-supplied peak (legacy path, still used when no film is bound)
+uniform sampler2D u_peakTex; // GPU-reduced peak (1x1) — texture-direct path; SAMPLED, never read back
+uniform int   u_usePeakTex;  // 1 = take the normalizer from u_peakTex instead of u_smoothMax
+uniform float u_peakGain;    // display gain applied to the sampled peak (the legacy path's _GLOW factor)
 uniform int   u_ampView;  // 0 = phase colormap (hue = arg ψ — motion visible), 1 = amplitude hologram colormap (same convention as the field view; global phase honestly invisible)
 in vec2 v_uv;
 out vec4 fragColor;
@@ -4354,7 +4486,10 @@ void main() {
   float th  = u_phi + dot(u_k, x - u_center);
   float c   = cos(th), s = sin(th);
   vec2  psi = vec2(B.x*c - B.y*s, B.x*s + B.y*c);
-  float norm = 1.0 / sqrt(max(u_smoothMax, 1e-18));
+  // u_peakGain carries the SAME multiplier the legacy path folded into smoothMax (_descPeak * _GLOW) — without it
+  // the film normalizes by the raw peak and the picture comes out _GLOW times too bright.
+  float pk   = (u_usePeakTex == 1) ? (texelFetch(u_peakTex, ivec2(0, 0), 0).x * u_peakGain) : u_smoothMax;
+  float norm = 1.0 / sqrt(max(pk, 1e-18));
   float amp  = sqrt(psi.x*psi.x + psi.y*psi.y) * norm;
   if (u_ampView == 1) {   // AMPLITUDE view — identical arithmetic to GLSL_RENDER_FIELD (the field view's colormap)
     float lva = log(1.0 + 99.0 * amp) / log(100.0);

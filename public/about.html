@@ -1,0 +1,2087 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside a Krestianstvo — the Holographic Process</title>
+<style>
+  :root{
+    --ground:#080a14;
+    --panel:#0f1322;
+    --panel-2:#141a2c;
+    --ink:#edf0fb;
+    --neutral:#8f96b8;
+    --neutral-dim:#565d7d;
+    --hair:#232841;
+    --hair-soft:#191d31;
+    --probe:#ff8bd0;    /* the raw textured symbol */
+    --store:#c46bff;    /* forward leg / plate */
+    --age:#e8b84b;      /* aging in ω-time */
+    --recall:#4fd6e6;   /* the bind / correlation */
+    --live:#7fe0a8;     /* the reborn living soliton */
+    --serif:'Charter','Iowan Old Style','Palatino Linotype',Georgia,serif;
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;
+    --mono:"SF Mono",'JetBrains Mono','Fira Code',ui-monospace,Menlo,monospace;
+    --maxw:1220px;
+  }
+  @media (prefers-color-scheme:light){
+    :root{
+      --ground:#eef1f9; --panel:#ffffff; --panel-2:#f4f6fc; --ink:#141728;
+      --neutral:#565d7d; --neutral-dim:#8b91ab; --hair:#dde2ef; --hair-soft:#e9edf6;
+      --probe:#d63f9e; --store:#8a2be2; --age:#b07908; --recall:#0f8fa6; --live:#1c9a5a;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#080a14; --panel:#0f1322; --panel-2:#141a2c; --ink:#edf0fb;
+    --neutral:#8f96b8; --neutral-dim:#565d7d; --hair:#232841; --hair-soft:#191d31;
+    --probe:#ff8bd0; --store:#c46bff; --age:#e8b84b; --recall:#4fd6e6; --live:#7fe0a8;
+  }
+  :root[data-theme="light"]{
+    --ground:#eef1f9; --panel:#ffffff; --panel-2:#f4f6fc; --ink:#141728;
+    --neutral:#565d7d; --neutral-dim:#8b91ab; --hair:#dde2ef; --hair-soft:#e9edf6;
+    --probe:#d63f9e; --store:#8a2be2; --age:#b07908; --recall:#0f8fa6; --live:#1c9a5a;
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(16px,3.5vw,40px)}
+  code{font-family:var(--mono)}
+
+  header{padding:clamp(38px,6vw,74px) 0 clamp(16px,2vw,28px)}
+  .kick{font-family:var(--mono);font-size:.72rem;letter-spacing:.22em;text-transform:uppercase;color:var(--neutral);display:flex;gap:.7em;align-items:center;flex-wrap:wrap}
+  .kick .sq{width:7px;height:7px;background:var(--recall);box-shadow:0 0 10px var(--recall)}
+  h1{font-family:var(--serif);font-weight:600;font-size:clamp(2.1rem,5.6vw,3.9rem);line-height:1.02;letter-spacing:-.02em;margin:.3em 0 .3em;max-width:20ch;text-wrap:balance}
+  h1 .g{background:linear-gradient(96deg,var(--probe),var(--store) 32%,var(--age) 56%,var(--recall) 78%,var(--live));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .title{
+    font-family:var(--live);font-weight:800;
+    font-size:clamp(2.1rem,5.4vw,4.6rem);line-height:1.0;letter-spacing:-.03em;
+    margin:.34em 0 .28em;text-wrap:balance;
+    background:linear-gradient(102deg,var(--live),var(--recall) 52%,var(--age));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .lede{max-width:64ch;color:var(--neutral);font-size:clamp(1rem,1.6vw,1.16rem)}
+  .lede b{color:var(--ink);font-weight:600}
+
+  /* the pipeline */
+  .pipe{
+    display:grid;grid-template-columns:repeat(5,1fr);gap:0;margin:clamp(24px,3vw,40px) 0 8px;
+    border:1px solid var(--hair);border-radius:6px;overflow:hidden;background:var(--panel);
+  }
+  @media(max-width:1000px){.pipe{grid-template-columns:1fr 1fr}}
+  @media(max-width:560px){.pipe{grid-template-columns:1fr}}
+  .stage{
+    position:relative;padding:20px 18px 22px;border-right:1px solid var(--hair-soft);
+    display:flex;flex-direction:column;gap:12px;min-width:0;
+  }
+  .stage:last-child{border-right:none}
+  @media(max-width:1000px){.stage{border-right:1px solid var(--hair-soft);border-bottom:1px solid var(--hair-soft)}}
+  .stage .snum{font-family:var(--mono);font-size:.66rem;letter-spacing:.14em;color:var(--sc);opacity:.9}
+  .stage h3{font-family:var(--serif);font-size:1.16rem;font-weight:600;margin:0;letter-spacing:-.01em;line-height:1.1}
+  .stage .canv{
+    aspect-ratio:1/1;width:100%;border-radius:4px;overflow:hidden;position:relative;
+    background:radial-gradient(120% 120% at 50% 40%,color-mix(in oklab,var(--sc) 12%,var(--panel-2)),var(--panel-2) 70%);
+    border:1px solid color-mix(in oklab,var(--sc) 22%,var(--hair));
+  }
+  .stage canvas{width:100%;height:100%;display:block}
+  .stage .op{
+    font-family:var(--mono);font-size:.74rem;color:var(--ink);
+    background:color-mix(in oklab,var(--sc) 12%,transparent);
+    border:1px solid color-mix(in oklab,var(--sc) 30%,transparent);
+    border-radius:3px;padding:6px 8px;line-height:1.35;word-break:break-word;
+  }
+  .stage .op b{color:var(--sc)}
+  .stage .desc{color:var(--neutral);font-size:.82rem;line-height:1.5;margin:0}
+  .stage .desc b{color:var(--ink);font-weight:600}
+  .stage .grp{
+    display:flex;flex-direction:column;gap:2px;
+    background:color-mix(in oklab,var(--sc) 8%,transparent);
+    border:1px solid color-mix(in oklab,var(--sc) 22%,transparent);border-radius:3px;padding:7px 9px;
+  }
+  .stage .grp .gl{font-family:var(--mono);font-size:.6rem;letter-spacing:.11em;text-transform:uppercase;color:var(--sc)}
+  .stage .grp .gm{font-family:var(--mono);font-size:.76rem;color:var(--ink);line-height:1.35}
+  .stage .grp .gn{color:var(--neutral);font-size:.74rem;font-style:italic;line-height:1.4}
+  .stage .fn{font-family:var(--mono);font-size:.68rem;color:var(--sc);letter-spacing:.02em;margin-top:auto;padding-top:6px;border-top:1px dashed var(--hair)}
+
+  /* stage accent binding */
+  .s1{--sc:var(--probe)} .s2{--sc:var(--store)} .s3{--sc:var(--age)} .s4{--sc:var(--recall)} .s5{--sc:var(--live)}
+
+  /* flow connector arrows between stages (desktop) */
+  .flowbar{display:grid;grid-template-columns:repeat(5,1fr);margin:0 0 clamp(20px,3vw,36px)}
+  @media(max-width:1000px){.flowbar{display:none}}
+  .flowbar .fseg{position:relative;height:34px}
+  .flowbar .fseg::after{
+    content:"";position:absolute;top:50%;left:12%;right:-38%;height:2px;
+    background:linear-gradient(90deg,var(--from),var(--to));opacity:.55;
+  }
+  .flowbar .fseg .flab{
+    position:absolute;top:50%;left:50%;transform:translate(-30%,-50%);
+    font-family:var(--mono);font-size:.66rem;color:var(--neutral);
+    background:var(--ground);padding:0 8px;white-space:nowrap;
+  }
+  .flowbar .fseg:last-child::after{display:none}
+  .flowbar .fseg:last-child .flab{display:none}
+
+  /* the two paths note */
+  .paths{
+    display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:8px 0 clamp(30px,4vw,50px);
+  }
+  @media(max-width:720px){.paths{grid-template-columns:1fr}}
+  .path{border:1px solid var(--hair);border-radius:5px;background:var(--panel);padding:18px 20px;position:relative;overflow:hidden}
+  .path::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--pc)}
+  .path.f{--pc:var(--recall)} .path.a{--pc:var(--store)}
+  .path h4{font-family:var(--serif);font-size:1.06rem;font-weight:600;margin:0 0 2px;display:flex;align-items:center;gap:.5em}
+  .path .tag{font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--pc)}
+  .path p{color:var(--neutral);font-size:.87rem;margin:.5em 0 0;line-height:1.55}
+  .path p b{color:var(--ink);font-weight:600}
+  .path code{font-family:var(--mono);font-size:.85em;color:var(--ink);background:color-mix(in oklab,var(--pc) 14%,transparent);padding:.05em .34em;border-radius:3px;white-space:nowrap}
+
+  /* the inner-loop: the 5-op step */
+  .loop{border:1px solid var(--hair);border-radius:6px;overflow:hidden;background:linear-gradient(140deg,color-mix(in oklab,var(--live) 6%,var(--panel)),var(--panel) 60%);margin-bottom:clamp(28px,4vw,48px)}
+  .loop-in{padding:clamp(22px,3vw,32px)}
+  .loop h2{font-family:var(--serif);font-size:clamp(1.4rem,3vw,2rem);font-weight:600;margin:0 0 .2em;letter-spacing:-.01em}
+  .loop .sub{color:var(--neutral);max-width:60ch;font-size:.95rem;margin:0 0 20px}
+  .loop .sub b{color:var(--ink);font-weight:600}
+  .ops5{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  @media(max-width:820px){.ops5{grid-template-columns:1fr 1fr}}
+  @media(max-width:480px){.ops5{grid-template-columns:1fr}}
+  .op5{
+    border:1px solid var(--hair);border-radius:4px;background:var(--panel-2);padding:13px 13px 14px;position:relative;
+    display:flex;flex-direction:column;gap:7px;
+  }
+  .op5 .n{font-family:var(--mono);font-size:.64rem;color:var(--live);letter-spacing:.1em}
+  .op5 .eq{font-family:var(--mono);font-size:.9rem;color:var(--ink);line-height:1.3}
+  .op5 .w{color:var(--neutral);font-size:.76rem;line-height:1.45}
+  .op5 .role{font-family:var(--mono);font-size:.62rem;color:var(--neutral-dim);letter-spacing:.06em;text-transform:uppercase}
+  .loopback{
+    margin-top:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    font-family:var(--mono);font-size:.76rem;color:var(--neutral);
+  }
+  .loopback .arw{color:var(--live);font-size:1.1rem}
+  .loopback b{color:var(--ink)}
+
+  /* ── replication / determinism section ────────────────── */
+  .repl{border:1px solid var(--hair);border-radius:6px;overflow:hidden;margin-bottom:clamp(28px,4vw,48px);
+    background:linear-gradient(135deg,color-mix(in oklab,var(--measure) 6%,var(--panel)),var(--panel) 60%)}
+  .repl-in{padding:clamp(22px,3vw,32px)}
+  .repl .rhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  .repl .rpill{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;color:var(--measure);border:1px solid color-mix(in oklab,var(--measure) 40%,transparent);background:color-mix(in oklab,var(--measure) 10%,transparent);padding:4px 9px;border-radius:2px}
+  .repl h2{font-family:var(--serif);font-size:clamp(1.35rem,2.8vw,1.9rem);font-weight:600;margin:0;letter-spacing:-.01em}
+  .repl .sub{color:var(--neutral);max-width:66ch;font-size:.93rem;margin:.5em 0 22px}
+  .repl .sub b{color:var(--ink);font-weight:600}
+  .repl .sub code{font-family:var(--mono);font-size:.86em;color:var(--ink)}
+  /* the two-peers diagram */
+  .peers{display:grid;grid-template-columns:1fr auto 1fr;gap:clamp(12px,2.4vw,26px);align-items:stretch}
+  @media(max-width:760px){.peers{grid-template-columns:1fr}}
+  .peer{border:1px solid var(--hair);border-radius:5px;background:var(--panel-2);padding:16px;display:flex;flex-direction:column;gap:10px}
+  .peer .ph{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .peer .pt{font-family:var(--mono);font-size:.78rem;color:var(--measure);font-weight:600}
+  .peer .hash{font-family:var(--mono);font-size:.66rem;color:var(--neutral)}
+  .peer .pcanv{aspect-ratio:1/1;width:100%;max-width:190px;margin:0 auto;border-radius:4px;overflow:hidden;background:var(--panel);border:1px solid color-mix(in oklab,var(--measure) 20%,var(--hair))}
+  .peer .pcanv canvas{width:100%;height:100%;display:block}
+  .peer .pnote{font-family:var(--mono);font-size:.68rem;color:var(--neutral);text-align:center}
+  /* the reflector spine in the middle */
+  .refl{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-width:150px}
+  @media(max-width:760px){.refl{flex-direction:row;flex-wrap:wrap}}
+  .refl .rbox{border:1px solid color-mix(in oklab,var(--measure) 40%,var(--hair));border-radius:4px;background:color-mix(in oklab,var(--measure) 8%,transparent);padding:10px 13px;text-align:center}
+  .refl .rbox .rl{font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;color:var(--measure)}
+  .refl .rbox .rv{font-family:var(--serif);font-size:.96rem;font-weight:600;margin-top:2px}
+  .refl .carries{font-family:var(--mono);font-size:.64rem;color:var(--neutral);text-align:center;line-height:1.5}
+  .refl .carries b{color:var(--ink)}
+  .refl .xbox{font-family:var(--mono);font-size:.64rem;color:var(--neutral-dim);text-align:center;border-top:1px dashed var(--hair);padding-top:8px;line-height:1.5}
+  .refl .xbox s{color:var(--neutral-dim)}
+  .repl .rgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:20px}
+  @media(max-width:680px){.repl .rgrid{grid-template-columns:1fr}}
+  .rcard{border:1px solid var(--hair);border-radius:4px;background:var(--panel-2);padding:14px 15px;border-left:2px solid var(--measure)}
+  .rcard h4{font-family:var(--serif);font-size:1rem;font-weight:600;margin:0 0 3px}
+  .rcard p{margin:0;color:var(--neutral);font-size:.82rem;line-height:1.5}
+  .rcard p b{color:var(--ink);font-weight:600}
+  .rcard code{font-family:var(--mono);font-size:.85em;color:var(--ink);background:color-mix(in oklab,var(--measure) 12%,transparent);padding:.05em .3em;border-radius:3px;white-space:nowrap}
+  .repl .rtie{margin-top:18px;padding-top:14px;border-top:1px dashed var(--hair);color:var(--neutral);font-size:.86rem;line-height:1.55;max-width:80ch}
+  .repl .rtie b{color:var(--measure);font-weight:600}
+  .repl .rtie code{font-family:var(--mono);font-size:.86em;color:var(--ink);background:color-mix(in oklab,var(--measure) 12%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+
+  /* ── IFS geometric-operator strip ─────────────────────── */
+  .ifs{border:1px solid color-mix(in oklab,var(--store) 24%,var(--hair));border-radius:6px;overflow:hidden;margin-bottom:clamp(28px,4vw,48px);
+    background:linear-gradient(135deg,color-mix(in oklab,var(--store) 6%,var(--panel)),var(--panel) 60%)}
+  .ifs-in{padding:clamp(22px,3vw,32px)}
+  .ifs .ihead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  .ifs .ipill{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;color:var(--store);border:1px solid color-mix(in oklab,var(--store) 40%,transparent);background:color-mix(in oklab,var(--store) 10%,transparent);padding:4px 9px;border-radius:2px}
+  .ifs h2{font-family:var(--serif);font-size:clamp(1.35rem,2.8vw,1.9rem);font-weight:600;margin:0;letter-spacing:-.01em}
+  .ifs .sub{color:var(--neutral);max-width:66ch;font-size:.93rem;margin:.5em 0 20px}
+  .ifs .sub b{color:var(--ink);font-weight:600}
+  .ifs .sub code{font-family:var(--mono);font-size:.86em;color:var(--ink)}
+  .ichain{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:center;gap:12px}
+  @media(max-width:820px){.ichain{grid-template-columns:1fr;gap:10px}}
+  .inode{border:1px solid var(--hair);border-radius:5px;background:var(--panel-2);padding:16px 16px;display:flex;flex-direction:column;gap:6px;position:relative;overflow:hidden}
+  .inode::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--store)}
+  .inode .il{font-family:var(--mono);font-size:.62rem;letter-spacing:.11em;text-transform:uppercase;color:var(--store)}
+  .inode .it{font-family:var(--serif);font-size:1.04rem;font-weight:600;letter-spacing:-.01em}
+  .inode .im{font-family:var(--mono);font-size:.78rem;color:var(--ink);line-height:1.35}
+  .inode .id{color:var(--neutral);font-size:.8rem;line-height:1.45}
+  .iarr{display:grid;place-items:center;font-family:var(--mono);color:var(--neutral-dim);font-size:1.3rem}
+  @media(max-width:820px){.iarr{transform:rotate(90deg)}}
+  .ifs .itie{margin-top:18px;padding-top:14px;border-top:1px dashed var(--hair);color:var(--neutral);font-size:.86rem;line-height:1.55;max-width:80ch}
+  .ifs .itie b{color:var(--store);font-weight:600}
+  .ifs .itie code{font-family:var(--mono);font-size:.86em;color:var(--ink);background:color-mix(in oklab,var(--store) 12%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+
+  /* ── meta-circular clarification ──────────────────────── */
+  .meta{border:1px solid var(--hair);border-radius:6px;overflow:hidden;margin-bottom:clamp(28px,4vw,48px);
+    background:linear-gradient(140deg,color-mix(in oklab,var(--store) 7%,var(--panel)),var(--panel) 62%)}
+  .meta-in{padding:clamp(22px,3vw,32px)}
+  .meta h2{font-family:var(--serif);font-size:clamp(1.4rem,3vw,2rem);font-weight:600;margin:0 0 .2em;letter-spacing:-.01em}
+  .meta .sub{color:var(--neutral);max-width:64ch;font-size:.95rem;margin:0 0 22px}
+  .meta .sub b{color:var(--ink);font-weight:600}
+  /* the eval/quote circle diagram */
+  .circle{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:clamp(14px,3vw,30px);margin-bottom:22px}
+  @media(max-width:680px){.circle{grid-template-columns:1fr;gap:12px}}
+  .tier{border:1px solid var(--hair);border-radius:5px;background:var(--panel-2);padding:18px 20px;position:relative}
+  .tier .tn{font-family:var(--mono);font-size:.64rem;letter-spacing:.13em;text-transform:uppercase;color:var(--tcol);margin-bottom:5px}
+  .tier .tt{font-family:var(--serif);font-size:1.14rem;font-weight:600;letter-spacing:-.01em}
+  .tier .td{color:var(--neutral);font-size:.83rem;margin-top:5px;line-height:1.5}
+  .tier .td code{font-family:var(--mono);font-size:.86em;color:var(--ink)}
+  .tier.field{--tcol:var(--live);border-left:2px solid var(--live)}
+  .tier.reg{--tcol:var(--store);border-left:2px solid var(--store)}
+  .circle .doors{display:flex;flex-direction:column;gap:14px;align-items:center;min-width:150px}
+  .circle .door{font-family:var(--mono);font-size:.74rem;text-align:center;line-height:1.4}
+  .circle .door .a{font-size:1.2rem;display:block;letter-spacing:.1em}
+  .circle .door.c{color:var(--store)} .circle .door.m{color:var(--live)}
+  .circle .door .verb{color:var(--ink)}
+  @media(max-width:680px){.circle .door .a{transform:rotate(90deg);display:inline-block}}
+  .fixpt{display:flex;align-items:flex-start;gap:12px;border-top:1px dashed var(--hair);padding-top:16px}
+  .fixpt .eq{font-family:var(--mono);font-size:.95rem;color:var(--store);white-space:nowrap;padding-top:2px}
+  .fixpt p{margin:0;color:var(--neutral);font-size:.88rem;line-height:1.55;max-width:66ch}
+  .fixpt p b{color:var(--ink);font-weight:600}
+  .fixpt code{font-family:var(--mono);font-size:.85em;color:var(--ink);background:color-mix(in oklab,var(--store) 13%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+
+  /* ── wAtt / ψATT door strip ───────────────────────────── */
+  .watt{border:1px solid color-mix(in oklab,var(--age) 26%,var(--hair));border-radius:6px;overflow:hidden;margin-bottom:clamp(28px,4vw,48px);
+    background:linear-gradient(135deg,color-mix(in oklab,var(--age) 7%,var(--panel)),var(--panel) 60%)}
+  .watt-in{padding:clamp(22px,3vw,32px)}
+  .watt .whead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  .watt .wpill{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;color:var(--age);border:1px solid color-mix(in oklab,var(--age) 40%,transparent);background:color-mix(in oklab,var(--age) 10%,transparent);padding:4px 9px;border-radius:2px}
+  .watt h2{font-family:var(--serif);font-size:clamp(1.35rem,2.8vw,1.9rem);font-weight:600;margin:0;letter-spacing:-.01em}
+  .watt .sub{color:var(--neutral);max-width:66ch;font-size:.93rem;margin:.5em 0 20px}
+  .watt .sub b{color:var(--ink);font-weight:600}
+  .wsteps{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:stretch;gap:12px}
+  @media(max-width:820px){.wsteps{grid-template-columns:1fr;gap:10px}}
+  .wstep{border:1px solid var(--hair);border-radius:5px;background:var(--panel-2);padding:16px 16px;display:flex;flex-direction:column;gap:8px;position:relative;overflow:hidden}
+  .wstep::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--wc,var(--age))}
+  .wstep .wn{font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--wc,var(--age))}
+  .wstep .wt{font-family:var(--serif);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}
+  .wstep .wd{color:var(--neutral);font-size:.82rem;line-height:1.5}
+  .wstep .wd code{font-family:var(--mono);font-size:.85em;color:var(--ink)}
+  .wstep .cvw{aspect-ratio:1/1;width:100%;max-width:200px;margin:2px auto 0;border-radius:3px;overflow:hidden;background:color-mix(in oklab,var(--wc,var(--age)) 8%,var(--panel));border:1px solid color-mix(in oklab,var(--wc,var(--age)) 20%,var(--hair))}
+  .wstep .cvw canvas{width:100%;height:100%;display:block}
+  .warr{display:grid;place-items:center;font-family:var(--mono);color:var(--neutral-dim);font-size:1.3rem}
+  @media(max-width:820px){.warr{transform:rotate(90deg)}}
+  .w1{--wc:var(--recall)} .w2{--wc:var(--neutral-dim)} .w3{--wc:var(--age)}
+  .watt .wtie{margin-top:18px;padding-top:14px;border-top:1px dashed var(--hair);color:var(--neutral);font-size:.86rem;line-height:1.55;max-width:78ch}
+  .watt .wtie b{color:var(--age);font-weight:600}
+  .watt .wtie code{font-family:var(--mono);font-size:.86em;color:var(--ink);background:color-mix(in oklab,var(--age) 12%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+
+  /* ── shared section shell for the three new blocks ────── */
+  .block{border:1px solid var(--hair);border-radius:6px;overflow:hidden;margin-bottom:clamp(28px,4vw,48px);background:var(--panel)}
+  .block.tint-store{background:linear-gradient(135deg,color-mix(in oklab,var(--store) 6%,var(--panel)),var(--panel) 60%)}
+  .block.tint-age{background:linear-gradient(135deg,color-mix(in oklab,var(--age) 6%,var(--panel)),var(--panel) 60%)}
+  .block.tint-recall{background:linear-gradient(135deg,color-mix(in oklab,var(--recall) 6%,var(--panel)),var(--panel) 60%)}
+  .block-in{padding:clamp(22px,3vw,32px)}
+  .block .bhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  .block .bpill{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;padding:4px 9px;border-radius:2px;color:var(--bc);border:1px solid color-mix(in oklab,var(--bc) 40%,transparent);background:color-mix(in oklab,var(--bc) 10%,transparent)}
+  .block h2{font-family:var(--serif);font-size:clamp(1.35rem,2.8vw,1.9rem);font-weight:600;margin:0;letter-spacing:-.01em}
+  .block .sub{color:var(--neutral);max-width:66ch;font-size:.93rem;margin:.5em 0 22px}
+  .block .sub b{color:var(--ink);font-weight:600}
+  .block .sub code{font-family:var(--mono);font-size:.86em;color:var(--ink)}
+  .block .btie{margin-top:18px;padding-top:14px;border-top:1px dashed var(--hair);color:var(--neutral);font-size:.86rem;line-height:1.55;max-width:80ch}
+  .block .btie b{color:var(--bc);font-weight:600}
+  .block .btie code{font-family:var(--mono);font-size:.86em;color:var(--ink);background:color-mix(in oklab,var(--bc) 12%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+  .b-store{--bc:var(--store)} .b-age{--bc:var(--age)} .b-recall{--bc:var(--recall)}
+
+  .split{display:grid;grid-template-columns:minmax(0,300px) 1fr;gap:clamp(18px,3vw,34px);align-items:center}
+  @media(max-width:720px){.split{grid-template-columns:1fr}}
+  .split.rev{grid-template-columns:1fr minmax(0,300px)}
+  @media(max-width:720px){.split.rev{grid-template-columns:1fr}}
+  .bvis{position:relative;aspect-ratio:1/1;border:1px solid color-mix(in oklab,var(--bc) 22%,var(--hair));border-radius:5px;overflow:hidden;background:var(--panel-2)}
+  .bvis canvas{width:100%;height:100%;display:block}
+  .bvis .vc{position:absolute;left:10px;bottom:9px;right:10px;font-family:var(--mono);font-size:.64rem;color:var(--neutral);display:flex;justify-content:space-between;gap:8px;pointer-events:none}
+  .bvis .vc .a{color:var(--bc)}
+  .bcol{display:flex;flex-direction:column;gap:12px}
+  .bpoint{display:flex;gap:11px;align-items:flex-start}
+  .bpoint .bn{font-family:var(--mono);font-size:.66rem;color:var(--bc);border:1px solid color-mix(in oklab,var(--bc) 38%,var(--hair));border-radius:2px;width:20px;height:20px;display:grid;place-items:center;flex:none;margin-top:2px}
+  .bpoint h4{font-family:var(--serif);font-size:1.02rem;font-weight:600;margin:0 0 2px}
+  .bpoint p{margin:0;color:var(--neutral);font-size:.85rem;line-height:1.5}
+  .bpoint p b{color:var(--ink);font-weight:600}
+  .bpoint code{font-family:var(--mono);font-size:.85em;color:var(--ink);background:color-mix(in oklab,var(--bc) 13%,transparent);padding:.05em .3em;border-radius:3px;white-space:nowrap}
+
+  /* the plate-stack diagram (section 2) */
+  .stack3d{display:flex;flex-direction:column;gap:9px}
+  .plate3d{display:flex;align-items:center;gap:12px;border:1px solid var(--hair);border-radius:4px;background:var(--panel-2);padding:11px 14px;position:relative}
+  .plate3d .pnm{font-family:var(--mono);font-weight:600;font-size:.9rem;color:var(--pc);width:2.2em}
+  .plate3d .pbar{flex:1;height:8px;border-radius:2px;background:color-mix(in oklab,var(--pc) 30%,var(--hair));position:relative;overflow:hidden}
+  .plate3d .pbar span{position:absolute;top:0;bottom:0;left:0;background:var(--pc);border-radius:2px}
+  .plate3d .pk{font-family:var(--mono);font-size:.68rem;color:var(--neutral)}
+  .plate3d.pw{--pc:var(--probe)} .plate3d.pv{--pc:var(--recall)} .plate3d.pp1{--pc:var(--age)} .plate3d.pp2{--pc:var(--live)}
+  .edges{margin-top:14px;font-family:var(--mono);font-size:.74rem;color:var(--neutral);display:flex;flex-direction:column;gap:6px}
+  .edges .e{display:flex;gap:8px;align-items:baseline}
+  .edges .e .kap{color:var(--store)}
+  .edges .e .kap.neg{color:var(--age)}
+
+  /* display / sampling section ─────────────────────────── */
+  .disp{border:1px solid var(--hair);border-radius:6px;overflow:hidden;margin-bottom:clamp(28px,4vw,48px);
+    background:linear-gradient(140deg,color-mix(in oklab,var(--recall) 6%,var(--panel)),var(--panel) 60%)}
+  .disp-in{padding:clamp(22px,3vw,32px)}
+  .disp h2{font-family:var(--serif);font-size:clamp(1.4rem,3vw,2rem);font-weight:600;margin:0 0 .2em;letter-spacing:-.01em}
+  .disp .sub{color:var(--neutral);max-width:64ch;font-size:.95rem;margin:0 0 22px}
+  .disp .sub b{color:var(--ink);font-weight:600}
+  .dispgrid{display:grid;grid-template-columns:minmax(0,320px) 1fr;gap:clamp(18px,3vw,34px);align-items:center}
+  @media(max-width:720px){.dispgrid{grid-template-columns:1fr}}
+  .dispvis{position:relative;aspect-ratio:1/1;border:1px solid var(--hair);border-radius:5px;overflow:hidden;background:var(--panel-2)}
+  .dispvis canvas{width:100%;height:100%;display:block}
+  .dispvis .cap{position:absolute;left:10px;bottom:9px;right:10px;font-family:var(--mono);font-size:.66rem;color:var(--neutral);display:flex;justify-content:space-between;gap:8px;pointer-events:none}
+  .dispvis .cap .a{color:var(--recall)}
+  .dispcol{display:flex;flex-direction:column;gap:14px}
+  .dline{display:flex;gap:12px;align-items:flex-start}
+  .dline .ic{width:26px;height:26px;flex:none;color:var(--recall);margin-top:2px}
+  .dline h4{font-family:var(--serif);font-size:1.05rem;font-weight:600;margin:0 0 2px}
+  .dline p{margin:0;color:var(--neutral);font-size:.86rem;line-height:1.5}
+  .dline p b{color:var(--ink);font-weight:600}
+  .dline code{font-family:var(--mono);font-size:.85em;color:var(--ink);background:color-mix(in oklab,var(--recall) 13%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+  .dtruth{margin-top:20px;padding-top:16px;border-top:1px dashed var(--hair);display:flex;gap:12px;align-items:flex-start}
+  .dtruth .eq{font-family:var(--mono);font-size:.86rem;color:var(--recall);white-space:nowrap;padding-top:2px}
+  .dtruth p{margin:0;color:var(--neutral);font-size:.87rem;line-height:1.55;max-width:72ch}
+  .dtruth p b{color:var(--ink);font-weight:600}
+
+  footer{border-top:1px solid var(--hair-soft);padding:28px 0 56px;color:var(--neutral-dim);font-size:.8rem}
+  footer .fl{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  footer .mono{font-family:var(--mono);color:var(--neutral)}
+
+  .themebtn{position:fixed;top:14px;right:14px;z-index:20;font-family:var(--mono);font-size:.7rem;letter-spacing:.08em;background:var(--panel);color:var(--neutral);border:1px solid var(--hair);border-radius:2px;padding:7px 11px;cursor:pointer}
+  .themebtn:hover{color:var(--ink);border-color:var(--neutral)}
+  :focus-visible{outline:2px solid var(--recall);outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+
+  /* ══ EMBEDDED THEORY BLOCK (scoped under #theory-embed) ══ */
+
+#theory-embed{
+  --ground:#0b0d17; --panel:#12152400; --panel-solid:#131627; --panel-2:#171b30;
+  --ink:#eceaff; --neutral:#9992bd; --neutral-dim:#645d86; --hair:#262a45; --hair-soft:#1c1f36;
+  --abstract:#a689ff; --abstract-2:#7aa2ff; --measure:#7fe0a8; --measure-2:#a8e06a;
+  --spectral-a:#c46bff; --spectral-b:#4fd6e6; --warn:#ffcf6b;
+  --serif:'Charter','Iowan Old Style','Palatino Linotype','Book Antiqua',Georgia,'Times New Roman',serif;
+  --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --mono:"SF Mono",'JetBrains Mono','Fira Code',ui-monospace,Menlo,Consolas,monospace;
+  --maxw:1160px;
+  background:var(--ground); color:var(--ink); font-family:var(--sans); line-height:1.62;
+  display:block; border-radius:8px; overflow:hidden; margin-top:8px;
+  border:1px solid var(--hair);
+}
+@media (prefers-color-scheme:light){
+  #theory-embed{ --ground:#f3f1fb; --panel-solid:#ffffff; --panel-2:#f6f4fd; --ink:#161327;
+    --neutral:#5b5478; --neutral-dim:#8b84a6; --hair:#e0dcf0; --hair-soft:#eae6f6;
+    --abstract:#6d3fe0; --abstract-2:#2f5fd6; --measure:#1c9a5a; --measure-2:#3f8c1e;
+    --spectral-a:#9127d6; --spectral-b:#0f8fa6; --warn:#b07908; }
+}
+:root[data-theme="dark"] #theory-embed{ --ground:#0b0d17; --panel-solid:#131627; --panel-2:#171b30; --ink:#eceaff;
+  --neutral:#9992bd; --neutral-dim:#645d86; --hair:#262a45; --hair-soft:#1c1f36;
+  --abstract:#a689ff; --abstract-2:#7aa2ff; --measure:#7fe0a8; --measure-2:#a8e06a;
+  --spectral-a:#c46bff; --spectral-b:#4fd6e6; --warn:#ffcf6b; }
+:root[data-theme="light"] #theory-embed{ --ground:#f3f1fb; --panel-solid:#ffffff; --panel-2:#f6f4fd; --ink:#161327;
+  --neutral:#5b5478; --neutral-dim:#8b84a6; --hair:#e0dcf0; --hair-soft:#eae6f6;
+  --abstract:#6d3fe0; --abstract-2:#2f5fd6; --measure:#1c9a5a; --measure-2:#3f8c1e;
+  --spectral-a:#9127d6; --spectral-b:#0f8fa6; --warn:#b07908; }
+/* the embedded hero should not be full-viewport dramatic — trim its top padding a touch */
+#theory-embed .hero-in{padding-top:clamp(34px,5vw,64px)}
+
+  /* ── hero ─────────────────────────────────────────────── */
+  #theory-embed header.hero{position:relative;overflow:hidden;border-bottom:1px solid var(--hair-soft)}
+  #theory-embed #dualcanvas{position:absolute;inset:0;width:100%;height:100%;opacity:.9}
+  #theory-embed .hero-in{position:relative;padding:clamp(52px,9vw,120px) 0 clamp(40px,6vw,80px)}
+  #theory-embed .kicker{
+    font-family:var(--mono);font-size:.72rem;letter-spacing:.24em;text-transform:uppercase;
+    color:var(--neutral);display:flex;gap:.8em;align-items:center;flex-wrap:wrap;
+  }
+  #theory-embed .kicker .sq{width:7px;height:7px;background:var(--spectral-a);box-shadow:0 0 10px var(--spectral-a)}
+  #theory-embed h1{
+    font-family:var(--serif);font-weight:600;
+    font-size:clamp(2.2rem,6vw,4.3rem);line-height:1.02;letter-spacing:-.015em;
+    margin:.3em 0 .32em;max-width:15ch;text-wrap:balance;
+  }
+  #theory-embed h1 .grad{
+    background:linear-gradient(96deg,var(--abstract),var(--spectral-b) 60%,var(--measure));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  #theory-embed .thesis{max-width:62ch;color:var(--neutral);font-size:clamp(1.02rem,1.7vw,1.24rem);line-height:1.55}
+  #theory-embed .thesis b{color:var(--ink);font-weight:600}
+  #theory-embed .poles{display:flex;gap:10px;flex-wrap:wrap;margin-top:26px}
+  #theory-embed .pole{
+    font-family:var(--mono);font-size:.76rem;letter-spacing:.02em;
+    padding:8px 13px;border-radius:2px;display:flex;align-items:center;gap:.6em;
+    border:1px solid var(--hair);background:color-mix(in oklab,var(--panel-solid) 70%, transparent);
+  }
+  #theory-embed .pole .d{width:9px;height:9px;border-radius:50%}
+  #theory-embed .pole.a .d{background:var(--abstract)} #theory-embed .pole.m .d{background:var(--measure)}
+  #theory-embed .pole .lab{color:var(--neutral)}
+  #theory-embed .arrowmark{color:var(--neutral-dim);font-family:var(--mono);align-self:center}
+
+  /* ── section frame ────────────────────────────────────── */
+  #theory-embed section{padding:clamp(40px,6vw,76px) 0;border-top:1px solid var(--hair-soft)}
+  #theory-embed .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px;flex-wrap:wrap}
+  #theory-embed .sec-num{font-family:var(--mono);font-size:.82rem;color:var(--spectral-a);letter-spacing:.05em}
+  #theory-embed h2{
+    font-family:var(--serif);font-weight:600;font-size:clamp(1.55rem,3.4vw,2.35rem);
+    letter-spacing:-.01em;margin:0;line-height:1.06;text-wrap:balance;
+  }
+  #theory-embed .sec-sub{color:var(--neutral);max-width:66ch;margin:.5em 0 0;font-size:1rem}
+  #theory-embed .sec-sub b{color:var(--ink);font-weight:600}
+
+  /* ── the duality tower (central diagram) ──────────────── */
+  #theory-embed .tower{margin-top:34px;display:grid;gap:14px}
+  #theory-embed .rung{
+    display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:clamp(10px,2.4vw,26px);align-items:stretch;
+  }
+  @media(max-width:720px){#theory-embed .rung{grid-template-columns:1fr;gap:8px}#theory-embed .rung .mid{display:none}}
+  #theory-embed .node{
+    border:1px solid var(--hair);border-radius:3px;padding:15px 17px;background:var(--panel-solid);
+    position:relative;
+  }
+  #theory-embed .node.abs{border-left:2px solid var(--abstract)}
+  #theory-embed .node.mac{border-left:2px solid var(--measure)}
+  #theory-embed .node .tag{
+    font-family:var(--mono);font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--neutral-dim);margin-bottom:5px;
+  }
+  #theory-embed .node.abs .tag{color:var(--abstract)} #theory-embed .node.mac .tag{color:var(--measure)}
+  #theory-embed .node .name{font-family:var(--serif);font-size:1.08rem;font-weight:600;letter-spacing:-.01em}
+  #theory-embed .node .name .m{font-family:var(--mono);font-size:.82em;font-weight:400;color:var(--neutral)}
+  #theory-embed .node .desc{color:var(--neutral);font-size:.86rem;margin-top:4px}
+  #theory-embed .node .desc code{color:var(--ink);font-size:.92em}
+  #theory-embed .rung .mid{display:grid;place-items:center;min-width:64px}
+  #theory-embed .rung .mid .link{
+    font-family:var(--mono);font-size:.64rem;color:var(--neutral-dim);text-align:center;line-height:1.3;
+  }
+  #theory-embed .rung .mid .link .glyph{display:block;font-size:1.3rem;color:var(--spectral-b);margin-bottom:2px}
+  #theory-embed .rung.arr-down{position:relative}
+
+  /* ── sector cards ─────────────────────────────────────── */
+  #theory-embed .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-top:32px}
+  #theory-embed .card{
+    border:1px solid var(--hair);border-radius:4px;background:var(--panel-solid);
+    padding:20px 20px 17px;display:flex;flex-direction:column;gap:12px;position:relative;overflow:hidden;
+  }
+  #theory-embed .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--card-accent,var(--abstract))}
+  #theory-embed .card .ct{display:flex;align-items:center;gap:9px}
+  #theory-embed .card .ico{width:26px;height:26px;flex:none}
+  #theory-embed .card h3{font-family:var(--serif);font-size:1.14rem;font-weight:600;margin:0;letter-spacing:-.01em}
+  #theory-embed .card .field{font-family:var(--mono);font-size:.66rem;letter-spacing:.13em;text-transform:uppercase;color:var(--neutral-dim);margin-top:1px}
+  #theory-embed .card p{margin:0;color:var(--neutral);font-size:.9rem;line-height:1.55}
+  #theory-embed .card p b{color:var(--ink);font-weight:600}
+  #theory-embed .card p code{
+    font-family:var(--mono);font-size:.86em;color:var(--ink);
+    background:color-mix(in oklab,var(--card-accent,var(--abstract)) 13%,transparent);
+    padding:.06em .34em;border-radius:3px;white-space:nowrap;
+  }
+  #theory-embed .ident{
+    display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:.82rem;
+    padding:9px 11px;border-radius:3px;background:var(--panel-2);border:1px solid var(--hair-soft);
+    flex-wrap:wrap;
+  }
+  #theory-embed .ident .lhs{color:var(--abstract)} #theory-embed .ident .op{color:var(--neutral-dim)} #theory-embed .ident .rhs{color:var(--ink)}
+  #theory-embed .measure{
+    margin-top:auto;display:flex;align-items:baseline;gap:8px;
+    border-top:1px dashed var(--hair);padding-top:11px;
+  }
+  #theory-embed .measure .lab{font-family:var(--mono);font-size:.62rem;letter-spacing:.13em;text-transform:uppercase;color:var(--neutral-dim)}
+  #theory-embed .measure .num{font-family:var(--mono);font-size:.98rem;color:var(--measure);font-weight:600;font-variant-numeric:tabular-nums}
+  #theory-embed .measure .what{color:var(--neutral);font-size:.8rem}
+
+  /* ── PDE elimination — feature strip ──────────────────── */
+  #theory-embed .feature{
+    margin-top:32px;border:1px solid var(--hair);border-radius:4px;overflow:hidden;
+    background:linear-gradient(140deg,color-mix(in oklab,var(--measure) 7%,var(--panel-solid)),var(--panel-solid) 62%);
+  }
+  #theory-embed .feature .fg{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:0}
+  @media(max-width:780px){#theory-embed .feature .fg{grid-template-columns:1fr}}
+  #theory-embed .feature .txt{padding:clamp(22px,3vw,34px)}
+  #theory-embed .feature h3{font-family:var(--serif);font-size:clamp(1.3rem,2.6vw,1.8rem);font-weight:600;margin:0 0 .5em;letter-spacing:-.01em;text-wrap:balance}
+  #theory-embed .feature p{color:var(--neutral);margin:0 0 1em;font-size:.95rem;max-width:52ch}
+  #theory-embed .feature p b{color:var(--ink);font-weight:600}
+  #theory-embed .pipeline{
+    padding:clamp(20px,3vw,30px);border-left:1px solid var(--hair-soft);
+    display:flex;flex-direction:column;gap:0;justify-content:center;
+    background:color-mix(in oklab,var(--ground) 40%, var(--panel-solid));
+  }
+  @media(max-width:780px){#theory-embed .pipeline{border-left:none;border-top:1px solid var(--hair-soft)}}
+  #theory-embed .op-line{
+    font-family:var(--mono);font-size:.82rem;padding:9px 12px;border-radius:3px;
+    display:flex;align-items:center;gap:10px;color:var(--ink);
+    border:1px solid transparent;
+  }
+  #theory-embed .op-line .step{color:var(--spectral-b);width:2.4em;flex:none}
+  #theory-embed .op-line .note{color:var(--neutral);font-size:.74rem;margin-left:auto;font-family:var(--sans)}
+  #theory-embed .op-line.hl{background:color-mix(in oklab,var(--spectral-b) 12%,transparent);border-color:color-mix(in oklab,var(--spectral-b) 30%,transparent)}
+  #theory-embed .op-arrow{text-align:center;color:var(--neutral-dim);font-family:var(--mono);font-size:.8rem;line-height:1}
+  #theory-embed .kbadge{
+    display:inline-flex;gap:.5em;align-items:center;font-family:var(--mono);font-size:.72rem;
+    color:var(--measure);border:1px solid color-mix(in oklab,var(--measure) 40%,transparent);
+    background:color-mix(in oklab,var(--measure) 9%,transparent);padding:5px 10px;border-radius:2px;width:max-content;
+  }
+
+  /* ── reach / honest boundary callout ──────────────────── */
+  #theory-embed .reach{
+    margin-top:28px;border:1px solid color-mix(in oklab,var(--warn) 30%,var(--hair));
+    border-radius:4px;background:color-mix(in oklab,var(--warn) 5%,var(--panel-solid));
+    padding:18px 20px;display:flex;gap:14px;align-items:flex-start;
+  }
+  #theory-embed .reach .b{width:22px;height:22px;flex:none;color:var(--warn);margin-top:2px}
+  #theory-embed .reach h4{margin:0 0 4px;font-family:var(--serif);font-size:1.05rem;font-weight:600}
+  #theory-embed .reach p{margin:0;color:var(--neutral);font-size:.9rem;max-width:74ch}
+  #theory-embed .reach p b{color:var(--ink);font-weight:600}
+  #theory-embed .reach code{font-family:var(--mono);color:var(--warn);font-size:.86em}
+
+  /* ── closing ──────────────────────────────────────────── */
+  #theory-embed .close{padding:clamp(40px,6vw,74px) 0}
+  #theory-embed .close blockquote{
+    margin:0;font-family:var(--serif);font-size:clamp(1.2rem,2.5vw,1.7rem);line-height:1.42;
+    letter-spacing:-.01em;max-width:30ch;text-wrap:balance;
+  }
+  #theory-embed .close blockquote .grad{
+    background:linear-gradient(96deg,var(--abstract),var(--measure));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  #theory-embed .numrow{display:flex;gap:22px;flex-wrap:wrap;margin-top:28px}
+  #theory-embed .numrow .n{display:flex;flex-direction:column}
+  #theory-embed .numrow .n .v{font-family:var(--mono);font-size:1.35rem;color:var(--measure);font-weight:600;font-variant-numeric:tabular-nums}
+  #theory-embed .numrow .n .l{font-size:.76rem;color:var(--neutral);font-family:var(--mono);letter-spacing:.04em}
+
+  #theory-embed footer{border-top:1px solid var(--hair-soft);padding:30px 0 60px;color:var(--neutral-dim);font-size:.8rem}
+  #theory-embed footer .fl{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  #theory-embed footer .mono{font-family:var(--mono);color:var(--neutral)}
+
+
+  /* ── two-clocks (embedded) ── */
+  #theory-embed .clocks{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+  @media(max-width:760px){#theory-embed .clocks{grid-template-columns:1fr}}
+  #theory-embed .clockcard{border:1px solid var(--hair);border-radius:4px;background:var(--panel-solid);padding:20px;position:relative;overflow:hidden}
+  #theory-embed .clockcard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--cc,var(--abstract))}
+  #theory-embed .clockcard .cch{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  #theory-embed .clockcard .cch .svgico{width:30px;height:30px;flex:none}
+  #theory-embed .clockcard h3{font-family:var(--serif);font-size:1.18rem;font-weight:600;margin:0}
+  #theory-embed .clockcard .cfile{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--neutral-dim);margin-top:1px}
+  #theory-embed .clockcard p{color:var(--neutral);font-size:.88rem;margin:10px 0 0;line-height:1.55}
+  #theory-embed .clockcard p b{color:var(--ink);font-weight:600}
+  #theory-embed .clockcard p code{font-family:var(--mono);font-size:.85em;color:var(--ink);background:color-mix(in oklab,var(--cc,var(--abstract)) 13%,transparent);padding:.05em .32em;border-radius:3px;white-space:nowrap}
+  #theory-embed .clockcard ul{margin:12px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
+  #theory-embed .clockcard li{position:relative;padding-left:20px;color:var(--neutral);font-size:.84rem}
+  #theory-embed .clockcard li::before{content:"→";position:absolute;left:0;color:var(--cc,var(--abstract));font-family:var(--mono)}
+  #theory-embed .clockcard li b{color:var(--ink);font-weight:600}
+  #theory-embed .clockcard .tie{margin-top:14px;padding-top:12px;border-top:1px dashed var(--hair);font-size:.82rem;color:var(--neutral);font-style:italic}
+  #theory-embed .clockcard .tie b{color:var(--cc,var(--abstract));font-style:normal;font-weight:600;font-family:var(--mono);font-size:.9em}
+
+
+  /* ══ CONCEPTS ══ */
+
+#concepts-embed{
+  --ground:#0a0e17; --panel:#0e1420; --panel-2:#121a29; --ink:#eef2fb;
+  --neutral:#8792a8; --neutral-dim:#59657d; --hair:#1e2740; --hair-soft:#182135;
+  --u1:#c76bff; --u1-2:#6bb8ff; --tau:#e8b84b; --tau-2:#f0855a; --ifs:#4ec9b0; --ifs-2:#63e6c3; --good:#57c98a;
+  --mono:"SF Mono",'JetBrains Mono','Fira Code',ui-monospace,Menlo,Consolas,monospace;
+  --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --disp:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;
+  --maxw:1180px;
+  display:block; background:var(--ground); color:var(--ink); font-family:var(--sans);
+  border:1px solid var(--hair); border-radius:8px; overflow:hidden; margin-top:8px;
+}
+@media (prefers-color-scheme:light){
+  #concepts-embed{ --ground:#eef1f8; --panel:#ffffff; --panel-2:#f5f7fc; --ink:#111726;
+    --neutral:#4d586e; --neutral-dim:#7b869c; --hair:#dbe1ee; --hair-soft:#e6ebf5;
+    --u1:#8a2be2; --u1-2:#1d74d6; --tau:#b9791a; --tau-2:#cf5a2c; --ifs:#178a72; --ifs-2:#0f9d80; }
+}
+:root[data-theme="dark"] #concepts-embed{ --ground:#0a0e17; --panel:#0e1420; --panel-2:#121a29; --ink:#eef2fb;
+  --neutral:#8792a8; --neutral-dim:#59657d; --hair:#1e2740; --hair-soft:#182135;
+  --u1:#c76bff; --u1-2:#6bb8ff; --tau:#e8b84b; --tau-2:#f0855a; --ifs:#4ec9b0; --ifs-2:#63e6c3; }
+:root[data-theme="light"] #concepts-embed{ --ground:#eef1f8; --panel:#ffffff; --panel-2:#f5f7fc; --ink:#111726;
+  --neutral:#4d586e; --neutral-dim:#7b869c; --hair:#dbe1ee; --hair-soft:#e6ebf5;
+  --u1:#8a2be2; --u1-2:#1d74d6; --tau:#b9791a; --tau-2:#cf5a2c; --ifs:#178a72; --ifs-2:#0f9d80; }
+
+  #concepts-embed *{box-sizing:border-box}
+  #concepts-embed html{-webkit-text-size-adjust:100%}
+  #concepts-embed body{
+    margin:0;background:var(--ground);color:var(--ink);
+    font-family:var(--sans);line-height:1.6;
+    font-feature-settings:"kern","liga";
+    -webkit-font-smoothing:antialiased;
+  }
+  #concepts-embed .wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(18px,4vw,40px)}
+
+  /* ── masthead ─────────────────────────────────────────── */
+  #concepts-embed header.mast{padding:clamp(40px,7vw,84px) 0 clamp(28px,4vw,44px);position:relative;overflow:hidden}
+  #concepts-embed .mast-grid{position:absolute;inset:0;pointer-events:none;opacity:.5}
+  #concepts-embed .eyebrow{
+    font-family:var(--mono);font-size:.72rem;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--neutral);display:flex;align-items:center;gap:.7em;flex-wrap:wrap;
+  }
+  #concepts-embed .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--ifs);box-shadow:0 0 10px var(--ifs)}
+  #concepts-embed h1.title{
+    font-family:var(--disp);font-weight:800;
+    font-size:clamp(2.3rem,6.4vw,4.6rem);line-height:.98;letter-spacing:-.03em;
+    margin:.34em 0 .28em;text-wrap:balance;
+    background:linear-gradient(102deg,var(--u1),var(--tau) 52%,var(--ifs));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  #concepts-embed .lede{max-width:60ch;color:var(--neutral);font-size:clamp(1rem,1.6vw,1.18rem)}
+  #concepts-embed .lede b{color:var(--ink);font-weight:600}
+  #concepts-embed .toc{display:flex;gap:14px;flex-wrap:wrap;margin-top:26px}
+  #concepts-embed .toc a{
+    display:flex;align-items:baseline;gap:.6em;text-decoration:none;color:var(--ink);
+    border:1px solid var(--hair);border-radius:2px;padding:9px 14px 9px 12px;
+    font-size:.9rem;transition:border-color .2s,transform .2s;background:var(--panel);
+  }
+  #concepts-embed .toc a:hover{transform:translateY(-2px)}
+  #concepts-embed .toc a .n{font-family:var(--mono);font-size:.74rem;color:var(--neutral)}
+  #concepts-embed .toc a.u1:hover{border-color:var(--u1)} #concepts-embed .toc a.tau:hover{border-color:var(--tau)} #concepts-embed .toc a.ifs:hover{border-color:var(--ifs)}
+  #concepts-embed .toc a .swatch{width:9px;height:9px;border-radius:50%}
+  #concepts-embed .toc a.u1 .swatch{background:var(--u1)} #concepts-embed .toc a.tau .swatch{background:var(--tau)} #concepts-embed .toc a.ifs .swatch{background:var(--ifs)}
+
+  /* ── concept sections ─────────────────────────────────── */
+  #concepts-embed section.concept{padding:clamp(30px,5vw,58px) 0;border-top:1px solid var(--hair-soft)}
+  #concepts-embed .c-head{display:flex;align-items:flex-start;gap:18px;margin-bottom:26px}
+  #concepts-embed .c-num{
+    font-family:var(--mono);font-size:.82rem;font-weight:600;letter-spacing:.06em;
+    color:var(--accent);border:1px solid var(--accent);border-radius:2px;
+    padding:6px 9px;white-space:nowrap;margin-top:6px;
+  }
+  #concepts-embed .c-head h2{
+    font-family:var(--disp);font-weight:800;letter-spacing:-.02em;
+    font-size:clamp(1.7rem,3.6vw,2.7rem);line-height:1.02;margin:0;text-wrap:balance;
+  }
+  #concepts-embed .c-head .sub{color:var(--neutral);font-size:.98rem;margin-top:.4em;max-width:56ch}
+  #concepts-embed .c-head .accentword{color:var(--accent)}
+
+  #concepts-embed .layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:clamp(20px,3vw,40px);align-items:start}
+  @media(max-width:820px){#concepts-embed .layout{grid-template-columns:1fr}}
+
+  #concepts-embed .stage{
+    position:relative;border:1px solid var(--hair);border-radius:3px;overflow:hidden;
+    background:
+      radial-gradient(120% 120% at 50% 0%,color-mix(in oklab,var(--accent) 8%,var(--panel)),var(--panel) 60%);
+    aspect-ratio:1/1;
+  }
+  #concepts-embed .stage canvas{width:100%;height:100%;display:block}
+  #concepts-embed .stage .cap{
+    position:absolute;left:12px;bottom:11px;right:12px;
+    font-family:var(--mono);font-size:.7rem;letter-spacing:.02em;color:var(--neutral);
+    display:flex;justify-content:space-between;gap:10px;pointer-events:none;
+  }
+  #concepts-embed .stage .cap .live{color:var(--accent)}
+  #concepts-embed .stage .cap .live::before{content:"● ";font-size:.7em}
+
+  #concepts-embed .prose{display:flex;flex-direction:column;gap:20px}
+  #concepts-embed .claim{
+    font-family:var(--disp);font-weight:650;font-size:clamp(1.05rem,1.9vw,1.32rem);
+    line-height:1.32;letter-spacing:-.01em;text-wrap:balance;
+  }
+  #concepts-embed .claim .k{color:var(--accent)}
+  #concepts-embed .prose p{margin:0;color:var(--neutral);font-size:.97rem;max-width:60ch}
+  #concepts-embed .prose p b{color:var(--ink);font-weight:600}
+  #concepts-embed code, #concepts-embed .mono{font-family:var(--mono);font-size:.86em}
+  #concepts-embed .prose code{
+    background:color-mix(in oklab,var(--accent) 12%,transparent);
+    color:var(--ink);padding:.08em .38em;border-radius:3px;
+    border:1px solid color-mix(in oklab,var(--accent) 24%,transparent);
+    white-space:nowrap;
+  }
+
+  #concepts-embed .facts{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--hair-soft);border:1px solid var(--hair-soft);border-radius:3px;overflow:hidden}
+  #concepts-embed .facts .f{background:var(--panel);padding:13px 15px}
+  #concepts-embed .facts .f .lab{font-family:var(--mono);font-size:.66rem;letter-spacing:.13em;text-transform:uppercase;color:var(--neutral-dim)}
+  #concepts-embed .facts .f .val{font-size:.95rem;margin-top:3px;color:var(--ink);font-variant-numeric:tabular-nums}
+  #concepts-embed .facts .f .val .u{color:var(--neutral);font-family:var(--mono);font-size:.82em}
+
+  #concepts-embed ul.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+  #concepts-embed ul.steps li{position:relative;padding-left:26px;color:var(--neutral);font-size:.93rem;max-width:58ch}
+  #concepts-embed ul.steps li b{color:var(--ink);font-weight:600}
+  #concepts-embed ul.steps li::before{
+    content:attr(data-i);position:absolute;left:0;top:1px;
+    font-family:var(--mono);font-size:.68rem;color:var(--accent);
+    border:1px solid color-mix(in oklab,var(--accent) 40%,var(--hair));border-radius:2px;
+    width:18px;height:18px;display:grid;place-items:center;
+  }
+
+  #concepts-embed .pill{
+    display:inline-flex;align-items:center;gap:.5em;
+    font-family:var(--mono);font-size:.72rem;letter-spacing:.04em;
+    color:var(--accent);border:1px solid color-mix(in oklab,var(--accent) 45%,transparent);
+    background:color-mix(in oklab,var(--accent) 10%,transparent);
+    padding:4px 9px;border-radius:2px;width:max-content;
+  }
+
+  #concepts-embed footer{border-top:1px solid var(--hair-soft);padding:34px 0 60px;color:var(--neutral-dim);font-size:.82rem}
+  #concepts-embed footer .fl{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:baseline}
+  #concepts-embed footer .mono{font-family:var(--mono);color:var(--neutral)}
+
+  /* accent binding per section */
+  #concepts-embed #u1{--accent:var(--u1)} #concepts-embed #tau{--accent:var(--tau)} #concepts-embed #ifs{--accent:var(--ifs)}
+  #concepts-embed :focus-visible{outline:2px solid var(--accent,var(--ifs));outline-offset:2px}
+</style>
+</head>
+<body>
+
+<button class="themebtn" id="themebtn" aria-label="Toggle colour theme">◑ theme</button>
+
+<header class="wrap">
+  <div class="kick"><span class="sq"></span>KWE · abstract holographic computer · the process</div>
+  <h1 class="title"><span>Krestianstvo - Abstract Holographic Computer</span></h1>
+
+<div id="theory-embed">
+<header class="hero">
+  <canvas id="dualcanvas" aria-hidden="true"></canvas>
+  </header>
+  </div>
+</header>
+
+
+  <section class="wrap" >
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:24px">
+            <a href="https://krestianstvo.org/kwe/" target="_blank" rel="noopener" style="display:flex;flex-direction:column;gap:6px;text-decoration:none;border:1px solid var(--hair);border-left:2px solid var(--spectral-a);border-radius:5px;background:white;padding:20px 22px">
+        <span style="font-family:var(--mono);font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--spectral-a)">Full Documentation &#8599;</span>
+        <span style="font-family:var(--serif);font-size:1.2rem;font-weight:600;color:var(--ink)">Full Documentation</span>
+      </a>
+      <a href="https://wavefront.krestianstvo.org/" target="_blank" rel="noopener" style="display:flex;flex-direction:column;gap:6px;text-decoration:none;border:1px solid var(--hair);border-left:2px solid var(--measure);border-radius:5px;background:white; padding:20px 22px">
+        <span style="font-family:var(--mono);font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--measure)">live demo &#8599;</span>
+        <span style="font-family:var(--serif);font-size:1.2rem;font-weight:600;color:var(--ink)">Live demo</span>
+      </a>
+
+      <a href="https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator" target="_blank" rel="noopener" style="display:flex;flex-direction:column;gap:6px;text-decoration:none;border:1px solid var(--hair);border-left:2px solid var(--spectral-a);border-radius:5px;background:white;padding:20px 22px">
+        <span style="font-family:var(--mono);font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--spectral-a)">source code &#8599;</span>
+        <span style="font-family:var(--serif);font-size:1.2rem;font-weight:600;color:var(--ink)">Source code</span>
+      </a>
+      
+    </div>
+  </section>
+
+<main class="wrap">
+
+    <p>A computer made of <span class="grad">physics</span>, not a picture of one.     The machine state is a <b>group-theoretic register</b>; memory is <b>interference read by correlation</b>; the processor is a wave medium the register <b>runs on itself</b>. A memory in this machine is not stored as a picture — it is <b>propagated into interference</b> and <b>propagated back out</b>. Follow one textured symbol from the moment it is dressed, through the plate it becomes, to the living soliton it is reborn as. Every stage names the function in the code that performs it. </p>
+
+
+  <!-- ═══ THE 5-STAGE PIPELINE ════════════════════════════ -->
+  <div class="pipe">
+
+    <div class="stage s1">
+      <div class="snum">STAGE 01 · W worldine</div>
+      <b>W's textured symbol</b>
+      <div class="canv"><canvas id="c1" aria-label="A dressed textured soliton — a letter or ring probe field sculpted by the medium."></canvas></div>
+      <div class="op"><b>ψ₀</b> = lensC1(op)·<b>makeProbeField</b>('ring')</div>
+      <p class="desc">This is <b>W — the driven worldline</b>, the one always-living slot that store and recall operate from (V/P1/P2 are the plate hosts). Its symbol is a probe geometry — a <b>ring of dressed dots</b> — <b>dressed</b> by the medium: ~8 bars of SPM + kernel sculpting give it its texture. The moment to remember.</p>
+      <div class="grp"><span class="gl">group · state space</span><span class="gm">ψ ∈ ℓ²((ℤ/G)²)</span><span class="gn">the Heisenberg module — Stone–von Neumann's unique irrep</span></div>
+      <div class="fn">soliton-algebra.js · makeProbeField</div>
+    </div>
+
+    <div class="stage s2">
+      <div class="snum">STAGE 02 · store</div>
+      <b>Forward leg → plate</b>
+      <div class="canv"><canvas id="c2" aria-label="The field propagated forward through the spectral leg into an interference plate."></canvas></div>
+      <div class="op">p = <b>specLeg</b>(ψ, <b>+T</b>, dt) · F⁻¹M(λ)F</div>
+      <p class="desc">The field is propagated <b>forward</b> +T steps through the kernel's own λ(k) — turning a state into an <b>interference record</b>. Banked as a plate with its descriptor.</p>
+      <div class="grp"><span class="gl">group · Weil / Sp(2,ℝ)</span><span class="gm">specLeg = free-flight ABCD (1 t; 0 1)</span><span class="gn">plate = Heisenberg–Weyl arithmetic: state × reference</span></div>
+      <div class="fn">medium-core.js · makeHologramBank.store</div>
+    </div>
+
+    <div class="stage s3">
+      <div class="snum">STAGE 03 · the bank</div>
+      <b>Aging in ω-time</b>
+      <div class="canv"><canvas id="c3" aria-label="The plate resting in the bank, its descriptor phase precessing over time."></canvas></div>
+      <div class="op">plate = { p, <b>dop</b>, pos, w0, bw, <b>k</b> }</div>
+      <p class="desc">The plate rests, but its descriptor <b>precesses</b>: ∠ ← ∠ + ω·Δτ on the plate's own worldline. The store step <code>k</code> is baked in — identical on every peer.</p>
+      <div class="grp"><span class="gl">group · U(1) ⊂ ℂ*</span><span class="gm">∠ ← ∠ + ω·Δτ</span><span class="gn">the descriptor is a group element (phase × gain); pinned = U(1)</span></div>
+      <div class="fn">bankAge · agingReadout · [RECALL-∠]</div>
+    </div>
+
+    <div class="stage s4">
+      <div class="snum">STAGE 04 · recall</div>
+      <b>Cue ⊗ bank → argmax</b>
+      <div class="canv"><canvas id="c4" aria-label="A cue correlated against every plate in the bank, selecting the best match."></canvas></div>
+      <div class="op"><b>bind</b>(cue): argmaxᵢ <b>corr</b>(cueLeg, pᵢ)</div>
+      <p class="desc">A cue is content-addressed against every plate — one <b>dual-space pass</b> (crossCorrScan). The winner is selected; shift-invariant if asked. A fragment suffices.</p>
+      <div class="grp"><span class="gl">group · Cartier / Fourier–Mukai</span><span class="gm">corr = pointwise dual product</span><span class="gn">shift = T_a = character multiplication (spectralShift)</span></div>
+      <div class="fn">bind / bindDesc · crossCorrScan</div>
+    </div>
+
+    <div class="stage s5">
+      <div class="snum">STAGE 05 · live</div>
+      <b>Backward leg → soliton</b>
+      <div class="canv"><canvas id="c5" aria-label="The plate lifted back through the reverse leg and reborn as a living, breathing soliton."></canvas></div>
+      <div class="op">ψ = <b>lift</b>(p) = <b>specLeg</b>(p, <b>−T</b>) → slot</div>
+      <p class="desc">The exact <b>backward</b> leg reconstructs the field, born into a slot as a <b>living soliton</b> — register-stepped every frame, not a frozen image. The memory resumes computing.</p>
+      <div class="grp"><span class="gl">group · Weil⁻¹ then [X,P]≠0</span><span class="gm">specLeg(−T) · then the SPM·kernel commutator</span><span class="gn">the noncommutative sector — where the dynamics live</span></div>
+      <div class="fn">lift → _recallPlateLive → _regStep1</div>
+    </div>
+  </div>
+
+  <!-- flow labels between stages -->
+  <div class="flowbar" aria-hidden="true">
+    <div class="fseg" style="--from:var(--probe);--to:var(--store)"><span class="flab">propagate +T</span></div>
+    <div class="fseg" style="--from:var(--store);--to:var(--age)"><span class="flab">bank + precess</span></div>
+    <div class="fseg" style="--from:var(--age);--to:var(--recall)"><span class="flab">cue arrives</span></div>
+    <div class="fseg" style="--from:var(--recall);--to:var(--live)"><span class="flab">propagate −T</span></div>
+    <div class="fseg"></div>
+  </div>
+
+  <!-- ═══ THE TWO RECALL PATHS ════════════════════════════ -->
+  <div class="paths">
+    <div class="path f">
+      <span class="tag">the field path</span>
+      <h4>Recall by amplitude</h4>
+      <p>The cue is a <b>field fragment</b>. It is propagated to plate space, scored by amplitude overlap <code>corr(cueLeg, pᵢ)</code>, and the winner is <b>lifted</b> back to a full reconstruction. This is the classic hologram: <em>read a fragment, recover the whole scene.</em></p>
+    </div>
+    <div class="path a">
+      <span class="tag">the 𝔸 path</span>
+      <h4>Recall by descriptor</h4>
+      <p>No field is read at all. <code>bindDesc(pos, obj)</code> scores the cue against the plates' <b>group elements</b> in closed form — the autocorrelation of the probe. Pure register arithmetic: <em>content-address the memory without touching a pixel.</em></p>
+    </div>
+  </div>
+
+  <!-- ═══ THE INNER LOOP: THE 5-OP STEP ═══════════════════ -->
+  <div class="loop">
+    <div class="loop-in">
+      <h2>Inside stage 05 — the step that keeps it alive</h2>
+      <p class="sub">Once reborn, the soliton is not displayed — it is <b>run</b>. Every drained shared step, the register engine (<code>_regStep1 = _reg.step</code>) applies the medium's evolution law to the slot. This <b>is</b> the physics; the PDE is eliminated.</p>
+      <div class="ops5">
+        <div class="op5"><div class="n">01</div><div class="role">control</div><div class="eq">ψ ← ψ + β·A</div><div class="w">the injection-lock pin — a PLL holding the slot to its attractor</div></div>
+        <div class="op5"><div class="n">02</div><div class="role">linear · gate D</div><div class="eq">ψ ← F⁻¹M(λ)F ψ</div><div class="w">exact spectral step through the live ring's symbol λ(k)</div></div>
+        <div class="op5"><div class="n">03</div><div class="role">nonlinear</div><div class="eq">ψ ← e^{iγI/(1+I/Isat)Δt}ψ</div><div class="w">saturable self-phase modulation — the soliton sustain</div></div>
+        <div class="op5"><div class="n">04</div><div class="role">closure</div><div class="eq">ψ ← ψ·min(1,√(E₀/E))</div><div class="w">energy cap — a monoid reduction + one scale</div></div>
+        <div class="op5"><div class="n">05</div><div class="role">grain</div><div class="eq">ψ ← fround(ψ)</div><div class="w">f32 quantization = the wire lattice = the contract</div></div>
+      </div>
+      <div class="loopback"><span class="arw">↻</span> <b>every shared step k</b> — pure function of (k, shared state), so every peer computes the identical bytes &nbsp;·&nbsp; <code>mu1.pure() → 0 GPU physics substeps</code></div>
+    </div>
+  </div>
+
+  <!-- ═══ REPLICATION · DETERMINISM WITHOUT A SERVER ══════ -->
+  <div class="repl">
+    <div class="repl-in">
+      <div class="rhead"><span class="rpill">no server on the field</span><h2>Every peer computes the whole field — nothing is streamed</h2></div>
+      <p class="sub">The field never travels the wire. Each peer runs the <em>entire</em> physics locally; because <code>_regStep1</code> is a pure function of <b>(shared step k, shared state)</b>, identical inputs into identical laws yield <b>identical bytes</b>. The reflector is not a server — it stamps and reflects <b>external events only</b>: verbs, the shared clock, and a one-time join snapshot.</p>
+
+      <div class="peers">
+        <div class="peer">
+          <div class="ph"><span class="pt">peer A</span><span class="hash">regH = 6f69fc50</span></div>
+          <div class="pcanv"><canvas id="pa" aria-label="Peer A computing the field locally."></canvas></div>
+          <div class="pnote">runs the whole medium · f64/f32</div>
+        </div>
+        <div class="refl">
+          <div class="rbox"><div class="rl">reflector</div><div class="rv">stamp &amp; reflect</div></div>
+          <div class="carries">carries <b>only</b>:<br>verbs · shared clock<br>· join snapshot</div>
+          <div class="xbox">never carries:<br><s>a field</s> <s>a plate</s> <s>a register</s></div>
+        </div>
+        <div class="peer">
+          <div class="ph"><span class="pt">peer B</span><span class="hash">regH = 6f69fc50</span></div>
+          <div class="pcanv"><canvas id="pb" aria-label="Peer B computing the identical field locally."></canvas></div>
+          <div class="pnote">identical bytes at identical k</div>
+        </div>
+      </div>
+
+      <div class="rgrid">
+        <div class="rcard"><h4>Inputs, not state</h4><p>A world's identity is (join snapshot + <b>stamped verb sequence</b> + deterministic laws). Joining is snapshot restoration, not a state-transfer negotiation. <code>subticks are model events</code>.</p></div>
+        <div class="rcard"><h4>The naturality law</h4><p>Every morphism is pure in <code>(k, shared state)</code>. A peer-local value (a frame end, the gaze) may be <b>stamped into a verb</b>, but never <b>read at the drain</b>. A fork is always a morphism that was not natural.</p></div>
+        <div class="rcard"><h4>The hash is the contract</h4><p><code>regH</code>, <code>eH/eV/eP1/eP2</code> per shared step are the determinism proof, run forever. Equal hashes at equal k = the peers are the same world, provably.</p></div>
+      </div>
+
+      <div class="rtie"><b>There is no state synchronization because there is no state to synchronize.</b> This is the Croquet / TeaTime lineage completed in KWE: computation is <em>pulled</em> — each peer advances its island to the stamped shared step on its own schedule — and the entire nonlinear physics lives inside that deterministic replay. Turn off the network after a join and each peer keeps computing the same world; reconnect and a new joiner rebuilds it from one snapshot + the verbs since.</div>
+    </div>
+  </div>
+
+  <!-- ═══ WHERE λ(k) COMES FROM — THE IFS AS A LIE-GROUP OPERATOR ═══ -->
+  <div class="ifs">
+    <div class="ifs-in">
+      <div class="ihead"><span class="ipill">the geometric operator</span><h2>The propagator is a fractal of group elements</h2></div>
+      <p class="sub">Every stage above runs on the kernel's symbol <code>λ(k)</code> — the linear leg (+T / −T) and op 02 of the inner loop. But <code>λ(k)</code> is not fixed: it is <b>generated by the IFS clock</b>, and that clock is a genuine <b>lensC1 compose-chain</b> — a Fresnel cascade of geometric (ℂ*) group elements composing into each other. Geometry that ticks.</p>
+
+      <div class="ichain">
+        <div class="inode">
+          <div class="il">the group element</div>
+          <div class="it">lensC1 op</div>
+          <div class="im">{ gain, phase, A=[a b;c d], t }</div>
+          <div class="id">an affine/ℂ* optical element — a lens. Its exact scalars are the register's tier-1 content.</div>
+        </div>
+        <div class="iarr">→</div>
+        <div class="inode">
+          <div class="il">self-application (Y)</div>
+          <div class="it">Fresnel cascade</div>
+          <div class="im">child = lensC1.compose(op, ρ)</div>
+          <div class="id">each pulse fires children by composing with a shrink ρ — a Lie-group compose-chain recursing on itself.</div>
+        </div>
+        <div class="iarr">→</div>
+        <div class="inode">
+          <div class="il">the symbol</div>
+          <div class="it">λ(k), rebuilt live</div>
+          <div class="im">radii → buildNativeKernel → λ(k)</div>
+          <div class="id">the composed rings' descriptor, diagonalized per mode (gate D). This is what stages 02 / 05 propagate through.</div>
+        </div>
+      </div>
+
+      <div class="itie"><b>The dispersion is a running program.</b> The fractal clock composes lensC1 elements into an ever-changing ring set, and the ring set <em>is</em> the propagator <code>λ(k)</code> — so the medium a symbol travels through is authored, live, by a recursion of geometric group elements. <code>kernelVer</code> bumps at shared steps; every peer rebuilds the identical <code>λ(k)</code> because it derives from the shared clock. (The tiers of that cascade are proper-time worldlines — see the concepts poster.)</div>
+    </div>
+  </div>
+
+  <!-- ═══ META-CIRCULAR CLARIFICATION ═════════════════════ -->
+  <div class="meta">
+    <div class="meta-in">
+      <h2>Why this is meta-circular</h2>
+      <p class="sub">The meta-circularity is the <b>live field itself</b>. The inner loop above (<code>_regStep1</code>) does not <em>model</em> the medium's evolution law — it <b>is</b> that law, running inside the register <b>every step, continuously</b>, whether or not anyone stores or recalls. The description and the thing described are the same map, evaluated forever. That is the fixed point. (That store's +T and recall's −T reuse the same <code>specLeg</code> is a consequence, not the cause: the whole medium is register-resident, so of course its holographic legs are too.)</p>
+
+      <div class="circle">
+        <div class="tier reg">
+          <div class="tn">the register (data)</div>
+          <div class="tt">The abstract description</div>
+          <div class="td">descriptors, plates, charges, the kernel symbol — algebra, closed under the machine's own operations.</div>
+        </div>
+        <div class="doors">
+          <div class="door c"><span class="a">→</span><span class="verb">wabs</span> = compile · <em>quote</em></div>
+          <div class="door m"><span class="a">←</span><span class="verb">wabs 0</span> = materialize · <em>eval</em></div>
+        </div>
+        <div class="tier field">
+          <div class="tn">the medium (running) &nbsp;·&nbsp; ↻ every step</div>
+          <div class="tt">The wave field</div>
+          <div class="td">a living soliton on the torus — but since v7 it is <code>_regStep1</code> that runs it <b>continuously</b>, so this tier and the register <b>coincide on the evolution law itself</b>. The eval is the whole life of the field, not a store/recall event.</div>
+        </div>
+      </div>
+
+      <div class="fixpt">
+        <div class="eq">(eval (quote x)) = x</div>
+        <p><b>Lisp's trick, one level lower.</b> A meta-circular evaluator defines <code>eval</code> in the language it evaluates; here <code>wabs</code> is <code>quote</code>/<code>eval</code> — reify the running field into data, or evaluate the data back into a running field — and the resumption round-trip is <b>measured</b> (the adjunction's unit is exact; the counit defect is just the f64/f32 pipeline difference between two implementations of one discrete map). The medium is not <em>modelled</em> by the register; it <em>is</em> the register, executed.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ wAtt / ψATT — THE FIELD-AS-ATTRACTOR DOOR ═══════ -->
+  <div class="watt">
+    <div class="watt-in">
+      <div class="whead"><span class="wpill">recent · ψATT / wAtt</span><h2>When the symbol leaves the operator and lives in the field</h2></div>
+      <p class="sub">Normally W's pin target is the <b>probe</b> — the operator re-asserts the injected symbol every step. The <b>field-as-attractor door</b> (<code>mu1.selfAtt</code>) migrates the symbol's identity out of the operator and <b>into the matter itself</b>: the field's own state becomes the pin. Three replicated stages, at shared bars.</p>
+
+      <div class="wsteps">
+        <div class="wstep w1">
+          <div class="wn">01 · hold</div>
+          <div class="wt">Probe-pinned W</div>
+          <div class="cvw"><canvas id="w1" aria-label="W held to its probe attractor — the operator asserts the symbol."></canvas></div>
+          <div class="wd">The operator holds the field to the probe: <code>ψ ← ψ + β·A</code>. The symbol lives in the <b>operator</b>.</div>
+        </div>
+        <div class="warr">→</div>
+        <div class="wstep w2">
+          <div class="wn">02 · digest</div>
+          <div class="wt">Unpin &amp; disperse</div>
+          <div class="cvw"><canvas id="w2" aria-label="The pin lifts for a few bars and the medium naturally disperses the injected pixels."></canvas></div>
+          <div class="wd">The pin <b>lifts</b> for <code>amp</code> bars; the medium digests the injected pixels naturally. Nothing external drives it.</div>
+        </div>
+        <div class="warr">→</div>
+        <div class="wstep w3">
+          <div class="wn">03 · adopt</div>
+          <div class="wt">Field becomes the pin</div>
+          <div class="cvw"><canvas id="w3" aria-label="The field's own settled state is adopted as the attractor, rotated by the register phase."></canvas></div>
+          <div class="wd">The field's own f32 state <b>becomes</b> the attractor: <code>_attHold</code>. Transport rolls it (<code>spectralShift</code>); the register's φ/ω rotate it.</div>
+        </div>
+      </div>
+
+      <div class="wtie"><b>The symbol is then carried by matter, not by the operator.</b> By the Gate-D law a letter's identity lives <em>above</em> k<sub>knee</sub> — its sharp strokes <em>are</em> the symbol in this medium's optics — so a field-borne symbol keeps sharp support honestly (shape ≈ 0.6 vs 0.72 probe; oscillation register-driven at ~60% of the probe-beat). Set <code>lensTau ω≠0</code> for the precession that keeps it alive. The hold rides the join snapshot — the closing piece of the V/P1/P2 recall-sync work.</div>
+    </div>
+  </div>
+
+  <!-- ═══ 1 · DOP + GLOBAL-PHASE ENCODING ═════════════════ -->
+  <div class="block tint-store b-store">
+    <div class="block-in">
+      <div class="bhead"><span class="bpill">holography · the dual plate</span><h2>A moment is written twice — as interference and as a phase</h2></div>
+      <p class="sub">A plate is not just the field image. It is a <b>dual plate</b>: the interference record <code>p</code> <em>and</em> the <b>descriptor</b> <code>dop</code> — a group element carrying the moment's <b>global phase</b> ∠, its precession ω, and its tilt k. The register encodes the memory in the U(1) phase, so recall can read elapsed time straight off the angle.</p>
+
+      <div class="split">
+        <div class="bvis">
+          <canvas id="dopv" aria-label="A plate shown as two coupled layers: the interference image and a rotating phase dial (the descriptor)."></canvas>
+          <div class="vc"><span class="a">dual plate</span><span>p · dop∠</span></div>
+        </div>
+        <div class="bcol">
+          <div class="bpoint"><div class="bn">p</div><div><h4>The field image</h4><p>The interference record from the +T leg — <b>amplitude</b> structure, bound by overlap, lifted to reconstruct the scene.</p></div></div>
+          <div class="bpoint"><div class="bn">∠</div><div><h4>The global phase (dop)</h4><p>The descriptor <code>dop = {∠, ω, k}</code> — a U(1)/ℂ* group element. The moment's identity lives in its <b>absolute phase</b>, precessing at ω on the plate's own worldline.</p></div></div>
+          <div class="bpoint"><div class="bn">=</div><div><h4>Encoding = phase, not pixels</h4><p>Two peers agree on the answer through phase <b>differences</b> — <code>regRead</code> reports <code>Δ∠(i,j)</code>. The gauge law: the pixels can drift; the encoded angle is the shared truth.</p></div></div>
+        </div>
+      </div>
+
+      <div class="btie"><b>Recall reads the aging as a phase.</b> Because the descriptor precesses, a recalled plate carries <code>Δ∠ = ω·Δτ</code> — the elapsed proper time since the store step, banked in the group element and measured on recall (<code>agingReadout</code> / <code>[RECALL-∠]</code>). Holographic storage is Heisenberg–Weyl arithmetic: a state multiplied into a reference, inverted by correlation.</div>
+    </div>
+  </div>
+
+  <!-- ═══ 2 · THE HOMOGENEOUS PLATE STACK · KURAMOTO / XY ══ -->
+  <div class="block tint-age b-age">
+    <div class="block-in">
+      <div class="bhead"><span class="bpill">the register · one type, four slots</span><h2>Four homogeneous slots — couple them and they compute</h2></div>
+      <p class="sub"><b>W, V, P1, P2</b> are one type: each is descriptor + envelope + worldline clock + leash. What differs is only <em>mode</em> — driven (W), living, parked, mirror. Wire two of them with an <b>edge</b> <code>(a,b,±κ)</code> and the register becomes a physical <b>XY / Kuramoto machine</b>.</p>
+
+      <div class="split rev">
+        <div class="bcol">
+          <div class="stack3d">
+            <div class="plate3d pw"><span class="pnm">W</span><div class="pbar"><span style="width:82%"></span></div><span class="pk">driven · sl(2) charges</span></div>
+            <div class="plate3d pv"><span class="pnm">V</span><div class="pbar"><span style="width:64%"></span></div><span class="pk">living · recalled plate</span></div>
+            <div class="plate3d pp1"><span class="pnm">P1</span><div class="pbar"><span style="width:58%"></span></div><span class="pk">living · recalled plate</span></div>
+            <div class="plate3d pp2"><span class="pnm">P2</span><div class="pbar"><span style="width:46%"></span></div><span class="pk">parked / mirror</span></div>
+          </div>
+          <div class="edges">
+            <div class="e"><span class="kap neg">κ&lt;0</span> edge(W,V,−.2) · edge(W,P1,−.2) · edge(V,P1,−.2)</div>
+            <div class="e">→ K₃ frustration → continuously-degenerate splay Δ = ±2.09</div>
+          </div>
+        </div>
+        <div class="bvis">
+          <canvas id="kurv" aria-label="Three coupled phase oscillators on a frustrated triangle, wandering along a degenerate manifold."></canvas>
+          <div class="vc"><span class="a">XY / Kuramoto</span><span>frustrated K₃</span></div>
+        </div>
+      </div>
+
+      <div class="btie"><b>An edge drives two real couplings from one κ:</b> (1) the <b>Kuramoto/XY law</b> on the register phases (<code>κ&gt;0</code> align, <code>κ&lt;0</code> anti-align) and (2) <b>attractor field-mixing</b> — each slot's pin blends κ·the neighbour's field, so the solitons visually deform toward each other. Frustrated triangles (three <code>−κ</code> edges) have no satisfying assignment, so the phases <b>wander a degenerate manifold</b> — the machine solves MAXCUT on K₃/K₄ and, being continuous, reaches angles no Ising machine can. <em>Dynamics, not states.</em></div>
+    </div>
+  </div>
+
+  <!-- ═══ 3 · OCCLUSION HOLOGRAPHY ════════════════════════ -->
+  <div class="block tint-recall b-recall">
+    <div class="block-in">
+      <div class="bhead"><span class="bpill">recall from a fragment</span><h2>Break the plate — the whole scene still comes back</h2></div>
+      <p class="sub">The defining property of a hologram: <b>a fragment recalls the whole.</b> Mask most of a cue with <code>occlude(field, {mode, frac})</code> — a half-plane, a box, random blocks, noise — and the bank still <b>argmaxes the correct plate</b> and <b>lifts the entire scene</b>. The fidelity degrades <em>gracefully</em> as the masked fraction grows.</p>
+
+      <div class="split">
+        <div class="bvis">
+          <canvas id="occv" aria-label="A symbol progressively occluded on the left, while the correct full reconstruction still emerges on the right."></canvas>
+          <div class="vc"><span class="a">occluded cue → full lift</span><span id="occlab">frac 0.4</span></div>
+        </div>
+        <div class="bcol">
+          <div class="bpoint"><div class="bn">✂</div><div><h4>Any mask, deterministically</h4><p>7 modes — half-plane, centred box, random block-mask, phase-conjugate, additive noise — seeded and replicated (the CPU/f64 twin of the GPU occluder). <code>occlude</code> never mutates its input.</p></div></div>
+          <div class="bpoint"><div class="bn">⌖</div><div><h4>Content-addressed from a fragment</h4><p>With ~half the symbol gone, <code>bind</code> still scores the correct plate highest — the correlation over the surviving support is enough to pick the winner among the bank.</p></div></div>
+          <div class="bpoint"><div class="bn">↺</div><div><h4>Graceful degradation</h4><p>The correct plate is still recalled through <code>frac 0.2 → 0.6</code> occlusion; <code>keptFraction</code> reports the honest energy surviving. Corruption ≠ loss — noise keeps more than zeroing.</p></div></div>
+        </div>
+      </div>
+
+      <div class="btie"><b>The reconstruction is the whole plate, not the fragment.</b> <code>lift</code> returns the full stored scene regardless of how little of the cue survived — because recall is correlation in the dual, and correlation reads global structure from partial support. This is what makes it a <b>memory</b> rather than a lookup table: it recognises, then it completes.</div>
+    </div>
+  </div>
+
+  <!-- ═══ DISPLAY = A SAMPLING OF THE LIVE SOLITON ════════ -->
+  <div class="disp">
+    <div class="disp-in">
+      <h2>What you see is a sampling, not the state</h2>
+      <p class="sub">Everything above happens in the <b>register</b> — f64 numbers on the f32 lattice. The pixels on screen are the last step and the least important: the GPU shader (or a CPU canvas) is a <b>rasterizer</b> that reads the register's envelope through a view and paints it. The soliton is <b>alive whether or not anyone is looking.</b></p>
+
+      <div class="dispgrid">
+        <div class="dispvis">
+          <canvas id="dsp" aria-label="A live soliton with a scanning sampling line — each frame is one peer's private sample of the shared state."></canvas>
+          <div class="cap"><span class="a">● live state</span><span>render = a sample</span></div>
+        </div>
+        <div class="dispcol">
+          <div class="dline">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-4 4 3 5-5 4 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div><h4>The view is one read primitive</h4><p>ψ_out = Op·ψ_in with a pluggable per-modality readOp — GPU pixels, an audio spectrum, a phase scalar. The <code>linOp view shader</code> does <b>colormap + pose only, zero dynamics</b>.</p></div>
+          </div>
+          <div class="dline">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 12h4l3-7 3 14 3-7h3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div><h4>The film is a capture, not the truth</h4><p>Under turbo the GPU holds a <code>film</code> texture sampled on each peer's own display tick (<code>_useFilm</code>). It is a smooth-display convenience — drop it and the render falls back to the bar-synced <code>descDisp</code>, which is the register truth.</p></div>
+          </div>
+          <div class="dline">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3" stroke-linecap="round"/></svg>
+            <div><h4>Frame ends are peer-local</h4><p>Two peers never render "the same wall moment" — each samples the shared timeline at its own frames. What is <b>invariant</b> is the <b>shared film</b>: bar-grid states, identical bytes at identical indices. <code>frameLock</code> displays only those.</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dtruth">
+        <div class="eq">mu1.pure() → 0</div>
+        <p><b>The relativity of display simultaneity.</b> The sub-bar interpolation each peer adds is its own observer sampling — honest, local, and <em>outside the determinism contract</em>. The GPU does <b>zero physics substeps</b>; it is a rasterizer and an optional oracle (the mirror). Turn the screen off and the computation is unchanged.</p>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ═══ THEORY (embedded from the mathematical structure map) ═══ -->
+  <!-- <div class="wrap" style="padding-top:clamp(30px,5vw,58px);border-top:1px solid var(--hair-soft);margin-top:clamp(28px,4vw,48px)">
+    <div class="kick" style="margin-bottom:6px"><span class="sq"></span>the theory · the mathematical structure map</div>
+  </div> -->
+
+<div id="theory-embed">
+
+  <main>
+
+  <!-- ═══ WHAT KWE IS — THE DIFFERENCE FROM CLASSICAL CROQUET ═══ -->
+  <section class="wrap">
+    <div class="sec-head"><span class="sec-num">the engine</span><h2>What the Krestianstvo Wavefront Evaluator is</h2></div>
+    <p class="sec-sub">A deterministic, reactive, multiplayer computational engine — and a <b>fundamentally different approach to distributed time</b> than the Croquet VM it descends from. Classical Croquet routes every message through a <b>central dispatcher</b>: the shared queue <em>is</em> the synchronization. KWE has no central queue. Causality propagates as a <b>wavefront</b> through a graph of locally-autonomous nodes — each owns its own queue of futures, and synchronization emerges from <b>shared logical time + deterministic local computation</b>.</p>
+
+    <!-- the two-node contrast (abstract = central VM · measure = wavefront) -->
+    <div class="tower" style="margin-top:30px">
+      <div class="rung">
+        <div class="node abs">
+          <div class="tag">classical croquet / VM</div>
+          <div class="name">A central dispatcher</div>
+          <div class="desc">One shared queue per world; every message is routed through it. The queue <em>is</em> the sync mechanism. A VM clock drives all nodes uniformly.</div>
+        </div>
+        <div class="mid"><div class="link"><span class="glyph">⇒</span>the shift</div></div>
+        <div class="node mac">
+          <div class="tag">the wavefront evaluator</div>
+          <div class="name">Locally-autonomous nodes</div>
+          <div class="desc">Each node owns its own queue of futures (<code>W.reduce</code> local <code>_Q</code>). No central routing. Sync = shared logical pulse + deterministic local settlement.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- built on Renkon / FRP / streaming DAG -->
+    <div class="node abs" style="margin-top:22px;border-left:2px solid var(--spectral-b);display:flex;gap:16px;align-items:flex-start">
+      <svg viewBox="0 0 40 44" width="40" height="44" fill="none" stroke="var(--spectral-b)" stroke-width="1.4" aria-hidden="true" style="flex:none;margin-top:4px">
+        <!-- a tiny streaming DAG: source → two behaviors → sink -->
+        <circle cx="8" cy="8" r="3.4"/><circle cx="8" cy="36" r="3.4"/>
+        <circle cx="20" cy="22" r="3.4"/>
+        <circle cx="32" cy="14" r="3.4"/><circle cx="32" cy="30" r="3.4"/>
+        <path d="M11 10l6 9M11 34l6 -9" opacity=".7"/>
+        <path d="M23 20l6 -5M23 24l6 5" opacity=".7"/>
+        <circle cx="20" cy="22" r="1.3" fill="var(--spectral-b)" stroke="none"/>
+      </svg>
+      <div>
+      <div class="tag" style="color:var(--spectral-b)">the substrate · Renkon · pure FRP</div>
+      <div class="name" style="margin-bottom:4px">A streaming dataflow graph, distributed</div>
+      <div class="desc" style="max-width:none">KWE is written in <b>Renkon</b> — a <b>functional-reactive (FRP)</b> language where a program is a <b>streaming DAG</b>: nodes are behaviors (time-varying values, <code>Behaviors.collect</code>) and event streams (<code>Events.receiver</code>), wired into a dependency graph that re-evaluates only where inputs changed. The reflector pulse enters the graph as an event; it flows along the edges and each node reacts. The Meta Program that drives the wavefront is <em>itself</em> a Renkon program running above the worlds. So the whole distributed engine is a reactive dataflow graph — no build step, no imperative loop — and the wavefront is that graph settling to a fixed point, deterministically, on every peer.</div>
+      </div>
+    </div>
+
+    <!-- the physics framing -->
+    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));margin-top:24px">
+      <div class="card" style="--card-accent:var(--spectral-b)">
+        <div class="ct"><svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--spectral-b)" stroke-width="1.5" aria-hidden="true"><circle cx="10" cy="16" r="2" fill="var(--spectral-b)" stroke="none"/><path d="M14 16a4 4 0 0 1 0 0M16 16a6 6 0 0 1 0 0"/><path d="M14 11a6 6 0 0 1 0 10" opacity=".85"/><path d="M18 8a11 11 0 0 1 0 16" opacity=".6"/><path d="M22 5a16 16 0 0 1 0 22" opacity=".35"/></svg><div><h3>Huygens' principle</h3><div class="field">wave propagation</div></div></div>
+        <p>Every node that receives a pulse becomes a <b>point source</b> — it ripples messages to its neighbours. The settled state is the new global wavefront. Causality propagates, it is not dispatched.</p>
+      </div>
+      <div class="card" style="--card-accent:var(--abstract)">
+        <div class="ct"><svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--abstract)" stroke-width="1.5" aria-hidden="true"><path d="M16 16 4 4M16 16l12-12" stroke-linecap="round"/><path d="M16 16 4 28M16 16l12 12" stroke-linecap="round" opacity=".55"/><circle cx="16" cy="16" r="2.2" fill="var(--abstract)" stroke="none"/><line x1="16" y1="2" x2="16" y2="30" opacity=".25"/></svg><div><h3>The light cone</h3><div class="field">special relativity</div></div></div>
+        <p>Logical timestamps enforce a finite speed of information: a message sent at tick 10 cannot affect tick 9. Two peers on opposite sides of the planet see the <b>same history</b>.</p>
+      </div>
+      <div class="card" style="--card-accent:var(--measure)">
+        <div class="ct"><svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--measure)" stroke-width="1.5" aria-hidden="true"><path d="M5 7l3 3M27 7l-3 3M8 16l2 1M24 16l-2 1" stroke-linecap="round" opacity=".55"/><path d="M6 26c3-3 6-3 10-3s7 0 10 3" stroke-linecap="round"/><path d="M16 6v14" stroke-linecap="round"/><circle cx="16" cy="23" r="2.4" fill="var(--measure)" stroke="none"/></svg><div><h3>Thermal equilibrium</h3><div class="field">2nd law · the drain</div></div></div>
+        <p>The drain phase loops until every queue holds only future-dated entries — the system reaches its <b>lowest-energy stable state</b>. The <code>stable</code> flag is equilibrium reached.</p>
+      </div>
+      <div class="card" style="--card-accent:#4ec9b0">
+        <div class="ct"><svg class="ico" viewBox="0 0 32 32" fill="none" stroke="#4ec9b0" stroke-width="1.5" aria-hidden="true"><circle cx="16" cy="16" r="11" opacity=".45"/><circle cx="16" cy="11" r="5"/><circle cx="11" cy="21" r="3" opacity=".8"/><circle cx="21" cy="21" r="3" opacity=".8"/><circle cx="16" cy="16" r="1.4" fill="#4ec9b0" stroke="none"/></svg><div><h3>Fractal-time generator</h3><div class="field">makeIfsClock · robust sub-ticks</div></div></div>
+        <p>The robust form of KWE's sub-ticks: a deterministic <b>IFS cascade</b> generating beats at every scale at once — time as a self-similar landscape, not a linear axis. Multi-resolution ticks coexist on one continuous axis, reseeded per cycle so every peer follows the identical branch.</p>
+      </div>
+    </div>
+
+    <!-- the law -->
+    <div class="feature" style="margin-top:26px">
+      <div class="fg">
+        <div class="txt">
+          <h3>The law of the evaluator</h3>
+          <p>If the whole engine were one formula, it is a physical settling process — not a list of instructions executed in order.</p>
+          <p><b>S</b> = state of the universe · <b>Pulse</b> = energy injected by the reflector · <b>Drain</b> = work performed by the nodes · <b>Stability</b> = the lowest-energy state, where the UI is rendered.</p>
+          <span class="kbadge">100 browser tabs · same laws + same snapshot → same state</span>
+        </div>
+        <div class="pipeline" aria-label="The evaluator's settling law">
+          <div class="op-line hl"><span class="step">S(t+1) =</span>Stability(</div>
+          <div class="op-line"><span class="step"></span>&nbsp;&nbsp;Drain(</div>
+          <div class="op-line"><span class="step"></span>&nbsp;&nbsp;&nbsp;&nbsp;Pulse(t) + S(t)<span class="note">reflector + prior state</span></div>
+          <div class="op-line"><span class="step"></span>&nbsp;&nbsp;)<span class="note">nodes settle to equilibrium</span></div>
+          <div class="op-line hl"><span class="step"></span>)<span class="note">the rendered, stable state</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="reach" style="margin-top:26px">
+      <svg class="b" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div>
+        <h4>The central insight of the shift</h4>
+        <p>In the VM architecture the queue <b>was</b> the synchronization mechanism. In the Wavefront Evaluator the queue is a <em>local implementation detail</em> of each node — synchronization is achieved instead through <b>shared logical time and deterministic local computation</b>. There is no <code>Date.now()</code> in the model: <code>wallTime = logicalTime</code>, a pure tick count, so two peers on different machines produce identical state regardless of real-time jitter. On top of this sits the <b>fractal IFS clock</b> — time as a self-similar landscape, not a linear axis — the substrate the whole holographic computer above is clocked by.</p>
+      </div>
+    </div>
+
+    <!-- the complex field ℂ — the arithmetic everything runs in -->
+    <div class="node abs" style="margin-top:22px;border-left:2px solid var(--spectral-a);display:flex;gap:16px;align-items:flex-start">
+      <svg viewBox="0 0 44 44" width="44" height="44" fill="none" stroke="var(--spectral-a)" stroke-width="1.4" aria-hidden="true" style="flex:none;margin-top:2px">
+        <!-- the complex plane: axes + a phasor e^{iθ} on the unit circle -->
+        <line x1="22" y1="4" x2="22" y2="40" opacity=".35"/>
+        <line x1="4" y1="22" x2="40" y2="22" opacity=".35"/>
+        <circle cx="22" cy="22" r="14" opacity=".5"/>
+        <line x1="22" y1="22" x2="32.5" y2="12.5" stroke-linecap="round"/>
+        <circle cx="32.5" cy="12.5" r="2.4" fill="var(--spectral-a)" stroke="none"/>
+        <path d="M30 22a8 8 0 0 0-2.3-5.6" opacity=".7"/>
+      </svg>
+      <div>
+      <div class="tag" style="color:var(--spectral-a)">the number field · ℂ</div>
+      <div class="name" style="margin-bottom:4px">Everything is computed over the complex numbers</div>
+      <div class="desc" style="max-width:none">The state is a <b>complex field</b> ψ ∈ ℓ²((ℤ/G)², <b>ℂ</b>) — every cell carries an amplitude <em>and</em> a phase, written <code>e^{iθ}</code>. That is not decoration: the whole calculus runs in ℂ. A soliton's memory <em>is</em> its <b>global phase</b> ∠ψ (the U(1) register); the descriptors and the IFS lenses are <b>ℂ* group elements</b> (<code>lensC1</code>, phase × gain); the spectral step, the FFT, <code>spectralShift</code>, and the ±T holographic legs are all <b>complex multiplication</b> in the dual. Interference — the heart of holography — is only meaningful because amplitudes are complex and can <b>add or cancel by phase</b>. Restricting the gain to 1 gives the unitary <b>U(1)</b> sector; letting it vary opens the full <b>ℂ*</b>. The real numbers you see on screen are magnitudes; the computation lives one dimension up, in the complex plane above.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ THE DUALITY TOWER ═══════════════════════════════ -->
+  <section class="wrap" id="tower">
+    <div class="sec-head"><span class="sec-num">§3.5 · §6.3</span><h2>The tower of groups behind the physics</h2></div>
+    <p class="sec-sub">A ladder of three groups, each <b>represented</b> in the machine — and each with its representation's honest reach <em>measured</em>. Left: the abstract group. Right: the operator that realizes it. The rungs are how they connect.</p>
+
+    <div class="tower">
+      <div class="rung">
+        <div class="node abs"><div class="tag">group</div><div class="name">Heisenberg–Weyl <span class="m">over (ℤ/G)²×(ℤ/G)²̂</span></div><div class="desc">Translations <code>T_a</code> and modulations <code>M_b</code>; central phase <code>T_a M_b = e^{2πi a·b/G} M_b T_a</code>.</div></div>
+        <div class="mid"><div class="link"><span class="glyph">≅</span>Stone–von<br>Neumann</div></div>
+        <div class="node mac"><div class="tag">operator</div><div class="name">One field buffer <span class="m">ℓ²((ℤ/G)²)</span></div><div class="desc"><code>spectralShift</code> = T_a; lens <code>kx,ky</code> &amp; <code>attPhase</code> = M_b. A plate is a group-orbit point; recall inverts the element.</div></div>
+      </div>
+
+      <div class="rung">
+        <div class="node abs"><div class="tag">group</div><div class="name">Symplectic Sp(2,ℝ) <span class="m">↑ Mp(2), Weil rep</span></div><div class="desc">Acts on Heisenberg by automorphisms; the double cover acts projectively on states (finite Weil setting).</div></div>
+        <div class="mid"><div class="link"><span class="glyph">↻</span>ABCD /<br>Möbius</div></div>
+        <div class="node mac"><div class="tag">operator</div><div class="name">The linear optics</div><div class="desc">Free flight, thin-lens chirp, squeeze, and <b>the FFT itself</b> as the π/2 rotation. Width law <code>w ← w + iD̄·dt</code> = the Möbius action on the half-plane.</div></div>
+      </div>
+
+      <div class="rung">
+        <div class="node abs"><div class="tag">algebra / geometry</div><div class="name">sl(2,ℝ) observables · theta structures</div><div class="desc">Quadratic moments close the algebra; Gaussians = the orbit of vacuum; the width <code>w</code> is a modulus on Siegel space.</div></div>
+        <div class="mid"><div class="link"><span class="glyph">∮</span>coadjoint<br>orbit</div></div>
+        <div class="node mac"><div class="tag">operator</div><div class="name">The q register <span class="m">(σ, b) — two floats</span></div><div class="desc">Virial <code>V̈ = 4DH</code>; Casimir <code>I = V̈V − ½V̇²</code> = the wear meter; gate C's width law is a <b>path in the moduli of finite theta functions</b>.</div></div>
+      </div>
+
+      <div class="rung">
+        <div class="node abs"><div class="tag">arithmetic subgroup</div><div class="name">Modular group PSL(2,ℤ) <span class="m">= ⟨S, T⟩</span></div><div class="desc">The discrete choice inside the continuum: <code>S: w↦−1/w</code>, <code>T: w↦w+1</code>.</div></div>
+        <div class="mid"><div class="link"><span class="glyph">=</span>exact by<br>choice</div></div>
+        <div class="node mac"><div class="tag">operator</div><div class="name">S = the FFT · T = a unit chirp</div><div class="desc">Both realized with <b>zero approximation error</b>. The continuous group is the physics; the arithmetic subgroup is the computation.</div></div>
+      </div>
+    </div>
+
+    <div class="reach">
+      <svg class="b" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v5M12 17.5v.5" stroke-linecap="round"/></svg>
+      <div>
+        <h4>The representation declares where it ends</h4>
+        <p>The Weil representation is exact only for <b>quadratic</b> symbols — the lattice symbol <code>λ(k)</code> is not quadratic, and the machine does not pretend it is. Exact linear evolution runs on the full character theory (abelian, f32-floor exact); the metaplectic laws govern the <em>moment observables</em> at the few-percent level for smooth states, and are <b>measured to fail</b> in named ways beyond — the quadratic packet slice degrading <code>9→36%</code> with probe bandwidth. The group theory earns its place by naming its own boundary.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ THE SECTORS ═════════════════════════════════════ -->
+  <section class="wrap" id="sectors">
+    <div class="sec-head"><span class="sec-num">§3 · §5 · §6</span><h2>Six identifications, each with its number</h2></div>
+    <p class="sec-sub">The abstract nature of the machine, sector by sector — <b>C*-algebra</b>, the spectral dual, sheaves, the complex torus, the descriptor, and the elimination of the PDE. None is analogy: each names a function in <code>medium-core.js</code> and a pinned regression.</p>
+
+    <div class="grid">
+
+      <!-- C* / Gelfand -->
+      <div class="card" style="--card-accent:var(--abstract)">
+        <div class="ct">
+          <svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--abstract)" stroke-width="1.5" aria-hidden="true"><circle cx="16" cy="16" r="11"/><path d="M6 16h20M16 6a15 8 0 0 0 0 20M16 6a15 8 0 0 1 0 20" opacity=".6"/></svg>
+          <div><h3>C*-algebra &amp; Gelfand duality</h3><div class="field">commutative sector · §3.1</div></div>
+        </div>
+        <p>The linear operator <code>L̂</code> (lap9 + fractal rings) is a <b>torus convolution</b> — an element of the commutative C*-algebra of translations on (ℤ/G)². Its character space <em>is</em> the k-grid; the Gelfand transform evaluated at each character is the closed-form symbol.</p>
+        <div class="ident"><span class="lhs">Gelfand transform of L̂</span><span class="op">≡</span><span class="rhs">λ(k)</span></div>
+        <div class="measure"><span class="lab">gate D</span><span class="num">3.6e-7</span><span class="what">max|Δ| vs GPU (f32 floor)</span></div>
+      </div>
+
+      <!-- Lie / metaplectic -->
+      <div class="card" style="--card-accent:var(--abstract-2)">
+        <div class="ct">
+          <svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--abstract-2)" stroke-width="1.5" aria-hidden="true"><path d="M16 4c-7 4-7 20 0 24 7-4 7-20 0-24Z"/><path d="M4 16c4-7 20-7 24 0-4 7-20 7-24 0Z" opacity=".55"/></svg>
+          <div><h3>Lie groups &amp; the sl(2) ledger</h3><div class="field">noncommutative sector · §3.5</div></div>
+        </div>
+        <p>SPM is diagonal in <b>position</b>, the kernel in <b>momentum</b>; their <b>commutator is the dynamics</b> — solitons and collapse are the two maximal commutative subalgebras failing to commute. The Casimir moves on a coadjoint orbit; its flow <code>İ</code> prices the non-Hamiltonian work.</p>
+        <div class="ident"><span class="lhs">V̈ = 4DH</span><span class="op">·</span><span class="rhs">I = V̈V − ½V̇²</span></div>
+        <div class="measure"><span class="lab">gates E·F</span><span class="num">0.1%</span><span class="what">waist forecast, of V₀ (live kernel)</span></div>
+      </div>
+
+      <!-- Spectral dual / FFT / Fourier–Mukai -->
+      <div class="card" style="--card-accent:var(--spectral-b)">
+        <div class="ct">
+          <svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--spectral-b)" stroke-width="1.5" aria-hidden="true"><path d="M4 22c4 0 4-12 8-12s4 12 8 12 4-12 8-12" opacity=".9"/><circle cx="6" cy="10" r="1.6" fill="var(--spectral-b)" stroke="none"/><circle cx="16" cy="22" r="1.6" fill="var(--spectral-b)" stroke="none"/><circle cx="26" cy="10" r="1.6" fill="var(--spectral-b)" stroke="none"/></svg>
+          <div><h3>The spectral dual · FFT</h3><div class="field">Cartier duality · Fourier–Mukai · §6.2</div></div>
+        </div>
+        <p>(ℤ/G)² and its character group are <b>Cartier-dual</b> finite group schemes; the FFT is the finite <b>Fourier–Mukai transform</b> between them. Functoriality is engineering: convolution ↦ multiplication, translation ↦ character product, correlation ↦ the shift-invariant read.</p>
+        <div class="ident"><span class="lhs">crossCorrScan</span><span class="op">=</span><span class="rhs">one dual pass, all N offsets</span></div>
+        <div class="measure"><span class="lab">gate B</span><span class="num">≤0.2%</span><span class="what">kernel symbol drift, all tested k</span></div>
+      </div>
+
+      <!-- Sheaves / descent -->
+      <div class="card" style="--card-accent:var(--measure)">
+        <div class="ct">
+          <svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--measure)" stroke-width="1.5" aria-hidden="true"><rect x="4" y="4" width="11" height="11" rx="1"/><rect x="17" y="4" width="11" height="11" rx="1" opacity=".7"/><rect x="4" y="17" width="11" height="11" rx="1" opacity=".7"/><rect x="17" y="17" width="11" height="11" rx="1" opacity=".45"/></svg>
+          <div><h3>Sheaves &amp; local-to-global</h3><div class="field">the witness presheaf · §5</div></div>
+        </div>
+        <p>Torus regions form a site; regional witnesses form a <b>presheaf</b> (restriction = shrinking a region). The cover cocycle is <b>bit-for-bit exact</b> — patches + 3·reach halos + fixed-order gluing reproduce the whole-torus step. Čech descent as an engineering budget; two tabs shard one physics with no new wire.</p>
+        <div class="ident"><span class="lhs">glue(patches ⊕ halos)</span><span class="op">≡</span><span class="rhs">whole-torus step</span></div>
+        <div class="measure"><span class="lab">coverTest</span><span class="num">max|Δ| = 0</span><span class="what">the cover cocycle, exactly</span></div>
+      </div>
+
+      <!-- Complex torus / theta -->
+      <div class="card" style="--card-accent:var(--spectral-a)">
+        <div class="ct">
+          <svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--spectral-a)" stroke-width="1.5" aria-hidden="true"><ellipse cx="16" cy="16" rx="12" ry="6"/><path d="M9 15c2 3 12 3 14 0" opacity=".7"/><path d="M11 17c1.5-2 8.5-2 10 0" opacity=".7"/></svg>
+          <div><h3>Complex torus &amp; theta structures</h3><div class="field">algebraic geometry · §6.3</div></div>
+        </div>
+        <p>The state buffer <b>is</b> the finite Heisenberg module — classically, sections of an ample line bundle on an abelian variety. A periodic Gaussian on the finite torus is a <b>finite theta function</b>; its width <code>w</code> is the modulus on genus-1 Siegel space. Gate C's evolution is verbatim a path in the moduli of theta structures.</p>
+        <div class="ident"><span class="lhs">periodic Gaussian</span><span class="op">=</span><span class="rhs">finite θ(w)</span></div>
+        <div class="measure"><span class="lab">gate C</span><span class="num">quantitative</span><span class="what">spread, collapse onset, filament</span></div>
+      </div>
+
+      <!-- Descriptor / observer algebra U(1)⊂ℂ* -->
+      <div class="card" style="--card-accent:var(--measure-2)">
+        <div class="ct">
+          <svg class="ico" viewBox="0 0 32 32" fill="none" stroke="var(--measure-2)" stroke-width="1.5" aria-hidden="true"><circle cx="16" cy="16" r="11"/><path d="M16 16l7-4" stroke-linecap="round"/><circle cx="16" cy="16" r="2" fill="var(--measure-2)" stroke="none"/></svg>
+          <div><h3>The descriptor · U(1) ⊂ ℂ*</h3><div class="field">observer algebra · §3.3</div></div>
+        </div>
+        <p>Each slot's descriptor is a <b>ℂ* group element</b> (phase × gain); pinned discipline restricts to <b>U(1)</b> (gain ≡ 1). Unpinning literally passes U(1) → ℂ* — amplitude becomes dynamical. Measurements are U(1)-invariant states: <code>ampCorr = |⟨φ,ψ⟩|/‖φ‖‖ψ‖</code>, a normalized positive functional.</p>
+        <div class="ident"><span class="lhs">recall aging</span><span class="op">→</span><span class="rhs">Δ∠ = ω·Δτ</span></div>
+        <div class="measure"><span class="lab">U(1) gate</span><span class="num">algDefect ≡ 0</span><span class="what">the abelian contract, live</span></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ═══ PDE ELIMINATION ═════════════════════════════════ -->
+  <section class="wrap" id="pde">
+    <div class="sec-head"><span class="sec-num">§1.4 · §7.1</span><h2>The PDE, eliminated</h2></div>
+    <p class="sec-sub">The register does not <em>describe</em> the medium — since v7 it <b>runs</b> it. Every evolution step executes inside the algebraic register in f64 CPU arithmetic; the GPU performs <b>zero</b> physics steps. Lisp's meta-circular <code>eval</code>, performed on physics instead of syntax.</p>
+
+    <div class="feature">
+      <div class="fg">
+        <div class="txt">
+          <h3>The model of the medium <em>is</em> the medium</h3>
+          <p>A meta-circular evaluator defines <code>eval</code> in the language it evaluates. U1 closes the same circle one level lower: the register executes the evolution law of the medium that produced it, using operators that are <b>themselves register content</b> — the kernel descriptor, the replicated β, the slot's E₀.</p>
+          <p>There is no PDE solver stepping a field on a grid outside the model. The five-line map to the right <b>is</b> the physics, register-resident on the f32 lattice that is simultaneously the wire format and the original engine's own grain. <code>wabs</code> is <code>quote</code>/<code>eval</code> — reify the running field into data, or evaluate data back into a field — and the resumption law <code>(eval (quote x)) = x</code> is measured.</p>
+          <span class="kbadge">mu1.pure() → 0 GPU substeps · proven by counting</span>
+        </div>
+        <div class="pipeline" aria-label="The register engine: one evolution step, five operators">
+          <div class="op-line hl"><span class="step">ψ ←</span>ψ + β·A<span class="note">pin (injection lock)</span></div>
+          <div class="op-arrow">↓</div>
+          <div class="op-line hl"><span class="step">ψ ←</span>F⁻¹ M(λ) F ψ<span class="note">exact linear · gate D</span></div>
+          <div class="op-arrow">↓</div>
+          <div class="op-line"><span class="step">ψ ←</span>e^{iγI/(1+I/Isat)Δt}ψ<span class="note">saturable SPM</span></div>
+          <div class="op-arrow">↓</div>
+          <div class="op-line"><span class="step">ψ ←</span>ψ·min(1,√(E₀/E))<span class="note">energy cap</span></div>
+          <div class="op-arrow">↓</div>
+          <div class="op-line"><span class="step">ψ ←</span>fround(ψ)<span class="note">f32 grain = wire lattice</span></div>
+        </div>
+      </div>
+    </div>
+
+   
+  </section>
+
+  <!-- ═══ CLOSING ═════════════════════════════════════════ -->
+  
+  <section class="wrap">
+      <div class="sec-head" style="margin-top:46px"><span class="sec-num">§2.2 · §7.5</span><h2 style="font-size:clamp(1.35rem,2.8vw,1.9rem)">The two clocks that make it KWE</h2></div>
+    <p class="impl-note">What distinguishes this from a generic solver is <b>where time comes from</b>. Two clock subsystems, both native to KWE, both replicated, both feeding the register: a <b>proper-time kernel</b> that ages each worldline on its own beat, and a <b>fractal IFS clock</b> that generates the propagator the field runs through.</p>
+
+    <div class="clocks">
+
+      <!-- proper time -->
+      <div class="clockcard" style="--cc:var(--warn)">
+        <div class="cch">
+          <svg class="svgico" viewBox="0 0 32 32" fill="none" stroke="var(--warn)" stroke-width="1.6" aria-hidden="true"><circle cx="16" cy="16" r="12"/><path d="M16 8v8l6 3" stroke-linecap="round"/></svg>
+          <div><h3>Proper time  τ<sub>i</sub></h3><div class="cfile">kwe-tau.js · globalThis.KWETau</div></div>
+        </div>
+        <p>A physics-free platform primitive — the τ arc kernelized. The machine holds <code>_tauK = KWETau(…)</code>; the medium supplies <em>beats</em>, the kernel never detects them. It owns the worldline clocks, the stamped-input queues, and the epoch algebra.</p>
+        <ul>
+          <li><b>registerClock / beat / advance</b> — per-slot τ; W, V, P1, P2 age independently (one aged 30 τ-units while another aged &lt;1, byte-identically)</li>
+          <li><b>makeQueue</b> — gate-3″ dispatch: <code>&gt;=</code> fresh · τ-paced backlog · <b>due-count</b> valve (never queue length — that is peer-local)</li>
+          <li><b>reanchor</b> — epoch flip re-stamps every future entry; <b>tempo</b> = the global lapse (the convoy law)</li>
+          <li><b>futureTau</b> — the W-node fires on its own <code>__clock</code>, not wall time</li>
+        </ul>
+        <div class="tie">feeds the register: <b>Δφ = ω·(τ_i − τ_j)</b> — the U(1) register reads elapsed proper time as an interference phase (the twin paradox, measured).</div>
+      </div>
+
+      <!-- IFS fractal clock -->
+      <div class="clockcard" style="--cc:var(--ifs, #4ec9b0)">
+        <div class="cch">
+          <svg class="svgico" viewBox="0 0 32 32" fill="none" stroke="#4ec9b0" stroke-width="1.6" aria-hidden="true"><circle cx="16" cy="16" r="12" opacity=".5"/><circle cx="16" cy="10" r="5"/><circle cx="11" cy="20" r="3.5" opacity=".8"/><circle cx="21" cy="20" r="3.5" opacity=".8"/></svg>
+          <div><h3>Native IFS clock</h3><div class="cfile">makeIFSClock · makeRingProvider · the reducer</div></div>
+        </div>
+        <p>Geometry that ticks: a <b>Fresnel cascade</b> — a genuine lensC1 compose-chain. Each firing deposits a radius; <code>buildNativeKernel</code> folds the radii into weighted ring bands — the propagator's kernel, rebuilt live as the clock runs.</p>
+        <ul>
+          <li><b>the reducer runs it</b> — <code>cachedRadii</code> → <code>kernelVer</code> bumps; swaps land at shared steps via <code>kernelQueue</code></li>
+          <li><b>λ(k)</b> — <code>kernelLambdaGrid</code>, cached per <code>kernelVer</code>; the gate-D diagonalization the spectral step reads</li>
+          <li><b>tiers = worldlines</b> — each tier clocked at its own τ-rate <code>T_d</code>; the exact scale-sum <code>λ = Σ_d λ_tier − (n−1)·lap9</code></li>
+          <li><b>matter-paced</b> — sibling launches scheduled by <code>futureTau</code>: a clock cannot wait on the clock it defines</li>
+        </ul>
+        <div class="tie">feeds the register: <b>the medium's dispersion is a running program</b> — the ring is a per-step physics input, byte-replicated because it derives from the shared clock.</div>
+      </div>
+    </div>
+
+    <div class="reach" style="margin-top:24px">
+      <svg class="b" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 12h16M4 12l5-5M4 12l5 5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div>
+        <h4>The two clocks meet in the tier decomposition</h4>
+        <p>The IFS clock hands the kernel already split into scale tiers, and each tier <b>evolves for its own number of steps</b> <code>T_d</code> — the tiers are <em>proper-time worldlines of the kernel itself</em>. The §7.5 τ-per-slot machinery, applied to the propagator: the mismatch "radius ≠ frequency" dissolves because the tiers separate not in space or frequency but in <b>proper time</b>. <em>Time separates what space cannot</em> — the machine's deepest principle, showing up in its own clock.</p>
+      </div>
+    </div>
+  
+  </section>
+
+
+<div id="concepts-embed">
+<header class="mast">
+  <canvas class="mast-grid" id="mastgrid" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <div class="eyebrow"><span class="dot"></span>Krestianstvo Wavefront Evaluator&nbsp;·&nbsp;deterministic distributed physics</div>
+    <h1 class="title">Three ways the<br>medium keeps time</h1>
+    <p class="lede">KWE runs a soliton field across peers with no shared server of truth — every browser re-derives the same physics from the same shared step. These three mechanisms are how it stays coherent: a <b>phase register</b> that stores memory as an angle, a <b>proper-time clock</b> per worldline, and a <b>fractal generator</b> that produces the propagator itself.</p>
+    <nav class="toc">
+      <a class="u1" href="#u1"><span class="swatch"></span><span class="n">01</span>U(1) register &amp; abstract holography</a>
+      <a class="tau" href="#tau"><span class="swatch"></span><span class="n">02</span>Proper time τ<sub>i</sub></a>
+      <a class="ifs" href="#ifs"><span class="swatch"></span><span class="n">03</span>Fractal-time IFS generator</a>
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+
+  <!-- ═══ 01  U(1) REGISTER ═══════════════════════════════ -->
+  <section class="concept" id="u1">
+    <div class="c-head">
+      <div class="c-num">01</div>
+      <div>
+        <h2>The <span class="accentword">U(1) register</span> &amp; abstract holography</h2>
+        <p class="sub">A soliton's global phase is a memory cell. Store a moment as an interference plate; recall it by lifting the plate back through the medium — the answer lives in phase <em>differences</em>.</p>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="stage">
+        <canvas id="cv-u1" aria-label="Animated U(1) phase register: four soliton slots each holding a phase angle on a hue wheel, with a plate storing and lifting."></canvas>
+        <div class="cap"><span class="live">register live</span><span>∠ψ = arg&#8202;⟨att,&#8202;ψ⟩</span></div>
+      </div>
+
+      <div class="prose">
+        <div class="claim">The field is the <span class="k">processor</span>, not the RAM. Memory lives operator-side, written as a <span class="k">phase</span> the injection-lock holds.</div>
+        <p>Each slot — <b>W, V, P1, P2</b> — is a pinned soliton. Its stored bit is its angle on the wheel: <code>∠ψ</code>, read as the argument of the field against its attractor. Writing is an <b>injection lock</b> (a PLL): <code>ψ ← ψ + β·att</code>, then a cap. The lock is bistable with a finite capture range — a strong off-phase probe can rewrite it, so it can also forget.</p>
+        <p><b>Holography.</b> A <b>store</b> takes the field forward through the spectral leg to an interference <b>plate</b>; a <b>recall</b> lifts the exact backward leg to reconstruct it — content-addressable from a fragment. The plate is the transferable object; the register moves it in ω-time.</p>
+        <ul class="steps">
+          <li data-i="W"><b>store</b> — field → plate (forward spectral leg), dual: field + descriptor ∠</li>
+          <li data-i="R"><b>recall</b> — cue ⊗ bank → argmax plate → lift −T → a living soliton</li>
+          <li data-i="ψ"><b>ψATT</b> — a captured field re-enters as its own pin (the symbol carried in the field itself)</li>
+        </ul>
+        <div class="facts">
+          <div class="f"><div class="lab">register file</div><div class="val">4 slots <span class="u">· ~5 bits ∠</span></div></div>
+          <div class="f"><div class="lab">write fidelity</div><div class="val">unity <span class="u">· lock-stiff β</span></div></div>
+          <div class="f"><div class="lab">recall</div><div class="val">content-addressed</div></div>
+          <div class="f"><div class="lab">gauge law</div><div class="val">answer = Δ∠ <span class="u">· not absolute</span></div></div>
+        </div>
+        <span class="pill">pin = optical injection lock · h·sin(θ−θ₀) torque</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 02  PROPER TIME ═════════════════════════════════ -->
+  <section class="concept" id="tau">
+    <div class="c-head">
+      <div class="c-num">02</div>
+      <div>
+        <h2><span class="accentword">Proper time</span> τ<sub>i</sub> — a clock per worldline</h2>
+        <p class="sub">Each slot ages on its own matter time, not on wall-clock. A driven soliton ticks; a parked one stands still — dilation you can read as an interference phase.</p>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="prose">
+        <div class="claim">Every drain gate is a pure function of <span class="k">(k, shared state)</span> — so worldlines that age differently still stay <span class="k">byte-identical</span> across peers.</div>
+        <p>A worldline's clock advances <code>dτ_i = dk_i / L_i</code> on that slot's <b>own</b> beat counter, where beats come from the medium's own rhythm — never a scheduler. Global τ is only a telemetry foliation; it drives nothing physical.</p>
+        <p><b>The twin paradox, measured.</b> Drive V out-and-back at <code>ω=0.1</code>: it aged <b>19 beats</b> while stay-home W aged <b>exactly 0</b>. The two legs matched to 1% and <em>added</em> — the path closed, the clock did not retrace. Elapsed proper time read straight off the register as <code>Δφ = ω·(τ_V − τ_W)</code>.</p>
+        <p><b>The law that keeps it deterministic:</b> a drain gate may count <em>due</em> entries but never queue <em>length</em> — length depends on pull-timing, which is peer-local. That single distinction closed a family of join-forks.</p>
+        <div class="facts">
+          <div class="f"><div class="lab">stay-home W</div><div class="val">0 <span class="u">beats aged</span></div></div>
+          <div class="f"><div class="lab">traveller V</div><div class="val">19 <span class="u">beats aged</span></div></div>
+          <div class="f"><div class="lab">two legs</div><div class="val">matched 1% <span class="u">· same sign</span></div></div>
+          <div class="f"><div class="lab">comparator slope</div><div class="val">= ω <span class="u">· 0.1% grade</span></div></div>
+        </div>
+        <span class="pill">register = interferometric clock comparator</span>
+      </div>
+
+      <div class="stage">
+        <canvas id="cv-tau" aria-label="Two worldline clocks: a driven traveller ticking fast and a parked stay-home clock standing still, with a phase difference accumulating."></canvas>
+        <div class="cap"><span class="live">τ accumulating</span><span>dτ = dk / L</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 03  FRACTAL TIME ════════════════════════════════ -->
+  <section class="concept" id="ifs">
+    <div class="c-head">
+      <div class="c-num">03</div>
+      <div>
+        <h2>The <span class="accentword">fractal-time</span> IFS generator</h2>
+        <p class="sub">A Fresnel cascade — geometry that ticks. Each pulse fires siblings that fire siblings; the radii they leave become the ring kernel the field actually propagates through.</p>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="stage">
+        <canvas id="cv-ifs" aria-label="A Fresnel cascade of expanding rings firing recursively, condensing into a weighted ring kernel that breathes as the version advances."></canvas>
+        <div class="cap"><span class="live">cascade firing</span><span id="ifs-ver">kernelVer 0</span></div>
+      </div>
+
+      <div class="prose">
+        <div class="claim">The clock's mechanism <span class="k">cannot wait</span> on the clock it defines — so cascade delays are the genome's content <span class="k">in time</span>, authored at coordinate steps forever.</div>
+        <p>An IFS <b>Fresnel cascade</b> is a genuine compose-chain of lenses. Each firing deposits a <b>radius</b>; the flat list of radii (repeats encode weight) is folded by <code>buildNativeKernel</code> into a small set of weighted <b>ring bands</b> — the propagator's kernel.</p>
+        <p><b>The ring breathes.</b> As the cascade runs, its radii change and <code>kernelVer</code> bumps; every peer, stepping from the same shared clock, rebuilds an <em>identical</em> ring. That version keys the exact symbol <code>λ(k)</code> — the diagonalized propagator the spectral step uses.</p>
+        <p><b>Matter-paced.</b> Sibling launches are scheduled in <b>proper time</b> — a cascade fires its next generation after "the first generation has lived," so the fractal clock's cadence is driven by the field it clocks. Its liveness is proven by its own authored roots.</p>
+        <div class="facts">
+          <div class="f"><div class="lab">source</div><div class="val">Fresnel cascade</div></div>
+          <div class="f"><div class="lab">product</div><div class="val">weighted rings <span class="u">· λ(k)</span></div></div>
+          <div class="f"><div class="lab">determinism</div><div class="val">shared-step <span class="u">· byte-exact</span></div></div>
+          <div class="f"><div class="lab">cadence</div><div class="val">matter-paced <span class="u">· τ-stamped</span></div></div>
+        </div>
+        <span class="pill">reflector/future → reflector/beat at every layer</span>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+
+
+
+
+  </main>
+</div>
+
+</main>
+
+<footer class="wrap">
+  <div class="fl">
+    <span class="mono">Krestianstvo.org | 2026</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const root = document.documentElement, tb = document.getElementById('themebtn');
+  tb.addEventListener('click', () => {
+    const cur = root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
+    root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+  });
+  const css = (v) => getComputedStyle(root).getPropertyValue(v).trim();
+
+  // shared field grid (a small toy field so the canvases show the SAME symbol at every stage)
+  const N = 40;
+  function ringOfDots(){
+    // the 'ring' probe geometry (PROBE_OBJECT_NAMES[0]): 8 dressed dots on a circle
+    const f = new Float32Array(N*N);
+    const R = N*0.30, ndots = 8, sig = 2.4;
+    for(let d=0; d<ndots; d++){
+      const a = d/ndots*Math.PI*2 - Math.PI/2;
+      const cx = N/2 + Math.cos(a)*R, cy = N/2 + Math.sin(a)*R;
+      for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+        const r2 = (x-cx)*(x-cx) + (y-cy)*(y-cy);
+        const v = Math.exp(-r2/(2*sig*sig));
+        if(v>f[y*N+x]) f[y*N+x] = v;
+      }
+    }
+    return f;
+  }
+  const base = ringOfDots();
+
+  function setup(id){
+    const cv = document.getElementById(id);
+    const dpr = Math.min(2, devicePixelRatio||1);
+    const fit = () => { const r=cv.getBoundingClientRect(); cv.width=Math.max(1,r.width*dpr); cv.height=Math.max(1,r.height*dpr); };
+    fit(); addEventListener('resize', fit);
+    return { cv, ctx: cv.getContext('2d') };
+  }
+  const S = ['c1','c2','c3','c4','c5'].map(setup);
+
+  // draw a scalar field into a canvas with a colour ramp toward `col`
+  function paint(ctx, cv, field, col, {glow=0.0, speckle=0}={}){
+    const w=cv.width, h=cv.height; ctx.clearRect(0,0,w,h);
+    const cw=w/N, ch=h/N;
+    for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+      let v=field[y*N+x];
+      if(speckle) v += (Math.sin((x*12.9+y*78.2+speckle)*1.7)*0.5+0.5)*speckle*0.5;
+      v=Math.max(0,Math.min(1,v));
+      if(v<0.02) continue;
+      ctx.globalAlpha = 0.15+0.85*v;
+      ctx.fillStyle = col;
+      ctx.fillRect(x*cw, y*ch, cw+0.6, ch+0.6);
+    }
+    ctx.globalAlpha=1;
+  }
+
+  // a cheap "diffuse/interfere" transform to fake the ±T leg visually (blur + ripple)
+  function propagate(field, t, ripple){
+    const out=new Float32Array(N*N);
+    for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+      let s=0,c=0;
+      const R=t;
+      for(let dy=-R;dy<=R;dy++) for(let dx=-R;dx<=R;dx++){
+        const xx=x+dx, yy=y+dy; if(xx<0||yy<0||xx>=N||yy>=N) continue;
+        const wgt=1/(1+dx*dx+dy*dy); s+=field[yy*N+xx]*wgt; c+=wgt;
+      }
+      let v=s/c;
+      if(ripple){ const rr=Math.hypot(x-N/2,y-N/2); v = v*0.6 + 0.4*v*(0.5+0.5*Math.cos(rr*ripple)); }
+      out[y*N+x]=v;
+    }
+    return out;
+  }
+  const plate = propagate(base, 3, 1.6);   // the interference plate (stage 2/3)
+  const lifted = base;                      // the −T leg recovers the original (stage 5)
+
+  // ── wAtt / ψATT strip: three small wide canvases (probe → digest → adopt) ──
+  const dispersed = propagate(base, 2, 0);  // the digested (softened) field
+  const W = ['w1','w2','w3'].map(setup);
+  // ── display/sampling canvas: the live soliton + a scanning sample line ──
+  const DSP = setup('dsp');
+  // ── three new sections: dop dual-plate, Kuramoto K3, occlusion ──
+  const DOP = setup('dopv'), KUR = setup('kurv'), OCC = setup('occv');
+  const occLab = document.getElementById('occlab');
+  // ── replication: two peers rendering the IDENTICAL field ──
+  const PA = setup('pa'), PB = setup('pb');
+
+  let t0=performance.now();
+  function frame(now){
+    const t=(now-t0)/1000;
+    // STAGE 1 — textured symbol: gentle breathing + light speckle (dressing)
+    paint(S[0].ctx,S[0].cv, base, css('--probe'), {speckle:0.06+0.03*Math.sin(t*1.3)});
+    // STAGE 2 — forward leg: morph base→plate on a slow cycle (shows the propagation)
+    { const a=(Math.sin(t*0.6)*0.5+0.5); const f=new Float32Array(N*N);
+      for(let i=0;i<f.length;i++) f[i]=base[i]*(1-a)+plate[i]*a; paint(S[1].ctx,S[1].cv,f,css('--store')); }
+    // STAGE 3 — aging: the plate, with a rotating phase shimmer (ω precession)
+    { const ph=t*1.1; const f=new Float32Array(N*N);
+      for(let y=0;y<N;y++)for(let x=0;x<N;x++){ const rr=Math.atan2(y-N/2,x-N/2);
+        f[y*N+x]=plate[y*N+x]*(0.65+0.35*(0.5+0.5*Math.cos(rr*2+ph))); }
+      paint(S[2].ctx,S[2].cv,f,css('--age')); }
+    // STAGE 4 — bind: a scanning correlation sweep across the plate
+    { const sweep=(t*0.5)%1; const f=new Float32Array(N*N);
+      for(let y=0;y<N;y++)for(let x=0;x<N;x++){ const near=Math.abs(x/N-sweep)<0.12?1:0.4;
+        f[y*N+x]=plate[y*N+x]*near; }
+      paint(S[3].ctx,S[3].cv,f,css('--recall'));
+      // scan line
+      const c=S[3].ctx, w=S[3].cv.width, h=S[3].cv.height;
+      c.globalAlpha=.8; c.strokeStyle=css('--recall'); c.lineWidth=2;
+      c.beginPath(); c.moveTo(sweep*w,0); c.lineTo(sweep*w,h); c.stroke(); c.globalAlpha=1; }
+    // STAGE 5 — live soliton: reconstructed + breathing (alive)
+    { const br=0.86+0.14*Math.sin(t*2.2); const f=new Float32Array(N*N);
+      for(let i=0;i<f.length;i++) f[i]=lifted[i]*br; paint(S[4].ctx,S[4].cv,f,css('--live'),{glow:1});
+      // a soft glow pulse
+      const c=S[4].ctx,w=S[4].cv.width,h=S[4].cv.height;
+      const g=c.createRadialGradient(w/2,h/2,0,w/2,h/2,w*0.5);
+      g.addColorStop(0,css('--live')); g.addColorStop(1,'transparent');
+      c.globalAlpha=0.06+0.05*Math.sin(t*2.2); c.fillStyle=g; c.fillRect(0,0,w,h); c.globalAlpha=1; }
+
+    // ── wAtt strip ──
+    // 01 probe-pinned: crisp ring, steady (operator holds it)
+    paint(W[0].ctx,W[0].cv, base, css('--recall'));
+    // 02 digest: crossfade crisp→dispersed and back (the medium disperses, unpinned)
+    { const dg=(Math.sin(t*0.8)*0.5+0.5); const f=new Float32Array(N*N);
+      for(let i=0;i<f.length;i++) f[i]=base[i]*(1-dg)+dispersed[i]*dg*0.85; paint(W[1].ctx,W[1].cv,f,css('--neutral')); }
+    // 03 adopt: the settled field, now with a register phase shimmer (φ/ω rotate the hold)
+    { const ph=t*1.4; const f=new Float32Array(N*N);
+      for(let y=0;y<N;y++)for(let x=0;x<N;x++){ const rr=Math.atan2(y-N/2,x-N/2);
+        f[y*N+x]=base[y*N+x]*(0.72+0.28*(0.5+0.5*Math.cos(rr*2+ph))); }
+      paint(W[2].ctx,W[2].cv,f,css('--age')); }
+
+    // ── replication: BOTH peers render the identical field from the same shared step ──
+    { const br=0.82+0.18*Math.sin(t*2.4); const ph=t*1.2; const f=new Float32Array(N*N);
+      for(let y=0;y<N;y++)for(let x=0;x<N;x++){ const rr=Math.atan2(y-N/2,x-N/2);
+        f[y*N+x]=base[y*N+x]*br*(0.78+0.22*(0.5+0.5*Math.cos(rr*2+ph))); }
+      paint(PA.ctx,PA.cv,f,css('--live')); paint(PB.ctx,PB.cv,f,css('--live')); }
+
+    // ── 1 · dop dual plate: the interference image + a rotating phase dial overlay ──
+    { const c=DOP.ctx, w=DOP.cv.width, h=DOP.cv.height;
+      paint(c,DOP.cv, plate, css('--store'));
+      // the descriptor phase dial (dop ∠) — a rotating hand in a corner ring
+      const ph=t*1.0, rx=w*0.78, ry=h*0.24, rr=Math.min(w,h)*0.15;
+      c.globalAlpha=.9; c.strokeStyle=css('--age'); c.lineWidth=2;
+      c.beginPath(); c.arc(rx,ry,rr,0,Math.PI*2); c.stroke();
+      c.beginPath(); c.moveTo(rx,ry); c.lineTo(rx+Math.cos(ph)*rr*0.85, ry+Math.sin(ph)*rr*0.85); c.stroke();
+      c.fillStyle=css('--age'); c.beginPath(); c.arc(rx+Math.cos(ph)*rr*0.85, ry+Math.sin(ph)*rr*0.85,3,0,7); c.fill();
+      c.globalAlpha=1; }
+
+    // ── 2 · Kuramoto K3: three frustrated phase oscillators wandering a degenerate manifold ──
+    { const c=KUR.ctx, w=KUR.cv.width, h=KUR.cv.height; c.clearRect(0,0,w,h);
+      const cx=w/2, cy=h/2, R=Math.min(w,h)*0.32;
+      // the three slots on a triangle; frustrated → phases splay ~2.09 apart and slowly wander
+      const wob = Math.sin(t*0.4)*0.5;
+      const th = [ t*0.5 + wob, t*0.5 + 2.09 + wob*0.7, t*0.5 - 2.09 + wob*1.1 ];
+      const cols=[css('--probe'),css('--recall'),css('--age')];
+      const pos=[[cx,cy-R],[cx+R*0.87,cy+R*0.5],[cx-R*0.87,cy+R*0.5]];
+      // anti-align edges (dashed, the frustrated triangle)
+      c.strokeStyle=css('--age'); c.globalAlpha=.4; c.lineWidth=1.5; c.setLineDash([5,5]);
+      for(let a=0;a<3;a++){ const b=(a+1)%3; c.beginPath(); c.moveTo(pos[a][0],pos[a][1]); c.lineTo(pos[b][0],pos[b][1]); c.stroke(); }
+      c.setLineDash([]); c.globalAlpha=1;
+      for(let i=0;i<3;i++){ const [px,py]=pos[i];
+        c.strokeStyle=cols[i]; c.lineWidth=2; c.globalAlpha=.6;
+        c.beginPath(); c.arc(px,py,20,0,Math.PI*2); c.stroke(); c.globalAlpha=1;
+        // phase hand
+        c.strokeStyle=cols[i]; c.lineWidth=3;
+        c.beginPath(); c.moveTo(px,py); c.lineTo(px+Math.cos(th[i])*17,py+Math.sin(th[i])*17); c.stroke();
+        c.fillStyle=cols[i]; c.beginPath(); c.arc(px,py,3.5,0,7); c.fill();
+        c.font='600 12px '+css('--mono'); c.fillStyle=css('--neutral'); c.textAlign='center';
+        c.fillText(['W','V','P1'][i], px, py - 28); }
+      c.globalAlpha=1; }
+
+    // ── 3 · occlusion: an occluded cue (left) with the full lift still emerging (right) ──
+    { const frac = 0.25 + 0.35*(0.5+0.5*Math.sin(t*0.5)); if(occLab) occLab.textContent='frac '+frac.toFixed(2);
+      const c=OCC.ctx, w=OCC.cv.width, h=OCC.cv.height; c.clearRect(0,0,w,h);
+      const cw=w/N, ch=h/N;
+      // draw the ring, but zero the left `frac` columns (half-plane occlude, mode 6)
+      for(let y=0;y<N;y++) for(let x=0;x<N;x++){ let v=base[y*N+x]; if(v<0.02) continue;
+        const occluded = (x/N) < frac;
+        c.globalAlpha = occluded ? 0.06 : (0.15+0.85*v);
+        c.fillStyle = occluded ? css('--neutral-dim') : css('--recall');
+        c.fillRect(x*cw,y*ch,cw+0.6,ch+0.6); }
+      c.globalAlpha=1;
+      // the occlusion edge line
+      c.strokeStyle=css('--recall'); c.globalAlpha=.5; c.lineWidth=1.5; c.setLineDash([4,4]);
+      c.beginPath(); c.moveTo(frac*w,0); c.lineTo(frac*w,h); c.stroke(); c.setLineDash([]); c.globalAlpha=1;
+      // a faint "full reconstruction" ghost (the lift returns the whole scene)
+      const pulse=0.10+0.06*Math.sin(t*2);
+      for(let y=0;y<N;y++) for(let x=0;x<N;x++){ const v=base[y*N+x]; if(v<0.02) continue;
+        c.globalAlpha=pulse*v; c.fillStyle=css('--live'); c.fillRect(x*cw,y*ch,cw+0.6,ch+0.6); }
+      c.globalAlpha=1; }
+
+    // ── display/sampling: the live soliton (breathing, register-driven) + a scanning sample line ──
+    { const br=0.82+0.18*Math.sin(t*2.4); const ph=t*1.2; const f=new Float32Array(N*N);
+      for(let y=0;y<N;y++)for(let x=0;x<N;x++){ const rr=Math.atan2(y-N/2,x-N/2);
+        f[y*N+x]=base[y*N+x]*br*(0.78+0.22*(0.5+0.5*Math.cos(rr*2+ph))); }
+      paint(DSP.ctx,DSP.cv,f,css('--live'));
+      // the peer's own sample line sweeping — "each frame is a private sample"
+      const c=DSP.ctx, w=DSP.cv.width, h=DSP.cv.height; const sw=(t*0.35)%1;
+      c.globalAlpha=.7; c.strokeStyle=css('--recall'); c.lineWidth=2;
+      c.beginPath(); c.moveTo(sw*w,0); c.lineTo(sw*w,h); c.stroke();
+      // faint scanned band behind the line
+      c.globalAlpha=.10; c.fillStyle=css('--recall'); c.fillRect(Math.max(0,sw*w-14),0,28,h);
+      c.globalAlpha=1; }
+
+    if(!reduce) requestAnimationFrame(frame);
+  }
+  if(!reduce) requestAnimationFrame(frame); else frame(performance.now());
+})();
+</script>
+<script>
+(() => {
+  "use strict";
+  const cvEl = document.getElementById('dualcanvas'); if(!cvEl) return;
+  const reduce = matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const root = document.documentElement;
+  const css = (v) => getComputedStyle(document.getElementById('theory-embed') || root).getPropertyValue(v).trim();
+  const cv = document.getElementById('dualcanvas');
+  const ctx = cv.getContext('2d');
+  let W=0,H=0,dpr=1;
+  function fit(){
+    dpr = Math.min(2, window.devicePixelRatio||1);
+    const r = cv.getBoundingClientRect();
+    W=Math.max(1,Math.round(r.width)); H=Math.max(1,Math.round(r.height));
+    cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  fit(); addEventListener('resize', fit);
+
+  const N=128;
+  // real-space packets → we show |ψ|(x) and |ψ̂|(k), a slow-morphing Gaussian
+  function frame(t){
+    ctx.clearRect(0,0,W,H);
+    // faint dual grid
+    ctx.globalAlpha=1;
+    const midY=H*0.5;
+    // build a position-space profile: sum of two drifting gaussians (a "soliton pair")
+    const xs=new Float32Array(N), ks=new Float32Array(N);
+    const c1=0.5+0.16*Math.sin(t*0.5), w1=0.06+0.02*Math.sin(t*0.3);
+    const c2=0.5+0.22*Math.sin(t*0.37+2), w2=0.05;
+    for(let i=0;i<N;i++){
+      const x=i/N;
+      xs[i]=Math.exp(-((x-c1)**2)/(2*w1*w1)) + 0.7*Math.exp(-((x-c2)**2)/(2*w2*w2));
+    }
+    // crude |FFT| magnitude (real DFT, low bins) — the dual profile
+    for(let k=0;k<N;k++){
+      let re=0,im=0;
+      for(let i=0;i<N;i+=2){ const a=-2*Math.PI*k*i/N; re+=xs[i]*Math.cos(a); im+=xs[i]*Math.sin(a); }
+      ks[k] = Math.hypot(re,im);
+    }
+    let kmax=1e-6; for(let k=0;k<N;k++) kmax=Math.max(kmax,ks[k]);
+
+    const gA=css('--spectral-a'), gB=css('--spectral-b'), hair=css('--hair');
+    // POSITION-space curve (upper band), MOMENTUM-space (lower band, mirrored)
+    const bandH=Math.min(H*0.32, 150);
+    const drawCurve=(arr,norm,baseY,col,dir)=>{
+      ctx.beginPath();
+      for(let i=0;i<N;i++){
+        const x=(i/(N-1))*W;
+        const v=arr[i]/norm;
+        const y=baseY - dir*v*bandH;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      }
+      ctx.strokeStyle=col; ctx.globalAlpha=.55; ctx.lineWidth=1.6; ctx.stroke();
+      // faint fill
+      ctx.lineTo(W,baseY); ctx.lineTo(0,baseY); ctx.closePath();
+      ctx.globalAlpha=.07; ctx.fillStyle=col; ctx.fill();
+    };
+    drawCurve(xs, 1.7, midY-14, gA, 1);           // position space, upward
+    // momentum space uses k bins 0..N-1 but is symmetric; show low half stretched
+    const kview=new Float32Array(N);
+    for(let i=0;i<N;i++){ kview[i]=ks[Math.min(N-1,Math.floor(i/2))]; }
+    drawCurve(kview, kmax, midY+14, gB, -1);       // momentum space, downward
+
+    // the F arrow between the two bands
+    ctx.globalAlpha=.5; ctx.strokeStyle=hair; ctx.setLineDash([3,5]);
+    ctx.beginPath(); ctx.moveTo(0,midY); ctx.lineTo(W,midY); ctx.stroke(); ctx.setLineDash([]);
+    ctx.globalAlpha=.7; ctx.font='11px '+css('--mono'); ctx.fillStyle=css('--neutral');
+    ctx.textAlign='left';  ctx.fillText('ψ(x)   position', 12, midY-bandH-2>18?midY-bandH-2:18);
+    ctx.textAlign='left';  ctx.fillText('|ψ̂|(k)   momentum', 12, Math.min(H-8, midY+bandH+16));
+    ctx.textAlign='right'; ctx.fillStyle=css('--spectral-b');
+    ctx.fillText('F  (Fourier–Mukai)', W-12, midY+4);
+    ctx.globalAlpha=1;
+  }
+
+  let t0=performance.now();
+  function loop(now){ frame((now-t0)/1000); if(!reduce) requestAnimationFrame(loop); }
+  if(!reduce) requestAnimationFrame(loop); else frame(1.2);
+})();
+</script>
+<script>
+(() => {
+  "use strict";
+  if(!document.getElementById('concepts-embed')) return;
+  const reduce = matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const root = document.documentElement;
+  const scope = document.getElementById('concepts-embed');
+  const css = (v) => getComputedStyle(scope).getPropertyValue(v).trim();
+  /* HiDPI canvas helper → returns {ctx,w,h} in CSS px */
+  function fit(cv){
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const r = cv.getBoundingClientRect();
+    const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+    cv.width = w*dpr; cv.height = h*dpr;
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    return {ctx,w,h};
+  }
+  function hue(a){ return `hsl(${(a*180/Math.PI+360)%360} 78% 62%)`; }
+  const clocks = [];
+  function raf(fn){ clocks.push(fn); }
+  let t0 = performance.now();
+  function loop(now){
+    const t = (now - t0)/1000;
+    for(const fn of clocks) fn(t);
+    if(!reduce) requestAnimationFrame(loop);
+  }
+
+  /* ── masthead: faint phase-grid drift ─────────────────── */
+  (() => {
+    const cv = document.getElementById('mastgrid'); if(!cv) return;
+    let S = fit(cv);
+    addEventListener('resize', () => S = fit(cv));
+    raf((t) => {
+      const {ctx,w,h} = S; ctx.clearRect(0,0,w,h);
+      const g = 46, ink = css('--hair');
+      ctx.strokeStyle = ink; ctx.lineWidth = 1;
+      for(let x=0;x<=w;x+=g){ ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
+      for(let y=0;y<=h;y+=g){ ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); }
+      // three drifting phase points, one per accent
+      const acc = ['--u1','--tau','--ifs'].map(css);
+      for(let i=0;i<3;i++){
+        const a = t*(.25+i*.12)+i*2.1;
+        const cx = w*(.2+.3*i)+Math.cos(a)*40, cy = h*.5+Math.sin(a*1.3)*h*.28;
+        const rg = ctx.createRadialGradient(cx,cy,0,cx,cy,120);
+        rg.addColorStop(0, acc[i]); rg.addColorStop(1,'transparent');
+        ctx.globalAlpha=.16; ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(cx,cy,120,0,7); ctx.fill();
+      }
+      ctx.globalAlpha=1;
+    });
+  })();
+
+  /* ── 01  U(1) register: 4 phase wheels + store/lift plate ─ */
+  (() => {
+    const cv = document.getElementById('cv-u1'); if(!cv) return;
+    let S = fit(cv);
+    addEventListener('resize', () => S = fit(cv));
+    const names = ['W','V','P1','P2'];
+    // each slot precesses at its own rate; V will be "driven" faster
+    const rate = [0.55, 0.9, 0.33, -0.42];
+    raf((t) => {
+      const {ctx,w,h} = S; ctx.clearRect(0,0,w,h);
+      const cxs = [w*0.28, w*0.72, w*0.28, w*0.72];
+      const cys = [h*0.30, h*0.30, h*0.70, h*0.70];
+      const R = Math.min(w,h)*0.155;
+      // faint plate glow travelling W→V (store then lift)
+      const cyc = (t*0.5)%1;
+      const px = cxs[0]+(cxs[1]-cxs[0])*cyc, py = cys[0];
+      const pg = ctx.createRadialGradient(px,py,0,px,py,R*1.4);
+      pg.addColorStop(0, css('--u1')); pg.addColorStop(1,'transparent');
+      ctx.globalAlpha=.18; ctx.fillStyle=pg; ctx.beginPath(); ctx.arc(px,py,R*1.4,0,7); ctx.fill();
+      ctx.globalAlpha=1;
+
+      for(let i=0;i<4;i++){
+        const cx=cxs[i], cy=cys[i];
+        const ang = t*rate[i] + i*1.3;
+        // hue ring (the phase axis, drawn as a cyclic colour wheel)
+        ctx.lineWidth = 3;
+        const seg = 48;
+        for(let s=0;s<seg;s++){
+          const a0 = s/seg*2*Math.PI, a1=(s+1)/seg*2*Math.PI;
+          ctx.strokeStyle = hue(a0);
+          ctx.globalAlpha = .32;
+          ctx.beginPath(); ctx.arc(cx,cy,R,a0,a1); ctx.stroke();
+        }
+        ctx.globalAlpha=1;
+        // slot disc
+        ctx.fillStyle = css('--panel-2');
+        ctx.beginPath(); ctx.arc(cx,cy,R*0.72,0,7); ctx.fill();
+        ctx.strokeStyle = css('--hair'); ctx.lineWidth=1; ctx.stroke();
+        // the stored phase = a hand pointing at ∠ψ, coloured by its angle
+        const hx = cx+Math.cos(ang)*R*0.9, hy = cy+Math.sin(ang)*R*0.9;
+        ctx.strokeStyle = hue(ang); ctx.lineWidth = i===1?3.4:2.4;
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(hx,hy); ctx.stroke();
+        ctx.fillStyle = hue(ang); ctx.beginPath(); ctx.arc(hx,hy,3.4,0,7); ctx.fill();
+        // label
+        ctx.fillStyle = css('--neutral');
+        ctx.font = '600 12px '+css('--mono');
+        ctx.textAlign='center';
+        ctx.fillText(names[i], cx, cy - R - 8);
+        ctx.fillStyle = css('--neutral-dim');
+        ctx.font = '10px '+css('--mono');
+        ctx.fillText('∠'+(((ang%(2*Math.PI))+2*Math.PI)%(2*Math.PI)).toFixed(2), cx, cy + R + 15);
+      }
+      // Δ∠ chord between W and V (the gauge answer = the difference)
+      ctx.strokeStyle = css('--u1'); ctx.setLineDash([4,4]); ctx.globalAlpha=.6; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.moveTo(cxs[0],cys[0]); ctx.lineTo(cxs[1],cys[1]); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha=1;
+      ctx.fillStyle=css('--u1'); ctx.font='10px '+css('--mono'); ctx.textAlign='center';
+      ctx.fillText('Δ∠(W,V)', (cxs[0]+cxs[1])/2, cys[0]-6);
+    });
+  })();
+
+  /* ── 02  proper time: two integrate-and-fire clocks ────── */
+  (() => {
+    const cv = document.getElementById('cv-tau'); if(!cv) return;
+    let S = fit(cv);
+    addEventListener('resize', () => S = fit(cv));
+    let beatsV=0, beatsW=0, accV=0, accW=0, last=0;
+    // V driven (aging), W parked (stands). L = beats-per-tick; V ticks often.
+    raf((t) => {
+      const {ctx,w,h} = S; ctx.clearRect(0,0,w,h);
+      const dt = Math.min(0.05, t-last); last=t;
+      // V integrates fast; W barely (parked → ~0). integrate-and-fire.
+      accV += dt*1.7; if(accV>=1){accV-=1; beatsV++;}
+      accW += dt*0.06; if(accW>=1){accW-=1; beatsW++;}
+
+      const drawClock = (cx,cy,R,acc,beats,col,label,drive) => {
+        // dial
+        ctx.strokeStyle=css('--hair'); ctx.lineWidth=1.5;
+        ctx.beginPath(); ctx.arc(cx,cy,R,0,7); ctx.stroke();
+        // ticks
+        for(let k=0;k<12;k++){
+          const a=k/12*2*Math.PI; const r0=R*0.9,r1=R;
+          ctx.globalAlpha=.5;ctx.beginPath();
+          ctx.moveTo(cx+Math.cos(a)*r0,cy+Math.sin(a)*r0);
+          ctx.lineTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1);
+          ctx.strokeStyle=css('--neutral-dim');ctx.stroke();ctx.globalAlpha=1;
+        }
+        // accumulating fill (integrate toward fire)
+        ctx.fillStyle=col; ctx.globalAlpha=.14;
+        ctx.beginPath(); ctx.moveTo(cx,cy);
+        ctx.arc(cx,cy,R*0.86,-Math.PI/2,-Math.PI/2+acc*2*Math.PI); ctx.closePath(); ctx.fill();
+        ctx.globalAlpha=1;
+        // hand
+        const a=-Math.PI/2+acc*2*Math.PI;
+        ctx.strokeStyle=col;ctx.lineWidth=2.6;
+        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(a)*R*0.78,cy+Math.sin(a)*R*0.78);ctx.stroke();
+        ctx.fillStyle=col;ctx.beginPath();ctx.arc(cx,cy,3.2,0,7);ctx.fill();
+        // labels
+        ctx.textAlign='center';
+        ctx.fillStyle=css('--ink');ctx.font='700 13px '+css('--mono');
+        ctx.fillText(label,cx,cy-R-14);
+        ctx.fillStyle=col;ctx.font='700 22px '+css('--sans');
+        ctx.fillText(beats, cx, cy+7);
+        ctx.fillStyle=css('--neutral');ctx.font='10px '+css('--mono');
+        ctx.fillText('beats aged',cx,cy+R+16);
+        ctx.fillStyle=css('--neutral-dim');ctx.font='9px '+css('--mono');
+        ctx.fillText(drive,cx,cy-R-2);
+      };
+      const R=Math.min(w,h)*0.2;
+      drawClock(w*0.30, h*0.40, R, accV, beatsV, css('--tau'),'V','driven · dτ=dk/L');
+      drawClock(w*0.70, h*0.40, R, accW, beatsW, css('--tau-2'),'W','parked · stands');
+
+      // twin readout bar
+      const by=h*0.83, bw=w*0.7, bx=w*0.15;
+      ctx.fillStyle=css('--hair-soft');ctx.fillRect(bx,by,bw,6);
+      const frac=Math.min(1, beatsV/Math.max(1,beatsV+beatsW+1));
+      ctx.fillStyle=css('--tau');ctx.fillRect(bx,by,bw*frac,6);
+      ctx.textAlign='left';ctx.fillStyle=css('--neutral');ctx.font='10px '+css('--mono');
+      ctx.fillText('Δφ = ω·(τ_V − τ_W)', bx, by-9);
+      ctx.textAlign='right';ctx.fillStyle=css('--tau');
+      ctx.fillText('the twin asymmetry', bx+bw, by-9);
+    });
+  })();
+
+  /* ── 03  fractal IFS: Fresnel cascade → ring kernel ────── */
+  (() => {
+    const cv = document.getElementById('cv-ifs'); if(!cv) return;
+    let S = fit(cv);
+    addEventListener('resize', () => S = fit(cv));
+    const verEl = document.getElementById('ifs-ver');
+    // pulses expanding outward; when a pulse reaches its radius it "fires" children
+    let pulses = [];
+    let ver = 0, lastSpawn = -99;
+    function spawn(cx,cy,r,gen){ pulses.push({cx,cy,r:0,rmax:r,gen,born:performance.now()}); }
+    raf((t) => {
+      const {ctx,w,h} = S; ctx.clearRect(0,0,w,h);
+      const cx=w*0.5, cy=h*0.42, base=Math.min(w,h)*0.34;
+      // periodic root launch → the cascade never halts
+      if(t-lastSpawn>2.2){ lastSpawn=t; spawn(cx,cy,base,0); ver++; if(verEl) verEl.textContent='kernelVer '+ver; }
+      // advance pulses
+      const radii=[];
+      for(const p of pulses){
+        p.r += 0.9;
+        const life=p.r/p.rmax;
+        if(life<1){
+          ctx.globalAlpha = (1-life)*0.5*(p.gen===0?1:0.7);
+          ctx.strokeStyle = p.gen===0?css('--ifs'):css('--ifs-2');
+          ctx.lineWidth = p.gen===0?2:1.2;
+          ctx.beginPath(); ctx.arc(p.cx,p.cy,p.r,0,7); ctx.stroke();
+        }
+        // fire children once, at ~60% expansion (self-similar shrink)
+        if(!p.fired && life>0.6 && p.gen<2){
+          p.fired=true;
+          const kids=3;
+          for(let c=0;c<kids;c++){
+            const a=c/kids*2*Math.PI + p.gen*0.7;
+            spawn(p.cx+Math.cos(a)*p.r*0.5, p.cy+Math.sin(a)*p.r*0.5, p.rmax*0.42, p.gen+1);
+          }
+        }
+        if(life>=1) radii.push(p.rmax);
+      }
+      pulses = pulses.filter(p=>p.r/p.rmax<1.05);
+      ctx.globalAlpha=1;
+
+      // central emitter
+      ctx.fillStyle=css('--ifs'); ctx.beginPath(); ctx.arc(cx,cy,4,0,7); ctx.fill();
+      ctx.strokeStyle=css('--ifs');ctx.globalAlpha=.4;ctx.lineWidth=1;
+      ctx.beginPath();ctx.arc(cx,cy,7,0,7);ctx.stroke();ctx.globalAlpha=1;
+
+      // ── the condensed KERNEL: weighted ring bands (buildNativeKernel) ──
+      const kbx=w*0.5, kby=h*0.86;
+      ctx.textAlign='center';ctx.fillStyle=css('--neutral');ctx.font='10px '+css('--mono');
+      ctx.fillText('buildNativeKernel  →  weighted ring bands  λ(k)', kbx, kby-40);
+      // stable illustrative bands (radii → counted → weight)
+      const bands=[{r:11,wgt:1},{r:19,wgt:0.7},{r:27,wgt:0.45},{r:34,wgt:0.28}];
+      const spread=w*0.62, x0=kbx-spread/2;
+      bands.forEach((b,i)=>{
+        const bx=x0 + spread*(i+0.5)/bands.length;
+        // breathe the weight subtly so the kernel "lives"
+        const wob=b.wgt*(0.9+0.1*Math.sin(t*1.3+i));
+        ctx.strokeStyle=css('--ifs-2');
+        ctx.globalAlpha=0.35+0.5*wob; ctx.lineWidth=1.2+2.4*wob;
+        ctx.beginPath();ctx.arc(bx,kby,b.r*0.5,0,7);ctx.stroke();
+        ctx.globalAlpha=1;
+        ctx.fillStyle=css('--neutral-dim');ctx.font='9px '+css('--mono');
+        ctx.fillText('r'+(i+1), bx, kby+b.r*0.5+12);
+      });
+    });
+  })();
+
+  if(!reduce) requestAnimationFrame(loop);
+  else { // one static frame
+    t0 = performance.now()-2.0; for(const fn of clocks) fn(2.0);
+  }
+  // EMBED FIX: each concept-canvas IIFE captures its size once at init and re-fits only on a
+  // window 'resize'. In a deep host page the block's real size may resolve AFTER this runs, so the
+  // init fit() sees 0 and the canvas stays blank. A ResizeObserver on the wrapper re-broadcasts
+  // 'resize' the moment the layout gives it a real size (and on every later size change) — each
+  // IIFE re-fits and the RAF loop redraws. Bulletproof against layout/scroll/timing.
+  const _refit = () => window.dispatchEvent(new Event('resize'));
+  if (typeof ResizeObserver === 'function') { new ResizeObserver(_refit).observe(scope); }
+  requestAnimationFrame(() => requestAnimationFrame(_refit));
+  window.addEventListener('load', _refit);
+  setTimeout(_refit, 400);
+})();
+</script>
+</body>
+</html>
