@@ -31,7 +31,10 @@ Copyright (c) 2026 Nikolay Suslov and the Krestianstvo.org project contributors
 //
 // WebGL2 + EXT_color_buffer_float required (Chrome 56+, Firefox 51+, Safari 15+).
 
+import { kernelLambdaGrid } from './medium-core.js';   // stepEyeJump: λ(k) of the rings set (the spectral twin of the ring stencil)
+
 export class IFSGpu {
+  static jumpMin = 12;   // stepEyeN runs of this length or more take the one-pass spectral jump (stepEyeJump)
 
   // ── Static factory ──────────────────────────────────────────────────────────
   static async create(canvas, grid) {
@@ -176,6 +179,8 @@ export class IFSGpu {
     this._progAccum       = this._compileStep(GLSL_ACCUM);
     this._progAccumSweep  = this._compileStep(GLSL_ACCUM_SWEEP);
     this._progFieldMul    = this._compileStep(GLSL_FIELD_MUL);   // §7.90 pure-medium binding (complex ψA·ψB)
+    this._progQuatMix     = this._compileStep(GLSL_QUAT_MIX);    // FIELD-LEVEL qedge: SU(2) mix u·ψ_ℍ over a slot PAIR (GPU-resident, zero readback)
+    this._progDualQmix    = this._compileStep(GLSL_DUAL_QMIX);   // FIELD-LEVEL dqedge: SE(3) screw U·ψ̂ over FOUR slots (GPU-resident, zero readback)
     this._progRotCenters  = this._compileStep(GLSL_ROTATE_CENTERS); // §7.92 θ-operator: rotate ψ about each main
     this._progAffineCenters = this._compileStep(GLSL_AFFINE_CENTERS); // §7.98 general metric op: affine ψ about each main
     this._progIfsWarp     = this._compileStep(GLSL_IFS_WARP);       // full K-map IFS Hutchinson union (one GPU pass, no readbacks)
@@ -216,10 +221,20 @@ export class IFSGpu {
     this._progDensContract    = this._compileStep(GLSL_DENS_CONTRACT);      // IFS-native GPE: saturable density-dependent contraction (the |ψ|²ψ term, real-space, no FFT)
     this._progCgl             = this._compileStep(GLSL_CGL);                // CGL dissipative-soliton balance (linear loss + cubic gain + quintic saturation)
     this._progNlSpm           = this._compileStep(GLSL_NL_SPM);             // §7.82 saturable SPM (the real _nlHalf)
+    this._progFftPerm         = this._compileStep(GLSL_FFT_PERM);           // mixed-radix digit-reversal permutation (one pass per axis)
+    this._progFftStage        = this._compileStep(GLSL_FFT_STAGE);          // mixed-radix FFT stage — the GPU port of mixedRadix1d
+    this._progFftNorm         = this._compileStep(GLSL_FFT_NORM);           // inverse 1/N normalisation pass
+    this._progFftSplit        = this._compileStep(GLSL_FFT_SPLIT);          // split ψ → (Re,0) / (Im,0) for the two-field propagator
+    this._progFftBlock        = this._compileStep(GLSL_FFT_BLOCK);          // the FAITHFUL per-mode 2×2 propagator (mixedRadixPropagate T=1)
+    this._progFftSpring       = this._compileStep(GLSL_FFT_SPRING);         // spectral spring: ĥat += k·(âhat − ĥat) per mode
+    this._progFftMerge        = this._compileStep(GLSL_FFT_MERGE);          // recombine ψ' = (Re R', Re I') after the inverse FFTs
     this._progEyeSuperpose    = this._compileStep(GLSL_EYE_SUPERPOSE);      // coevolve: ψ_eye += β·obj (GPU)
     this._progEyeContract     = this._compileStep(GLSL_EYE_CONTRACT);       // full-authority hold: ψ ← (1−λ)ψ + λ·obj (contraction, GPU)
     this._progEyeScale        = this._compileStep(GLSL_EYE_SCALE);          // coevolve: ψ *= s (energy-cap scale, GPU)
+    this._progEyePhaseTilt    = this._compileStep(GLSL_EYE_PHASE_TILT);     // global precession ω + momentum tilt k·x (per-pixel phase)
     this._progEyeCapScale     = this._compileStep(GLSL_EYE_CAP_SCALE);      // the NO-SYNC cap (reduce texture sampled in-shader — zero readback)
+    this._progGroupSpm        = this._compileStep(GLSL_GROUP_SPM);          // pair/body-covariant SPM: one phase per cell from the GROUP density (ℍ spinor / ℍ⊗𝔻 rotation pair)
+    this._progGroupCap        = this._compileStep(GLSL_GROUP_CAP);          // pair/body-covariant energy cap: ONE scale for every member from the GROUP energy
     this._progEnergyRows      = this._compileStep(GLSL_ENERGY_ROWS);        // coevolve: row-reduce Σ|ψ|² (energy)
     this._progDissip          = this._compileStep(GLSL_DISSIP);             // §7.82 driven-dissipative pass
     this._progAddForce        = this._compileStep(GLSL_ADD_FORCE);          // §7.82 GPU-resident clock forcing
@@ -263,7 +278,7 @@ export class IFSGpu {
       renderDiff:  { psi: ul(this._progRenderDiff, 'u_psi'), obj: ul(this._progRenderDiff, 'u_obj'), alpha: ul(this._progRenderDiff, 'u_alpha'), smoothMax: ul(this._progRenderDiff, 'u_smoothMax') },
       eyeHologram: { psi: ul(this._progEyeHologram, 'u_psi'), G: ul(this._progEyeHologram, 'u_G'), mode: ul(this._progEyeHologram, 'u_mode'), param: ul(this._progEyeHologram, 'u_param'), block: ul(this._progEyeHologram, 'u_block'), seed: ul(this._progEyeHologram, 'u_seed') },
       renderPhase: { psi: ul(this._progRenderPhase, 'u_psi'), smoothMax: ul(this._progRenderPhase, 'u_smoothMax') },
-      renderDesc:  { base: ul(this._progRenderDesc, 'u_base'), G: ul(this._progRenderDesc, 'u_G'), off: ul(this._progRenderDesc, 'u_off'), center: ul(this._progRenderDesc, 'u_center'), k: ul(this._progRenderDesc, 'u_k'), phi: ul(this._progRenderDesc, 'u_phi'), smoothMax: ul(this._progRenderDesc, 'u_smoothMax'), peakTex: ul(this._progRenderDesc, 'u_peakTex'), usePeakTex: ul(this._progRenderDesc, 'u_usePeakTex'), peakGain: ul(this._progRenderDesc, 'u_peakGain'), ampView: ul(this._progRenderDesc, 'u_ampView') },
+      renderDesc:  { base: ul(this._progRenderDesc, 'u_base'), G: ul(this._progRenderDesc, 'u_G'), off: ul(this._progRenderDesc, 'u_off'), center: ul(this._progRenderDesc, 'u_center'), k: ul(this._progRenderDesc, 'u_k'), phi: ul(this._progRenderDesc, 'u_phi'), smoothMax: ul(this._progRenderDesc, 'u_smoothMax'), peakTex: ul(this._progRenderDesc, 'u_peakTex'), usePeakTex: ul(this._progRenderDesc, 'u_usePeakTex'), peakGain: ul(this._progRenderDesc, 'u_peakGain'), ampView: ul(this._progRenderDesc, 'u_ampView'), phaseFloor: ul(this._progRenderDesc, 'u_phaseFloor') },
       renderPlate: { psi: ul(this._progRenderPlate, 'u_psi'), plate: ul(this._progRenderPlate, 'u_plate'), smoothMaxPlate: ul(this._progRenderPlate, 'u_smoothMaxPlate'), smoothMaxField: ul(this._progRenderPlate, 'u_smoothMaxField'), dir: ul(this._progRenderPlate, 'u_dir') },
       waveletRecog: { scene: ul(this._progWaveletRecog,'u_scene'), G: ul(this._progWaveletRecog,'u_G'), nBands: ul(this._progWaveletRecog,'u_nBands'), nSectors: ul(this._progWaveletRecog,'u_nSectors'), bandR: ul(this._progWaveletRecog,'u_bandR'), refDesc: ul(this._progWaveletRecog,'u_refDesc'), refNorm: ul(this._progWaveletRecog,'u_refNorm'), refR: ul(this._progWaveletRecog,'u_refR'), sharpPow: ul(this._progWaveletRecog,'u_sharpPow'), energyGate: ul(this._progWaveletRecog,'u_energyGate'), disDesc: ul(this._progWaveletRecog,'u_disDesc'), disNorm: ul(this._progWaveletRecog,'u_disNorm'), disWeight: ul(this._progWaveletRecog,'u_disWeight') },
       dotRows:    { a: ul(this._progDotRows,'u_a'), b: ul(this._progDotRows,'u_b'), G: ul(this._progDotRows,'u_G') },
@@ -277,15 +292,27 @@ export class IFSGpu {
       densContract:    { psi: ul(this._progDensContract,'u_psi'), gamma: ul(this._progDensContract,'u_gamma') },   // IFS-native GPE density-dependent contraction
       cgl:             { psi: ul(this._progCgl,'u_psi'), delta: ul(this._progCgl,'u_delta'), eps: ul(this._progCgl,'u_eps'), mu: ul(this._progCgl,'u_mu'), dt: ul(this._progCgl,'u_dt') },   // CGL dissipative-soliton
       fieldMul:        { a: ul(this._progFieldMul,'u_a'), b: ul(this._progFieldMul,'u_b') },   // §7.90 pure-medium binding
+      quatMix:         { a: ul(this._progQuatMix,'u_a'), b: ul(this._progQuatMix,'u_b'), u0: ul(this._progQuatMix,'u_u0'), u1: ul(this._progQuatMix,'u_u1'), which: ul(this._progQuatMix,'u_which') },   // FIELD-LEVEL qedge SU(2) mix
+      dualQmix:        { rA: ul(this._progDualQmix,'u_rA'), rB: ul(this._progDualQmix,'u_rB'), dA: ul(this._progDualQmix,'u_dA'), dB: ul(this._progDualQmix,'u_dB'), ur0: ul(this._progDualQmix,'u_ur0'), ur1: ul(this._progDualQmix,'u_ur1'), ud0: ul(this._progDualQmix,'u_ud0'), ud1: ul(this._progDualQmix,'u_ud1'), which: ul(this._progDualQmix,'u_which') },   // FIELD-LEVEL dqedge SE(3) screw
       rotCenters:      { psi: ul(this._progRotCenters,'u_psi'), delta: ul(this._progRotCenters,'u_delta'), n: ul(this._progRotCenters,'u_n'), centers: ul(this._progRotCenters,'u_centers'), rad: ul(this._progRotCenters,'u_rad'), G: ul(this._progRotCenters,'u_G') },   // §7.92 θ-operator
       affineCenters:   { psi: ul(this._progAffineCenters,'u_psi'), minv: ul(this._progAffineCenters,'u_minv'), tinv: ul(this._progAffineCenters,'u_tinv'), n: ul(this._progAffineCenters,'u_n'), centers: ul(this._progAffineCenters,'u_centers'), rad: ul(this._progAffineCenters,'u_rad'), G: ul(this._progAffineCenters,'u_G') },   // §7.98 general metric op
       ifsWarp:         { psi: ul(this._progIfsWarp,'u_psi'), minv: ul(this._progIfsWarp,'u_minv'), tinv: ul(this._progIfsWarp,'u_tinv'), n: ul(this._progIfsWarp,'u_n'), G: ul(this._progIfsWarp,'u_G'), smooth: ul(this._progIfsWarp,'u_smooth') },   // full K-map IFS union (+ smooth: 0=bicubic, 1=bilinear)
       lensGenome:      { psi: ul(this._progLensGenome,'u_psi'), n: ul(this._progLensGenome,'u_n'), centers: ul(this._progLensGenome,'u_centers'), a: ul(this._progLensGenome,'u_a'), beta: ul(this._progLensGenome,'u_beta'), vtx: ul(this._progLensGenome,'u_vtx'), k: ul(this._progLensGenome,'u_k'), phaseT: ul(this._progLensGenome,'u_phaseT') },   // §7.98/§7.102 genome lens = GPU linOp (mul, SPACETIME)
       nlSpm:           { psi: ul(this._progNlSpm,'u_psi'), gamma: ul(this._progNlSpm,'u_gamma'), isat: ul(this._progNlSpm,'u_isat'), dt: ul(this._progNlSpm,'u_dt') },
+      eyePhaseTilt:    { pot: ul(this._progEyePhaseTilt,'u_pot'), kern: ul(this._progEyePhaseTilt,'u_kern'), psi: ul(this._progEyePhaseTilt,'u_psi'), om: ul(this._progEyePhaseTilt,'u_om'), kx: ul(this._progEyePhaseTilt,'u_kx'), ky: ul(this._progEyePhaseTilt,'u_ky'), m: ul(this._progEyePhaseTilt,'u_m'), cc: ul(this._progEyePhaseTilt,'u_cc'), trap: ul(this._progEyePhaseTilt,'u_trap'), g: ul(this._progEyePhaseTilt,'u_g'), well: ul(this._progEyePhaseTilt,'u_well'), c0: ul(this._progEyePhaseTilt,'u_c0') },
+      fftPerm:         { psi: ul(this._progFftPerm,'u_psi'), axis: ul(this._progFftPerm,'u_axis'), G: ul(this._progFftPerm,'u_G'), nfac: ul(this._progFftPerm,'u_nfac'), fac: ul(this._progFftPerm,'u_fac') },
+      fftStage:        { psi: ul(this._progFftStage,'u_psi'), axis: ul(this._progFftStage,'u_axis'), radix: ul(this._progFftStage,'u_radix'), len: ul(this._progFftStage,'u_len'), G: ul(this._progFftStage,'u_G'), sign: ul(this._progFftStage,'u_sign') },
+      fftNorm:         { psi: ul(this._progFftNorm,'u_psi'), inv: ul(this._progFftNorm,'u_inv') },
+      fftSplit:        { psi: ul(this._progFftSplit,'u_psi'), part: ul(this._progFftSplit,'u_part') },
+      fftBlock:        { rhat: ul(this._progFftBlock,'u_rhat'), ihat: ul(this._progFftBlock,'u_ihat'), lam: ul(this._progFftBlock,'u_lam'), dt: ul(this._progFftBlock,'u_dt'), which: ul(this._progFftBlock,'u_which'), T: ul(this._progFftBlock,'u_T') },
+      fftSpring:       { hat: ul(this._progFftSpring,'u_hat'), ahat: ul(this._progFftSpring,'u_ahat'), k: ul(this._progFftSpring,'u_k') },
+      fftMerge:        { rfield: ul(this._progFftMerge,'u_rfield'), ifield: ul(this._progFftMerge,'u_ifield') },
       eyeSuperpose:    { psi: ul(this._progEyeSuperpose,'u_psi'), obj: ul(this._progEyeSuperpose,'u_obj'), beta: ul(this._progEyeSuperpose,'u_beta') },
       eyeContract:     { psi: ul(this._progEyeContract,'u_psi'), obj: ul(this._progEyeContract,'u_obj'), lambda: ul(this._progEyeContract,'u_lambda') },
       eyeScale:        { psi: ul(this._progEyeScale,'u_psi'), s: ul(this._progEyeScale,'u_s') },
       eyeCapScale:     { psi: ul(this._progEyeCapScale,'u_psi'), e: ul(this._progEyeCapScale,'u_e'), target: ul(this._progEyeCapScale,'u_target') },
+      groupSpm:        { psi: ul(this._progGroupSpm,'u_psi'), d0: ul(this._progGroupSpm,'u_d0'), d1: ul(this._progGroupSpm,'u_d1'), nd: ul(this._progGroupSpm,'u_nd'), gamma: ul(this._progGroupSpm,'u_gamma'), isat: ul(this._progGroupSpm,'u_isat'), dt: ul(this._progGroupSpm,'u_dt') },
+      groupCap:        { psi: ul(this._progGroupCap,'u_psi'), ea: ul(this._progGroupCap,'u_ea'), eb: ul(this._progGroupCap,'u_eb'), nd: ul(this._progGroupCap,'u_nd'), target: ul(this._progGroupCap,'u_target') },
       energyRows:      { a: ul(this._progEnergyRows,'u_a'), G: ul(this._progEnergyRows,'u_G') },
       dissip:          { psi: ul(this._progDissip,'u_psi'), alpha: ul(this._progDissip,'u_alpha'), pump: ul(this._progDissip,'u_pump'), ptarget: ul(this._progDissip,'u_ptarget'), dt: ul(this._progDissip,'u_dt') },
       addForce:        { psi: ul(this._progAddForce,'u_psi'), amp: ul(this._progAddForce,'u_amp'), sig2: ul(this._progAddForce,'u_sig2'), G: ul(this._progAddForce,'u_G') },
@@ -606,6 +633,7 @@ export class IFSGpu {
     this._ringCount = totalPts;
     this._ringMeta  = meta;
     this._ringRadii = fRadii.slice();
+    this._ringW = Array.from(fWeights); this._ringOffs = fOffs; this._ringVer = (this._ringVer | 0) + 1;   // (stepEyeJump's λ follows the rings)
     // Pre-pad to vec4 alignment once here, not per draw call
     const padded = new Float32Array(nRings * 4);
     for (let d = 0; d < nRings; d++) {
@@ -1311,13 +1339,14 @@ export class IFSGpu {
 
   // filmId (optional): render DIRECTLY from that slot's GPU film + its GPU-reduced peak — no CPU array, no upload,
   //   no readback. Omit it and the legacy path (setDescBase + a CPU smoothMax) is used unchanged.
-  renderDescField({ ox = 0, oy = 0, cx = 0, cy = 0, kx = 0, ky = 0, phi = 0, ampView = 0, filmId = null, peakGain = 1 } = {}, smoothMax) {
+  renderDescField({ ox = 0, oy = 0, cx = 0, cy = 0, kx = 0, ky = 0, phi = 0, ampView = 0, filmId = null, peakGain = 1, phaseFloor = 0 } = {}, smoothMax) {
     const gl = this._gl, G = this._G, u = this._u.renderDesc;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, G, G);
     gl.useProgram(this._progRenderDesc);
     gl.uniform1i(u.base, 0);
     gl.uniform1i(u.ampView, ampView ? 1 : 0);
+    if (u.phaseFloor) gl.uniform1f(u.phaseFloor, phaseFloor);   // >0 = full-field phase (CPU-like floor); 0 = legacy fade-to-black
     gl.uniform1i(u.G, G);
     gl.uniform2f(u.off, ox, oy);
     gl.uniform2f(u.center, cx, cy);
@@ -1337,9 +1366,14 @@ export class IFSGpu {
 
   // ── Public: N free leapfrog steps on the eye ping-pong (no injection) ────────
   // Used by the plate-free round-trip eye: stepEyeN(T, +dt) then stepEyeN(T, -dt).
+  //   stepEyeN(n, dt) — n linear leapfrog steps. A LONG run (n ≥ IFSGpu.jumpMin) is ONE spectral pass (stepEyeJump: M^n by binary powering —
+  //   MEASURED equal to the stepwise loop to the f32 floor, rel 6e-7 … 2e-6, energy equal; T 120: 81 → 2.6 ms, T 300: 194 → 2.6 ms), unless an
+  //   eye SCISSOR (the two-browser shard region) restricts the step to a rectangle — the spectral pass cannot. IFSGpu.jumpMin = Infinity: off.
   stepEyeN(n, dt) {
-    for (let i = 0; i < n; i++) this.stepEye(dt);
+    if (n >= IFSGpu.jumpMin && !this._eyeScissor && this._ringOffs && this._progFftBlock && this._u.fftBlock.T) { this.stepEyeJump(n, dt); return; }
+    this._stepEyeLoop(n, dt);
   }
+  _stepEyeLoop(n, dt) { for (let i = 0; i < n; i++) this.stepEye(dt); }
 
   // ── Public: peak |ψ|² of the current eye texture (for self-normalization) ────
   // Small synchronous readback — call only when the eye is recomputed, never per
@@ -1368,6 +1402,367 @@ export class IFSGpu {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     const f32 = new Float32Array(G * G * 2);
     gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const out = new Float64Array(G * G * 2);
+    for (let i = 0; i < G * G * 2; i++) out[i] = f32[i];
+    return out;
+  }
+
+  // ── ASYNC eye readback (2026-09-26) — readEyePsi without the pipeline stall. A synchronous readPixels waits for EVERY
+  //   queued GPU command (and, with two tabs on one GPU, for the other tab's work too): measured on a leader during a join
+  //   + damage drag, readPixels was 90% of main-thread time at a constant ~20 reads/s. Start copies the CURRENT eye texture
+  //   into a pixel-pack buffer — command order guarantees the copy sees exactly this state, whatever is stepped after it —
+  //   and fences it. Ready polls the fence (no wait; WebGL updates it between tasks). Finish returns the Float64Array(2·G²);
+  //   called before Ready it blocks like readEyePsi, so a caller with a deadline can always force it. Drop discards.
+  readEyePsiStart() {
+    const gl = this._gl, G = this._G, n = G * G * 2;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeA : this._fboEyeB;
+    const pbo = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    return { pbo, fence, n };
+  }
+  readEyePsiReady(h) { const gl = this._gl; return gl.getSyncParameter(h.fence, gl.SYNC_STATUS) === gl.SIGNALED; }
+  readEyePsiFinish(h) {
+    const gl = this._gl, f32 = new Float32Array(h.n);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, h.pbo);
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, f32);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.readEyePsiDrop(h);
+    const out = new Float64Array(h.n);
+    for (let i = 0; i < h.n; i++) out[i] = f32[i];
+    return out;
+  }
+  readEyePsiDrop(h) { const gl = this._gl; if (h.fence) { gl.deleteSync(h.fence); h.fence = null; } if (h.pbo) { gl.deleteBuffer(h.pbo); h.pbo = null; } }
+
+  // ── TILE PROBE (2026-09-24, ahc's live lane) — reduce the CURRENT eye texture to a T×T tile grid ON THE GPU, into block
+  //   `col` of a small RGBA32F atlas (T·cols × T). Per tile: R = mean |ψ|², G = mean Re ψ, B = mean Im ψ, A = mean |∇ψ|²
+  //   (periodic forward differences — the local wavenumber² × energy, a per-tile spectrometer with no FFT). Many probes (one per
+  //   sub-step, every slot) land in the atlas and ONE readProbeAtlas() collects them: readback is T²·4 floats per probe instead
+  //   of the whole field. READ-ONLY on the eye: it samples the current parity and restores every piece of GL state it touches
+  //   (program, framebuffer, viewport, unit-0 texture), so it cannot perturb the stepping passes around it.
+  //   pose (optional) — sample the field IN THE DISPLAY'S FRAME: ψ_view(x) = B(x − off)·e^{i(φ + k·(x − c))}, the same register pose
+  //   renderDescField applies (the A-model keeps the k-tilt glide and phase out of the stepped texture). Omit it for the raw texture.
+  probeTiles(T, col, cols = 64, pose = null) {
+    const gl = this._gl, G = this._G, B = (G / T) | 0;
+    if (!this._progTileProbe) { this._progTileProbe = this._compileStep(GLSL_TILE_PROBE);
+      const pr = this._progTileProbe; this._uTileProbe = { psi: gl.getUniformLocation(pr, 'u_psi'), G: gl.getUniformLocation(pr, 'u_G'), B: gl.getUniformLocation(pr, 'u_B'), off: gl.getUniformLocation(pr, 'u_off'),
+        shift: gl.getUniformLocation(pr, 'u_shift'), k: gl.getUniformLocation(pr, 'u_k'), center: gl.getUniformLocation(pr, 'u_center'), phi: gl.getUniformLocation(pr, 'u_phi') }; }
+    if (!this._probeAtlas || this._probeAtlas.T !== T || this._probeAtlas.cols !== cols) {
+      if (this._probeAtlas) { gl.deleteTexture(this._probeAtlas.tex); gl.deleteFramebuffer(this._probeAtlas.fbo); }
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, T * cols, T);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      const fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      this._probeAtlas = { tex, fbo, T, cols }; }
+    const prevProg = gl.getParameter(gl.CURRENT_PROGRAM), prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING), prevVp = gl.getParameter(gl.VIEWPORT);
+    const prevAct = gl.getParameter(gl.ACTIVE_TEXTURE); gl.activeTexture(gl.TEXTURE0); const prevTex0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB, pr = this._progTileProbe, u = this._uTileProbe;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._probeAtlas.fbo);
+    gl.viewport(col * T, 0, T, T);
+    gl.useProgram(pr);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.G, G); gl.uniform1i(u.B, B); gl.uniform2i(u.off, col * T, 0);
+    gl.uniform2f(u.shift, pose ? +pose.ox || 0 : 0, pose ? +pose.oy || 0 : 0); gl.uniform2f(u.k, pose ? +pose.kx || 0 : 0, pose ? +pose.ky || 0 : 0);
+    gl.uniform2f(u.center, pose ? (pose.cx ?? G / 2) : G / 2, pose ? (pose.cy ?? G / 2) : G / 2); gl.uniform1f(u.phi, pose ? +pose.phi || 0 : 0);
+    gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindTexture(gl.TEXTURE_2D, prevTex0); gl.activeTexture(prevAct);
+    gl.useProgram(prevProg); gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb); gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+  }
+  // ── FILM RING + USER SHADERS (2026-09-24, ahc's "medium as the source"). A per-key ring of RG32F frames holding the field
+  //   at successive sub-steps (GPU copy of the CURRENT eye, or a CPU upload), and a user fragment shader that reads two
+  //   frames and their blend. The field stays on the GPU: a user shader sees every pixel of the raw complex field.
+  //   Every call restores the GL state it touches (program, framebuffer, viewport, texture units 0/1).
+  _saveGL() { const gl = this._gl, st = { prog: gl.getParameter(gl.CURRENT_PROGRAM), fb: gl.getParameter(gl.FRAMEBUFFER_BINDING), vp: gl.getParameter(gl.VIEWPORT), act: gl.getParameter(gl.ACTIVE_TEXTURE) };
+    gl.activeTexture(gl.TEXTURE0); st.t0 = gl.getParameter(gl.TEXTURE_BINDING_2D); gl.activeTexture(gl.TEXTURE1); st.t1 = gl.getParameter(gl.TEXTURE_BINDING_2D); return st; }
+  _restoreGL(st) { const gl = this._gl; gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, st.t1); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, st.t0);
+    gl.activeTexture(st.act); gl.useProgram(st.prog); gl.bindFramebuffer(gl.FRAMEBUFFER, st.fb); gl.viewport(st.vp[0], st.vp[1], st.vp[2], st.vp[3]); }
+  _ring(key, R) { if (!this._rings) this._rings = {}; let r = this._rings[key];
+    if (!r || r.R !== R) { if (r) for (const f of r.f) { this._gl.deleteTexture(f[0]); this._gl.deleteFramebuffer(f[1]); }
+      r = { R, f: [] }; for (let k = 0; k < R; k++) r.f.push(this._makePsiTex()); this._rings[key] = r; }
+    return r; }
+  filmRingPush(key, idx, R) {   // copy the CURRENTLY SELECTED eye (mid-loop parity) into ring[key][idx]
+    const gl = this._gl, G = this._G, r = this._ring(key, R), st = this._saveGL(), src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, r.f[idx % R][1]); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progFilmCopy); gl.uniform1i(gl.getUniformLocation(this._progFilmCopy, 'u_src'), 0);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._restoreGL(st); }
+  filmRingUpload(key, idx, R, flat) {   // CPU field (interleaved re,im) → ring[key][idx]
+    const gl = this._gl, G = this._G, r = this._ring(key, R), st = this._saveGL(), f32 = flat instanceof Float32Array ? flat : Float32Array.from(flat);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, r.f[idx % R][0]);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    this._restoreGL(st); }
+  //   renderUserShader(body, key, iA, iB, mix, uniforms) — compile (cached by source) the user's `vec4 medium(vec2 uv, vec2 psi)`
+  //   inside GLSL_USER_HEAD, bind frames iA/iB of the ring, set the float/vec uniforms, draw to the DEFAULT framebuffer (the
+  //   offscreen canvas) at G×G. The caller copies the canvas out at once. Returns null or the compile error text.
+  renderUserShader(body, key, iA, iB, mix, uniforms = {}) {
+    const gl = this._gl, G = this._G; if (!this._userProgs) this._userProgs = new Map();
+    let up = this._userProgs.get(body);
+    if (!up) { try { const pr = this._compileStep(GLSL_USER_HEAD + body + GLSL_USER_TAIL); up = { pr, loc: new Map() }; } catch (e) { return String(e.message || e); }
+      if (this._userProgs.size > 16) this._userProgs.delete(this._userProgs.keys().next().value); this._userProgs.set(body, up); }
+    const r = this._rings && this._rings[key]; if (!r) return "no film";
+    const st = this._saveGL(), L = (n) => { if (!up.loc.has(n)) up.loc.set(n, gl.getUniformLocation(up.pr, n)); return up.loc.get(n); };
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, G, G); gl.useProgram(up.pr);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, r.f[iA % r.R][0]); gl.uniform1i(L('u_psiA'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, r.f[iB % r.R][0]); gl.uniform1i(L('u_psiB'), 1);
+    gl.uniform1f(L('u_mix'), mix); gl.uniform1i(L('u_G'), G);
+    for (const [n, v] of Object.entries(uniforms)) { const l = L(n); if (!l) continue;
+      if (typeof v === 'number') gl.uniform1f(l, v); else if (v.length === 2) gl.uniform2f(l, v[0], v[1]); else if (v.length === 3) gl.uniform3f(l, v[0], v[1], v[2]); else if (v.length === 4) gl.uniform4f(l, v[0], v[1], v[2], v[3]); }
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._restoreGL(st); return null; }
+
+  // ── BAND PROBE (2026-09-26, ahc's synth "time lens") — the CURRENT eye field's SPECTRUM reduced to nb |k| bands, per sub-step.
+  //   copy eye → scratch, mixed-radix FFT (the same Stockham passes as the spectral stepper), keep the spectrum in a per-key ring of
+  //   R = lag+1 frames, then two reduction passes into column `col` of an RGBA32F band atlas (nb·cols × 1):
+  //     per band b:  R = E_b = Σ|ψ̂(k)|²   ·   G,B = C_b = Σ ψ̂_t(k)·conj(ψ̂_{t−lag}(k))  (the lag-`lag` correlation; = E_b when no lagged frame yet)
+  //   binning is the breathing analyser's: q = the lattice wavenumber + the display tilt (kx,ky), wrapped to [−π,π)²; band ⌊|q|/π·nb⌋, |q|>π out.
+  //   Pure GPU arithmetic on a bit-identical texture → bit-identical on same-GPU peers. Restores every piece of GL state it touches.
+  //   `cur` is the sub-step cursor this spectrum belongs to (the ring slot is cur % R; `hasLag` = the ring still holds cur−lag).
+  probeBands(key, cur, lag, nb, col, cols, kx, ky, ringOnly = false) {
+    const gl = this._gl, G = this._G, R = lag + 1, st = this._saveGL();
+    if (!this._progBandRow) { this._progBandRow = this._compileStep(GLSL_BAND_ROW); this._progBandCol = this._compileStep(GLSL_BAND_COL); }
+    if (!this._bandScr) { const [a, fa] = this._makePsiTex(), [b, fb] = this._makePsiTex(); this._bandScr = { A: a, fA: fa, B: b, fB: fb, src: 'A' }; }
+    if (!this._bandRows || this._bandRows.nb !== nb) { if (this._bandRows) { gl.deleteTexture(this._bandRows.tex); gl.deleteFramebuffer(this._bandRows.fbo); }
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, nb, G);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      const fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      this._bandRows = { tex, fbo, nb }; }
+    if (!this._bandAtlas || this._bandAtlas.nb !== nb || this._bandAtlas.cols !== cols) { if (this._bandAtlas) { gl.deleteTexture(this._bandAtlas.tex); gl.deleteFramebuffer(this._bandAtlas.fbo); }
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, nb * cols, 1);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      const fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      this._bandAtlas = { tex, fbo, nb, cols }; }
+    const ring = this._ring('band:' + key, R); ring.cur = ring.cur || new Array(R).fill(-1);
+    const copy = (srcTex, fbo) => { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G); gl.useProgram(this._progFilmCopy);
+      gl.uniform1i(gl.getUniformLocation(this._progFilmCopy, 'u_src'), 0); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); };
+    const S = this._bandScr; S.src = 'A';
+    copy(this._eyeSrc === 'A' ? this._eyeA : this._eyeB, S.fA);
+    this._fft2dS(S, false);
+    const slot = ((cur % R) + R) % R, lagSlot = (((cur - lag) % R) + R) % R;
+    copy(S.src === 'A' ? S.A : S.B, ring.f[slot][1]); ring.cur[slot] = cur;
+    const hasLag = ring.cur[lagSlot] === cur - lag;
+    if (ringOnly) { this._restoreGL(st); return hasLag; }   // a SEED: its spectrum only enters the ring (the next probe's lag), nothing is reduced
+    const pr = this._progBandRow, L = (p, n) => gl.getUniformLocation(p, n);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandRows.fbo); gl.viewport(0, 0, nb, G); gl.useProgram(pr);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, ring.f[slot][0]); gl.uniform1i(L(pr, 'u_cur'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, ring.f[hasLag ? lagSlot : slot][0]); gl.uniform1i(L(pr, 'u_lag'), 1);
+    gl.uniform1i(L(pr, 'u_G'), G); gl.uniform1i(L(pr, 'u_nb'), nb); gl.uniform2f(L(pr, 'u_k'), kx, ky);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    const pc = this._progBandCol;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandAtlas.fbo); gl.viewport(col * nb, 0, nb, 1); gl.useProgram(pc);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._bandRows.tex); gl.uniform1i(L(pc, 'u_rows'), 0);
+    gl.uniform1i(L(pc, 'u_G'), G); gl.uniform1i(L(pc, 'u_x0'), col * nb);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._restoreGL(st);
+    return hasLag;
+  }
+  // ── SECTOR BAND PROBE (2026-09-26) — probeBands with each |k| shell split into 4 angular SECTORS of the wavevector q = lattice k + the
+  //   display tilt: sector 0 = right (−45°…45°), 1 = up, 2 = left, 3 = down. One pass over the spectrum per (band, row) as before, but it
+  //   writes THREE render targets at once (energy, lag-correlation re, im — 4 sectors in RGBA each), so the cost stays one loop; the column
+  //   pass sums the rows into a 3-row atlas. Same ring, same lag rule, same state hygiene as probeBands.
+  //   refl = { b2x, b2y, b2xL, b2yL, r2 } (optional): a SECOND row pass reads the same spectrum MIRRORED — bin q ← conj F((2b − q) mod G)
+  //   on |q|² < r2, the ◐medium analyser's image in the dual — and its energies go to atlas row 3. mirror (same shape, optional): the MAIN
+  //   pass (rows 0–2: energy and lag correlation) reads mirrored too — the lag frame at its own beam bin (b2xL, b2yL)
+  //   gather = { id, M, qs, b2x, b2y } (optional): the DISK GATHER — the mirrored image's M modes (qs = their lattice q, 2 per mode) read
+  //   from this sub-step's spectrum, conj F((2b − q) mod G), into the gather atlas (column = col; 2 modes per RGBA texel, 128 texels a
+  //   row) — the input of the native lock-in (see the app's _lockStep). Runs before ringOnly returns.
+  //   eyeOp (optional) — THE EYE's H-COMPUTE ON THE SOUND (the app's stamped op): { key, data (RGBA per cell: mr, mi, n1, n2), cj, qL, amix,
+  //   kcm, kc2 }. Each sub-step the field goes through it (GLSL_EYE_OP) and is transformed once more into an EYE RING beside the field's
+  //   ring; the main pass (rows 0–2: energy and the lag correlation → the pitch paths Φ) and row 3 read the eye ring, the spectral cut
+  //   gates the plate's modes in both. The gather (the lock-in) keeps the field's own ring. The lag needs the SAME op at the lag frame
+  //   (the ring stamps each entry with the op's key) — else that sub-step has no lag, on every peer alike.
+  probeBandsSec(key, cur, lag, nb, col, cols, kx, ky, ringOnly = false, refl = null, mirror = null, gather = null, eyeOp = null) {
+    const gl = this._gl, G = this._G, R = lag + 1, st = this._saveGL();
+    if (!this._progBandRowSec) { this._progBandRowSec = this._compileStep(GLSL_BAND_ROW_SEC); this._progBandColSec = this._compileStep(GLSL_BAND_COL_SEC); }
+    if (!this._bandScr) { const [a, fa] = this._makePsiTex(), [b, fb] = this._makePsiTex(); this._bandScr = { A: a, fA: fa, B: b, fB: fb, src: 'A' }; }
+    const mk = (w, h) => { const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); return tex; };
+    if (!this._bandRowsSec || this._bandRowsSec.nb !== nb) { if (this._bandRowsSec) { for (const t of this._bandRowsSec.tex) gl.deleteTexture(t); gl.deleteFramebuffer(this._bandRowsSec.fbo); }
+      const tex = [mk(nb, G), mk(nb, G), mk(nb, G), mk(nb, G)], fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      for (let i = 0; i < 4; i++) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, tex[i], 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);   // per-FBO state: only this FBO draws to four targets (the 4th: the shell's PLACE, see the row shader)
+      this._bandRowsSec = { tex, fbo, nb }; }
+    if (!this._bandAtlasSec || this._bandAtlasSec.nb !== nb || this._bandAtlasSec.cols !== cols) { if (this._bandAtlasSec) { gl.deleteTexture(this._bandAtlasSec.tex); gl.deleteFramebuffer(this._bandAtlasSec.fbo); }
+      const tex = mk(nb * cols, 6), fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      this._bandAtlasSec = { tex, fbo, nb, cols }; }
+    const ring = this._ring('band:' + key, R); ring.cur = ring.cur || new Array(R).fill(-1);
+    const copy = (srcTex, fbo) => { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G); gl.useProgram(this._progFilmCopy);
+      gl.uniform1i(gl.getUniformLocation(this._progFilmCopy, 'u_src'), 0); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); };
+    const S = this._bandScr; S.src = 'A';
+    copy(this._eyeSrc === 'A' ? this._eyeA : this._eyeB, S.fA);
+    this._fft2dS(S, false);
+    const slot = ((cur % R) + R) % R, lagSlot = (((cur - lag) % R) + R) % R;
+    copy(S.src === 'A' ? S.A : S.B, ring.f[slot][1]); ring.cur[slot] = cur;
+    let hasLag = ring.cur[lagSlot] === cur - lag;
+    if (gather) this._gatherDisk(ring.f[slot][0], col, cols, gather);
+    let eR = null;
+    if (eyeOp && eyeOp.data) { const E = eyeOp;   // (only a SPATIAL op needs the eye ring: the k-space ones are relabels/gates in the row pass)
+      if (!this._progEyeOp) this._progEyeOp = this._compileStep(GLSL_EYE_OP);
+      if (!this._eyeMsk || this._eyeMsk.key !== E.key) { if (!this._eyeMsk) this._eyeMsk = { tex: mk(G, G) };
+        gl.bindTexture(gl.TEXTURE_2D, this._eyeMsk.tex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RGBA, gl.FLOAT, E.data); this._eyeMsk.key = E.key; }
+      const po = this._progEyeOp, Lo = (n) => gl.getUniformLocation(po, n); gl.bindFramebuffer(gl.FRAMEBUFFER, S.fA); gl.viewport(0, 0, G, G); gl.useProgram(po);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._eyeSrc === 'A' ? this._eyeA : this._eyeB); gl.uniform1i(Lo('u_src'), 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._eyeMsk.tex); gl.uniform1i(Lo('u_msk'), 1);
+      gl.uniform1f(Lo('u_cj'), 1);   // (the conjugate is a RELABEL in the row pass — u_cjk — applied to this ring: never here too) gl.uniform1f(Lo('u_qL'), +E.qL || 0); gl.uniform1f(Lo('u_amix'), +E.amix || 0);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+      S.src = 'A'; this._fft2dS(S, false);
+      eR = this._ring('beye:' + key, R); eR.cur = eR.cur || new Array(R).fill(-1); eR.ek = eR.ek || new Array(R).fill('');
+      copy(S.src === 'A' ? S.A : S.B, eR.f[slot][1]); eR.cur[slot] = cur; eR.ek[slot] = E.key;
+      hasLag = eR.cur[lagSlot] === cur - lag && eR.ek[lagSlot] === E.key; }
+    if (ringOnly) { this._restoreGL(st); return hasLag; }
+    const curT = eR ? eR.f[slot][0] : ring.f[slot][0], lagT = eR ? eR.f[hasLag ? lagSlot : slot][0] : ring.f[hasLag ? lagSlot : slot][0];
+    const pr = this._progBandRowSec, L = (p, n) => gl.getUniformLocation(p, n);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandRowsSec.fbo); gl.viewport(0, 0, nb, G); gl.useProgram(pr);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, curT); gl.uniform1i(L(pr, 'u_cur'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lagT); gl.uniform1i(L(pr, 'u_lag'), 1);
+    gl.uniform1i(L(pr, 'u_G'), G); gl.uniform1i(L(pr, 'u_nb'), nb); gl.uniform2f(L(pr, 'u_k'), kx, ky);
+    const _mir = (m) => { gl.uniform1i(L(pr, 'u_rf'), m ? (m.direct ? 2 : 1) : 0); if (m) { gl.uniform2i(L(pr, 'u_b2'), m.b2x | 0, m.b2y | 0); gl.uniform2i(L(pr, 'u_b2L'), (m.b2xL ?? m.b2x) | 0, (m.b2yL ?? m.b2y) | 0); gl.uniform1f(L(pr, 'u_r2'), +m.r2 || 0); } };
+    const _eyeU = (E) => { gl.uniform1i(L(pr, 'u_kcm'), (E && E.kcm) | 0); gl.uniform1f(L(pr, 'u_kc2'), +(E && E.kc2) || 0); gl.uniform1i(L(pr, 'u_cjk'), E && E.cjk ? 1 : 0);
+      gl.uniform3f(L(pr, 'u_pol'), E && E.pol ? 1 : 0, E && E.pol ? Math.cos(2 * E.pol) : 1, E && E.pol ? Math.sin(2 * E.pol) : 0);
+      const bs = (E && E.bs) || []; gl.uniform1i(L(pr, 'u_bsN'), Math.min(4, bs.length)); for (let k = 0; k < 4; k++) gl.uniform2i(L(pr, 'u_bs' + k), (bs[k] ? bs[k][0] : 0) | 0, (bs[k] ? bs[k][1] : 0) | 0); gl.uniform1f(L(pr, 'u_bsr2'), +(E && E.bsr2) || 0); };
+    _mir(mirror); _eyeU(eyeOp);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    const pc = this._progBandColSec, T = this._bandRowsSec.tex;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandAtlasSec.fbo); gl.viewport(col * nb, 0, nb, 3); gl.useProgram(pc);
+    for (let i = 0; i < 3; i++) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, T[i]); }
+    gl.uniform1i(L(pc, 'u_e'), 0); gl.uniform1i(L(pc, 'u_cr'), 1); gl.uniform1i(L(pc, 'u_ci'), 2); gl.uniform1i(L(pc, 'u_G'), G); gl.uniform1i(L(pc, 'u_x0'), col * nb); gl.uniform1i(L(pc, 'u_ry'), 0);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    //   atlas row 5 — the shell's PLACE (the main pass's 4th target, summed like the others: r = 5 − u_ry = 3)
+    gl.viewport(col * nb, 5, nb, 1); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, T[3]); gl.uniform1i(L(pc, 'u_p'), 3); gl.uniform1i(L(pc, 'u_ry'), 2);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, null);
+    if (refl) {   // the mirrored pass → atlas row 3 (energy only)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandRowsSec.fbo); gl.viewport(0, 0, nb, G); gl.useProgram(pr);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, curT); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lagT);
+      _mir(refl); _eyeU(eyeOp);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandAtlasSec.fbo); gl.viewport(col * nb, 3, nb, 1); gl.useProgram(pc);
+      for (let i = 0; i < 3; i++) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, T[i]); }
+      gl.uniform1i(L(pc, 'u_ry'), 3);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); }
+    if (eyeOp) {   // atlas row 4 — the DRY read: what the ear would hear WITHOUT the eye (the same read — refl, else the main mirror/direct — on the field's own ring, no eye op): the eye's transmitted energy, for the loudness
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandRowsSec.fbo); gl.viewport(0, 0, nb, G); gl.useProgram(pr);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, ring.f[slot][0]); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, ring.f[slot][0]);
+      _mir(refl || mirror); _eyeU(null);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._bandAtlasSec.fbo); gl.viewport(col * nb, 4, nb, 1); gl.useProgram(pc);
+      for (let i = 0; i < 3; i++) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, T[i]); }
+      gl.uniform1i(L(pc, 'u_ry'), 4);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); }
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, null);   // unit 2 is outside _saveGL's set: leave it clean
+    this._restoreGL(st);
+    return hasLag;
+  }
+  //   the DISK GATHER pass (see probeBandsSec): the index texture (the modes' q, cached per id) and the atlas (cols × H rows of 128 texels)
+  _gatherDisk(spec, col, cols, g) {
+    const gl = this._gl, G = this._G, M = g.M | 0, H = Math.max(1, Math.ceil(M / 256));
+    if (!this._progGather) this._progGather = this._compileStep(GLSL_GATHER_DISK);
+    const mk = (w, h) => { const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); return tex; };
+    if (!this._gatherIdx || this._gatherIdx.id !== g.id) { if (this._gatherIdx) gl.deleteTexture(this._gatherIdx.tex);
+      const d = new Float32Array(128 * H * 4); for (let t = 0; t < M; t++) { d[2 * t] = g.qs[2 * t]; d[2 * t + 1] = g.qs[2 * t + 1]; }   // texel u holds modes 2u, 2u+1: (qx0, qy0, qx1, qy1)
+      const tex = mk(128, H); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 128, H, gl.RGBA, gl.FLOAT, d); this._gatherIdx = { id: g.id, tex, H }; }
+    if (!this._gatherAtlas || this._gatherAtlas.H !== H || this._gatherAtlas.cols !== cols) { if (this._gatherAtlas) { gl.deleteTexture(this._gatherAtlas.tex); gl.deleteFramebuffer(this._gatherAtlas.fbo); }
+      const tex = mk(128, H * cols), fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      this._gatherAtlas = { tex, fbo, H, cols }; }
+    const pr = this._progGather, L = (n) => gl.getUniformLocation(pr, n);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._gatherAtlas.fbo); gl.viewport(0, col * H, 128, H); gl.useProgram(pr);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, spec); gl.uniform1i(L('u_spec'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._gatherIdx.tex); gl.uniform1i(L('u_idx'), 1);
+    gl.uniform1i(L('u_G'), G); gl.uniform1i(L('u_M'), M); gl.uniform1i(L('u_y0'), col * H); gl.uniform2i(L('u_b2'), g.b2x | 0, g.b2y | 0); gl.uniform1i(L('u_direct'), g.direct ? 1 : 0);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+  }
+  //   async read of the gather atlas (the first n columns), like readBandAtlasSecStart; finish → { data: Float32Array(n·H·128·4), H }
+  readGatherStart(n) {
+    const gl = this._gl, a = this._gatherAtlas; if (!a || n <= 0) return null;
+    const pbo = gl.createBuffer(), prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING), rows = n * a.H;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, 128 * rows * 4 * 4, gl.STREAM_READ);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo); gl.readPixels(0, 0, 128, rows, gl.RGBA, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
+    return { pbo, fence, rows, H: a.H };
+  }
+  readGatherFinish(h) {
+    const gl = this._gl, data = new Float32Array(128 * h.rows * 4);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, h.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, data); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.readEyePsiDrop(h); return { data, H: h.H };
+  }
+  //   readBandAtlasSec(n) — Float32Array(n·nb·12): probe p, band b → [E s0..s3, Cre s0..s3, Cim s0..s3] at (p·nb + b)·12 (+ .refl, see _bandSecUnpack)
+  readBandAtlasSec(n) {
+    const gl = this._gl, a = this._bandAtlasSec; if (!a || n <= 0) return null;
+    const W = n * a.nb, raw = new Float32Array(W * 6 * 4), prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo); gl.readPixels(0, 0, W, 6, gl.RGBA, gl.FLOAT, raw); gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    return this._bandSecUnpack(raw, W);
+  }
+  //   ASYNC twin of readBandAtlasSec: copy the first n probes into a PBO behind a fence and return at once (no pipeline stall). The
+  //   atlas may be drawn into again right away — GL executes commands in order, so the copy reads the probes as they were. Finish
+  //   when readBandAtlasSecReady(h) (or force it: it then waits for exactly those commands).
+  readBandAtlasSecStart(n) {
+    const gl = this._gl, a = this._bandAtlasSec; if (!a || n <= 0) return null;
+    const W = n * a.nb, pbo = gl.createBuffer(), prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, W * 6 * 4 * 4, gl.STREAM_READ);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo); gl.readPixels(0, 0, W, 6, gl.RGBA, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
+    return { pbo, fence, W };
+  }
+  readBandAtlasSecReady(h) { const gl = this._gl; return !!h && !!h.fence && gl.getSyncParameter(h.fence, gl.SYNC_STATUS) === gl.SIGNALED; }
+  readBandAtlasSecFinish(h) {
+    const gl = this._gl, W = h.W, raw = new Float32Array(W * 6 * 4);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, h.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, raw); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.readEyePsiDrop(h);
+    return this._bandSecUnpack(raw, W);
+  }
+  //   the atlas rows → out (the field: [E, Cre, Cim] × 4 sectors at x·12, as always) + out.refl (row 3, the mirrored energies at x·4 —
+  //   meaningful only for a probe drawn with refl)
+  _bandSecUnpack(raw, W) {
+    const out = new Float32Array(W * 12), rf = new Float32Array(W * 4), dry = new Float32Array(W * 4), pos = new Float32Array(W * 4);
+    for (let x = 0; x < W; x++) { for (let r = 0; r < 3; r++) for (let c = 0; c < 4; c++) out[x * 12 + r * 4 + c] = raw[(r * W + x) * 4 + c]; for (let c = 0; c < 4; c++) { rf[x * 4 + c] = raw[(3 * W + x) * 4 + c]; dry[x * 4 + c] = raw[(4 * W + x) * 4 + c]; pos[x * 4 + c] = raw[(5 * W + x) * 4 + c]; } }
+    out.refl = rf; out.dry = dry; out.pos = pos; return out;   // pos: row 5 (per shell: Zx re, im, Zy re, im — the shell's place)   // dry: row 4 (the read without the eye — meaningful only for a probe drawn with an eye op)
+  }
+  //   readBandAtlas(n) — the first n band probes: Float32Array(n·nb·4), probe p band b at (p·nb + b)·4 = (E, Cre, Cim, 0)
+  readBandAtlas(n) {
+    const gl = this._gl, a = this._bandAtlas; if (!a || n <= 0) return null;
+    const out = new Float32Array(n * a.nb * 4), prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo); gl.readPixels(0, 0, n * a.nb, 1, gl.RGBA, gl.FLOAT, out); gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    return out;
+  }
+
+  //   readProbeAtlas(n) — the first n probe blocks as Float32Array(n·T·T·4), block-major: block b, tile (tx,ty) at
+  //   ((b·T·T) + ty·T + tx)·4. One readPixels for every probe since the last read.
+  readProbeAtlas(n) {
+    const gl = this._gl, a = this._probeAtlas; if (!a || n <= 0) return null;
+    const T = a.T, raw = new Float32Array(n * T * T * 4);
+    const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo);
+    gl.readPixels(0, 0, n * T, T, gl.RGBA, gl.FLOAT, raw);   // row-major over the atlas: (y·(n·T) + x)·4
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+    const out = new Float32Array(n * T * T * 4), W = n * T;
+    for (let b = 0; b < n; b++) for (let ty = 0; ty < T; ty++) for (let tx = 0; tx < T; tx++) {
+      const si = (ty * W + b * T + tx) * 4, di = ((b * T + ty) * T + tx) * 4;
+      out[di] = raw[si]; out[di + 1] = raw[si + 1]; out[di + 2] = raw[si + 2]; out[di + 3] = raw[si + 3]; }
+    return out;
+  }
+
+  // DIAGNOSTIC: read back the shared _obj (injection att) texture as Float64(2N). Attaches _obj to a scratch FBO.
+  //   Used only by the join-fork probe to hash the ACTUAL resident att the superpose reads (RG32F).
+  readObjField() {
+    const gl = this._gl, G = this._G;
+    if (!this._obj) return null;
+    if (!this._dbgFbo) this._dbgFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._dbgFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._obj, 0);
+    const f32 = new Float32Array(G * G * 2);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f32);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     const out = new Float64Array(G * G * 2);
     for (let i = 0; i < G * G * 2; i++) out[i] = f32[i];
@@ -1527,6 +1922,159 @@ export class IFSGpu {
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
 
+  // FIELD-LEVEL qedge, GPU-RESIDENT: apply the SU(2) element u=(u0,u1) to the slot PAIR (i,j) as ONE quaternion field
+  //   ψ_ℍ ← ψ_ℍ·u (quaternion-pair.js su2ApplyField), entirely on the GPU — NO readback, NO upload. Both slots' resident
+  //   textures are sampled; the two rotated channels are written into each slot's OTHER ping-pong half, then parity flips.
+  //   Because the output pair depends on BOTH inputs, the two source textures are held STABLE across both passes (parity
+  //   flips only AFTER both writes) — no read-after-write hazard. u0/u1 are the SHARED replicated register element →
+  //   deterministic same-device (display-grade f32, exactly like stepEye; never read back into regH). Slots must be primed.
+  quatMixEyeSlots(i, j, u0, u1) {
+    const gl = this._gl, G = this._G;
+    const si = this._slotEye[i], sj = this._slotEye[j];
+    if (!si || !sj || !si.primed || !sj.primed) return false;   // both pair slots must have a resident field
+    const srcI = si.src === 'A' ? si.A : si.B, dstI = si.src === 'A' ? si.fB : si.fA;   // read current, write the other half
+    const srcJ = sj.src === 'A' ? sj.A : sj.B, dstJ = sj.src === 'A' ? sj.fB : sj.fA;
+    const u = this._u.quatMix;
+    gl.useProgram(this._progQuatMix);
+    gl.viewport(0, 0, G, G);
+    gl.uniform1i(u.a, 0); gl.uniform1i(u.b, 1);
+    gl.uniform2f(u.u0, u0[0], u0[1]); gl.uniform2f(u.u1, u1[0], u1[1]);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcI);   // u_a = slot i's field (ψ_A)
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, srcJ);   // u_b = slot j's field (ψ_B)
+    gl.bindVertexArray(this._vao);
+    // pass 1: pA (slot i output) → slot i's dest (the non-src half)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstI); gl.uniform1i(u.which, 0); gl.drawArrays(gl.TRIANGLES, 0, 6);
+    // pass 2: pB (slot j output) → slot j's dest  (still reading the SAME srcI/srcJ — parity not yet flipped → no hazard)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstJ); gl.uniform1i(u.which, 1); gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    // The mix wrote ONLY the non-src half of each slot. But the turbo stepper ping-pongs BOTH halves and the render
+    //   reads whichever half src points at — so if the two halves differ, consecutive draws show ALTERNATING fields
+    //   (rotated / un-rotated) → the coupling visually AVERAGES OUT to nothing (the observed bug). Fix: copy the
+    //   rotated result into the OTHER half too, so BOTH halves hold the rotated field (the CPU path's setEyePsiBoth
+    //   equivalent). Now no matter which parity the stepper/render lands on, it reads the rotated field.
+    const dstTexI = si.src === 'A' ? si.B : si.A, srcTexI = si.src === 'A' ? si.A : si.B;   // dst = the just-written half's TEXTURE; src = the old (to be overwritten)
+    const dstTexJ = sj.src === 'A' ? sj.B : sj.A, srcTexJ = sj.src === 'A' ? sj.A : sj.B;
+    const fboSrcI = si.src === 'A' ? si.fA : si.fB, fboSrcJ = sj.src === 'A' ? sj.fA : sj.fB;   // FBO of the OLD half (copy target)
+    gl.useProgram(this._progFilmCopy);
+    gl.uniform1i(gl.getUniformLocation(this._progFilmCopy, 'u_src'), 0);
+    gl.bindVertexArray(this._vao);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboSrcI); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dstTexI); gl.drawArrays(gl.TRIANGLES, 0, 6);   // copy rotated pA into the other half
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboSrcJ); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dstTexJ); gl.drawArrays(gl.TRIANGLES, 0, 6);   // copy rotated pB into the other half
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // BOTH halves now hold the rotated field → leave src UNCHANGED (both identical). The stepper's next ping-pong
+    //   reads the rotated field regardless of parity; the render always shows it. (No src flip needed.)
+    this.dropFilm(i); this.dropFilm(j);   // drop the stale films → the draw path re-captures the rotated texture
+    return true;
+  }
+
+  // FIELD-LEVEL dqedge, GPU-RESIDENT: apply the SE(3) screw U=(u_r,u_d) to the FOUR slots [ia,ib,ic,id] as ONE
+  //   dual-quaternion field ψ̂ (dual-quaternion.js dqApplyField), entirely on the GPU — NO readback. (ia,ib)=q_r
+  //   rotation pair, (ic,id)=q_d translation pair. The FOUR src textures are read STABLE across all four output
+  //   passes (parity flips only AFTER — no read-after-write hazard). Each output is written to its slot's non-src
+  //   half, then copied into the sibling half (both halves hold the rotated field — the parity-flicker fix). u_r/u_d
+  //   are the SHARED replicated screw → deterministic same-device (display-grade f32; never read into regH). Primed.
+  dualQmixEyeSlots(ia, ib, ic, id, ur0, ur1, ud0, ud1) {
+    const gl = this._gl, G = this._G;
+    const S = [this._slotEye[ia], this._slotEye[ib], this._slotEye[ic], this._slotEye[id]];
+    for (const s of S) if (!s || !s.primed) return false;   // all four slots must have a resident field
+    const src = S.map((s) => s.src === 'A' ? s.A : s.B);       // the 4 current textures (ψ_rA, ψ_rB, ψ_dA, ψ_dB)
+    const dstFbo = S.map((s) => s.src === 'A' ? s.fB : s.fA);  // write into each slot's OTHER half's FBO
+    const u = this._u.dualQmix;
+    gl.useProgram(this._progDualQmix);
+    gl.viewport(0, 0, G, G);
+    gl.uniform1i(u.rA, 0); gl.uniform1i(u.rB, 1); gl.uniform1i(u.dA, 2); gl.uniform1i(u.dB, 3);
+    gl.uniform2f(u.ur0, ur0[0], ur0[1]); gl.uniform2f(u.ur1, ur1[0], ur1[1]);
+    gl.uniform2f(u.ud0, ud0[0], ud0[1]); gl.uniform2f(u.ud1, ud1[0], ud1[1]);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src[0]);   // u_rA = ψ_r z0 (slot ia)
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, src[1]);   // u_rB = ψ_r z1 (slot ib)
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, src[2]);   // u_dA = ψ_d z0 (slot ic)
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, src[3]);   // u_dB = ψ_d z1 (slot id)
+    gl.bindVertexArray(this._vao);
+    for (let w = 0; w < 4; w++) {   // outputs: 0→rA(ia), 1→rB(ib), 2→dA(ic), 3→dB(id) — all reading the SAME 4 src textures
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dstFbo[w]); gl.uniform1i(u.which, w); gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.bindVertexArray(null);
+    // copy each rotated result into the OTHER (src) half so BOTH halves hold the rotated field (parity-flicker fix)
+    gl.useProgram(this._progFilmCopy);
+    gl.uniform1i(gl.getUniformLocation(this._progFilmCopy, 'u_src'), 0);
+    gl.bindVertexArray(this._vao);
+    for (let w = 0; w < 4; w++) { const s = S[w];
+      const dstTex = s.src === 'A' ? s.B : s.A;                // the just-written half's TEXTURE
+      const fboSrc = s.src === 'A' ? s.fA : s.fB;              // the OLD half's FBO (copy target)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fboSrc); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dstTex); gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.dropFilm(ia); this.dropFilm(ib); this.dropFilm(ic); this.dropFilm(id);   // re-capture the rotated textures
+    return true;
+  }
+
+  // ── PAIR / BODY-COVARIANT STEP PRIMITIVES (2026-09-23) ─────────────────────────────────────────────────────────
+  //   A slot PAIR is one spinor field (ψ_A, ψ_B) and four slots one ℍ⊗𝔻 body (ψ_r = (rA,rB), ψ_d = (dA,dB)). The
+  //   register rotates them by a RIGHT action, which commutes with the per-channel propagator — but NOT with a
+  //   per-slot SPM or a per-slot energy cap: those see |ψ_A|² and |ψ_B|² separately, while a rotation only
+  //   preserves their SUM. MEASURED (CPU model of this step): per-slot cap wiped a 32% A→B transfer to 0.1% within
+  //   8 sub-steps; with the group forms below the rotation commutes with the whole unpinned step to 7e-16.
+  //   So the covariant forms use the GROUP density: dens = the members whose |ψ|² is the invariant (both slots of
+  //   an ℍ pair; the ROTATION pair of an ℍ⊗𝔻 body, since translation changes |ψ_d| — see dual-quaternion.js).
+  //   A one-member group reduces EXACTLY to applyEyeNlSpm / applyEyeEnergyCapNS (the conservative slice).
+  //   Both write every member's NON-src half from the members' SRC halves, and flip parity only after all writes,
+  //   so no member is read after it has been written (the quatMixEyeSlots discipline). Returns false if a member is
+  //   not resident. The caller must selectEyeSlot() again before any single-slot op (the active _eyeSrc is stale).
+  _slotSrcTex(s) { return s.src === 'A' ? s.A : s.B; }
+  applyGroupSpm(ids, densIds, gamma, isat, dt) {
+    const S = ids.map((id) => this._slotEye[id]), D = densIds.map((id) => this._slotEye[id]);
+    if (S.some((s) => !s || !s.primed) || !D.length || D.some((s) => !s || !s.primed)) return false;
+    const gl = this._gl, G = this._G, u = this._u.groupSpm;
+    gl.useProgram(this._progGroupSpm); gl.viewport(0, 0, G, G); this._scB();
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.d0, 1); gl.uniform1i(u.d1, 2); gl.uniform1i(u.nd, Math.min(2, D.length));
+    gl.uniform1f(u.gamma, gamma); gl.uniform1f(u.isat, isat); gl.uniform1f(u.dt, dt);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._slotSrcTex(D[0]));
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this._slotSrcTex(D[D.length > 1 ? 1 : 0]));
+    gl.bindVertexArray(this._vao);
+    for (const s of S) { gl.bindFramebuffer(gl.FRAMEBUFFER, s.src === 'A' ? s.fB : s.fA);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._slotSrcTex(s)); gl.drawArrays(gl.TRIANGLES, 0, 6); }
+    gl.bindVertexArray(null); this._scE(); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.activeTexture(gl.TEXTURE0);
+    for (const s of S) s.src = s.src === 'A' ? 'B' : 'A';
+    return true;
+  }
+  applyGroupCap(ids, densIds, target) {
+    const S = ids.map((id) => this._slotEye[id]), D = densIds.map((id) => this._slotEye[id]);
+    if (S.some((s) => !s || !s.primed) || !D.length || D.some((s) => !s || !s.primed) || !(target > 0)) return false;
+    const gl = this._gl, G = this._G;
+    this.opCycleInit();
+    const ur = this._u.energyRows;
+    D.slice(0, 2).forEach((d, k) => {   // E of each density member → the 1×1 scalar textures A / B (no readback)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._opDotFbo); gl.viewport(0, 0, G, G);
+      gl.useProgram(this._progEnergyRows); gl.uniform1i(ur.a, 0); gl.uniform1i(ur.G, G);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._slotSrcTex(d));
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+      this._opColFinish(k === 0 ? 'A' : 'B');
+    });
+    const u = this._u.groupCap;
+    gl.useProgram(this._progGroupCap); gl.viewport(0, 0, G, G); this._scB();
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.ea, 1); gl.uniform1i(u.eb, 2); gl.uniform1i(u.nd, Math.min(2, D.length)); gl.uniform1f(u.target, target);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._opSclA);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this._opSclB);
+    gl.bindVertexArray(this._vao);
+    for (const s of S) { gl.bindFramebuffer(gl.FRAMEBUFFER, s.src === 'A' ? s.fB : s.fA);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this._slotSrcTex(s)); gl.drawArrays(gl.TRIANGLES, 0, 6); }
+    gl.bindVertexArray(null); this._scE(); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.activeTexture(gl.TEXTURE0);
+    for (const s of S) s.src = s.src === 'A' ? 'B' : 'A';
+    return true;
+  }
+  // useSlotObj(id): point the injection target (_obj, read by applyEyeSuperpose / the spring / contract) at slot
+  //   id's OWN obj texture, so members stepped in lockstep keep their per-beat att without re-uploading it every
+  //   sub-step. id=null restores the shared default. Lazy-created, RG32F like _obj.
+  useSlotObj(id) {
+    if (!this._objDefault) this._objDefault = this._obj;
+    if (id == null) { this._obj = this._objDefault; return; }
+    this._slotObj ??= {};
+    if (!this._slotObj[id]) this._slotObj[id] = this._makeRGF32Tex();
+    this._obj = this._slotObj[id];
+  }
+
   // §7.92 ROTATE the eye field by delta (rad) about each center pixel, within radius rad. One ping-pong pass — the
   // θ-operator as a pure-medium field transform (resample, moves |ψ|). centers = Float array [x0,y0,x1,y1,...] in
   // pixel coords (≤16). The medium operates on the medium: ψ_eye ← R_delta·ψ_eye locally about the mains.
@@ -1636,6 +2184,183 @@ export class IFSGpu {
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
 
+  // ── MIXED-RADIX FFT (Stockham) on the active eye buffer ─────────────────────────────────────────────
+  // factor(G): largest-radix-first stage sequence, base radix 16 — MIRRORS mixed-radix-core.js factor().
+  _fftFactors(G) {
+    if (this._fftFacCache && this._fftFacCache.G === G) return this._fftFacCache.f;
+    const f = []; let n = G;
+    for (const r of [16, 8, 4, 2]) { while (n % r === 0 && n > 1) { f.push(r); n /= r; } }
+    if (n > 1) f.push(n);   // any leftover prime (shouldn't happen for power-of-two)
+    this._fftFacCache = { G, f };
+    return f;
+  }
+  // ── STATE-PARAMETRIC FFT — operates on a ping-pong state {A,fA,B,fB,src} so it can drive ANY field
+  //    (the eye buffer OR the spectral scratch fields), not just _eyeA/_eyeB. Each pass reads st's src
+  //    texture, writes the other, flips st.src. ────────────────────────────────────────────────────────
+  _fftPermPassS(st, axis, factors) {
+    const gl = this._gl, G = this._G;
+    const src = st.src === 'A' ? st.A : st.B, fbo = st.src === 'A' ? st.fB : st.fA;
+    const u = this._u.fftPerm;
+    const fac = new Int32Array(8); for (let i = 0; i < factors.length && i < 8; i++) fac[i] = factors[i];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progFftPerm);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.axis, axis); gl.uniform1i(u.G, G);
+    gl.uniform1i(u.nfac, factors.length); gl.uniform1iv(u.fac, fac);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    st.src = st.src === 'A' ? 'B' : 'A';
+  }
+  _fftStagePassS(st, axis, radix, len, sign) {
+    const gl = this._gl, G = this._G;
+    const src = st.src === 'A' ? st.A : st.B, fbo = st.src === 'A' ? st.fB : st.fA;
+    const u = this._u.fftStage;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(this._progFftStage);
+    gl.uniform1i(u.psi, 0); gl.uniform1i(u.axis, axis); gl.uniform1i(u.radix, radix);
+    gl.uniform1i(u.len, len); gl.uniform1i(u.G, G); gl.uniform1f(u.sign, sign);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    st.src = st.src === 'A' ? 'B' : 'A';
+  }
+  // FULL 2D FFT on a state field. inv=false forward. Rows then cols (matches mixedRadix2d). 1/N once if inv.
+  _fft2dS(st, inv) {
+    const gl = this._gl, G = this._G, sign = inv ? 1.0 : -1.0, factors = this._fftFactors(G);
+    for (let axis = 0; axis < 2; axis++) {
+      this._fftPermPassS(st, axis, factors);
+      let len = 1; for (const r of factors) { this._fftStagePassS(st, axis, r, len, sign); len *= r; }
+    }
+    if (inv) {
+      const src = st.src === 'A' ? st.A : st.B, fbo = st.src === 'A' ? st.fB : st.fA, u = this._u.fftNorm;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+      gl.useProgram(this._progFftNorm);
+      gl.uniform1i(u.psi, 0); gl.uniform1f(u.inv, 1.0 / (G * G));
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+      gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      st.src = st.src === 'A' ? 'B' : 'A';
+    }
+  }
+  fftEye(inv) {
+    const self = this;
+    const st = { get A(){return self._eyeA;}, get fA(){return self._fboEyeA;}, get B(){return self._eyeB;}, get fB(){return self._fboEyeB;}, get src(){return self._eyeSrc;}, set src(v){self._eyeSrc=v;} };
+    this._fft2dS(st, inv);
+  }
+  // upload a λ(k) texture (Float64Array(2N) re,im) for the spectral propagator block.
+  setLamField(lam64) {
+    const gl = this._gl, G = this._G, N = G * G;
+    if (!this._lamTex) { this._lamTex = this._makeRGF32Tex(); }
+    const f32 = new Float32Array(N * 2); for (let i = 0; i < N * 2; i++) f32[i] = lam64[i];
+    gl.bindTexture(gl.TEXTURE_2D, this._lamTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+  // lazily allocate the spectral scratch: R and I ping-pong pairs + one draw helper.
+  _ensureSpec() {
+    if (this._specR) return;
+    const [rA, frA] = this._makePsiTex(), [rB, frB] = this._makePsiTex();
+    const [iA, fiA] = this._makePsiTex(), [iB, fiB] = this._makePsiTex();
+    this._specR = { A: rA, fA: frA, B: rB, fB: frB, src: 'A' };
+    this._specI = { A: iA, fA: fiA, B: iB, fB: fiB, src: 'A' };
+  }
+  _ensureAttSpec() {
+    if (this._specAr) return;
+    const [rA, frA] = this._makePsiTex(), [rB, frB] = this._makePsiTex();
+    const [iA, fiA] = this._makePsiTex(), [iB, fiB] = this._makePsiTex();
+    this._specAr = { A: rA, fA: frA, B: rB, fB: frB, src: 'A' };   // FFT(att.re)
+    this._specAi = { A: iA, fA: fiA, B: iB, fB: fiB, src: 'A' };   // FFT(att.im)
+  }
+  // Stage the CURRENT att (the _obj texture set by setObjField) into its spectrum, in the SAME split+FFT layout as
+  //   stepEyeSpectral's ψ (Re→_specAr, Im→_specAi). Call ONCE when the att changes (a lock event / att-phase beat),
+  //   not per step — the spectral spring then blends toward these cached buffers. keyed by u_attSpecKey.
+  setSpringAtt() {
+    const gl = this._gl, G = this._G;
+    this._ensureAttSpec();
+    const Ar = this._specAr, Ai = this._specAi;
+    Ar.src = 'A'; Ai.src = 'A';
+    // split _obj → (Re,0)/(Im,0), then forward-FFT each (matches steps 1-2 of stepEyeSpectral)
+    this._drawPass(this._progFftSplit, this._u.fftSplit, [this._obj], Ar.fA, (u) => { gl.uniform1i(u.psi, 0); gl.uniform1i(u.part, 0); });
+    this._drawPass(this._progFftSplit, this._u.fftSplit, [this._obj], Ai.fA, (u) => { gl.uniform1i(u.psi, 0); gl.uniform1i(u.part, 1); });
+    this._fft2dS(Ar, false); this._fft2dS(Ai, false);
+    this._attSpecReady = true;
+  }
+  // one full-screen pass: bind `prog`, set uniforms via cb(u), read `srcs` (array of textures on TEXTURE0..),
+  //   draw into `fbo`. A tiny helper for the split/block/merge passes.
+  _drawPass(prog, u, srcs, fbo, cb) {
+    const gl = this._gl, G = this._G;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.useProgram(prog); cb(u);
+    for (let t = 0; t < srcs.length; t++) { gl.activeTexture(gl.TEXTURE0 + t); gl.bindTexture(gl.TEXTURE_2D, srcs[t]); }
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  // ONE spectral step on the active eye buffer — the FAITHFUL mixedRadixPropagate (T=1) two-field 2×2 block.
+  //   split → FFT(R), FFT(I) → 2×2 block → IFFT(R'), IFFT(I') → merge. GPU port verified vs CPU (f64) headless.
+  stepEyeSpectral(dt, springK = 0) { if (!this._lamTex) return; this._spectralPass(dt, springK, this._lamTex, 1); }   // no λ uploaded → nothing to propagate
+  //   stepEyeJump(T, dt) — T LINEAR steps (stepEyeN's leapfrog of the rings set) in ONE spectral pass: per mode the one-step map M has det 1, so
+  //   M^T = α·I + β·N by binary powering in the block shader (log₂T multiplies) — the same map stepEyeN iterates, its λ = kernelLambdaGrid of
+  //   the rings (a texture of its own: ahc's λ cache is untouched). ~30 draws instead of 3·T; short runs keep stepEyeN. Linear only: nothing may
+  //   act between the steps (no SPM, no injection) — exactly stepEyeN's contract.
+  stepEyeJump(T, dt) { T = T | 0; if (T <= 0) return;
+    if (T < 2 || this._eyeScissor || !this._ringOffs || !this._progFftBlock || !this._u.fftBlock.T) { this._stepEyeLoop(T, dt); return; }
+    if (this._lamJVer !== this._ringVer) { const G = this._G, N = G * G, L = kernelLambdaGrid(this._ringRadii, this._ringW, this._ringOffs, G), f32 = new Float32Array(2 * N);
+      for (let i = 0; i < N; i++) { f32[2 * i] = L.re[i]; f32[2 * i + 1] = L.im[i]; }
+      const gl = this._gl; if (!this._lamTexJ) this._lamTexJ = this._makeRGF32Tex(); gl.bindTexture(gl.TEXTURE_2D, this._lamTexJ); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f32); gl.bindTexture(gl.TEXTURE_2D, null);
+      this._lamJVer = this._ringVer; }
+    this._spectralPass(dt, 0, this._lamTexJ, T); }
+  _spectralPass(dt, springK, lamTex, T) {
+    const gl = this._gl, G = this._G;
+    this._ensureSpec();
+    const eye = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const eyeFbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;   // where the merged result lands
+    const R = this._specR, I = this._specI;
+    // 1) split Re/Im into the two real scratch fields (reset src to A)
+    R.src = 'A'; I.src = 'A';
+    this._drawPass(this._progFftSplit, this._u.fftSplit, [eye], R.fA, (u) => { gl.uniform1i(u.psi, 0); gl.uniform1i(u.part, 0); });
+    this._drawPass(this._progFftSplit, this._u.fftSplit, [eye], I.fA, (u) => { gl.uniform1i(u.psi, 0); gl.uniform1i(u.part, 1); });
+    // 2) forward FFT each (leaves the result in R.src / I.src current texture)
+    this._fft2dS(R, false); this._fft2dS(I, false);
+    const Rh = R.src === 'A' ? R.A : R.B, Ih = I.src === 'A' ? I.A : I.B;
+    // 3) 2×2 block: write R̂' into the OTHER R buffer, Î' into the OTHER I buffer (read both, no in-place hazard)
+    const RhOutFbo = R.src === 'A' ? R.fB : R.fA, IhOutFbo = I.src === 'A' ? I.fB : I.fA;
+    this._drawPass(this._progFftBlock, this._u.fftBlock, [Rh, Ih, lamTex], RhOutFbo, (u) => { gl.uniform1i(u.rhat,0); gl.uniform1i(u.ihat,1); gl.uniform1i(u.lam,2); gl.uniform1f(u.dt,dt); if (u.T) gl.uniform1i(u.T, T | 0); gl.uniform1i(u.which,0); });
+    this._drawPass(this._progFftBlock, this._u.fftBlock, [Rh, Ih, lamTex], IhOutFbo, (u) => { gl.uniform1i(u.rhat,0); gl.uniform1i(u.ihat,1); gl.uniform1i(u.lam,2); gl.uniform1f(u.dt,dt); if (u.T) gl.uniform1i(u.T, T | 0); gl.uniform1i(u.which,1); });
+    R.src = R.src === 'A' ? 'B' : 'A'; I.src = I.src === 'A' ? 'B' : 'A';
+    // 3b) SPECTRAL SPRING (optional): R̂ ← R̂ + k·(Âr − R̂), Î ← Î + k·(Âi − Î) — the momentum-space soft lock
+    //   toward the att's spectrum (faithful to the CPU spring). Needs setSpringAtt() staged (att spectrum cached).
+    if (springK > 0 && this._attSpecReady && this._specAr) {
+      const Ar = this._specAr, Ai = this._specAi;
+      const Rc = R.src === 'A' ? R.A : R.B, RoFbo = R.src === 'A' ? R.fB : R.fA;
+      const Ic = I.src === 'A' ? I.A : I.B, IoFbo = I.src === 'A' ? I.fB : I.fA;
+      const Arc = Ar.src === 'A' ? Ar.A : Ar.B, Aic = Ai.src === 'A' ? Ai.A : Ai.B;
+      this._drawPass(this._progFftSpring, this._u.fftSpring, [Rc, Arc], RoFbo, (u) => { gl.uniform1i(u.hat,0); gl.uniform1i(u.ahat,1); gl.uniform1f(u.k, springK); });
+      this._drawPass(this._progFftSpring, this._u.fftSpring, [Ic, Aic], IoFbo, (u) => { gl.uniform1i(u.hat,0); gl.uniform1i(u.ahat,1); gl.uniform1f(u.k, springK); });
+      R.src = R.src === 'A' ? 'B' : 'A'; I.src = I.src === 'A' ? 'B' : 'A';
+    }
+    // 4) inverse FFT each
+    this._fft2dS(R, true); this._fft2dS(I, true);
+    const Rf = R.src === 'A' ? R.A : R.B, If = I.src === 'A' ? I.A : I.B;
+    // 5) merge → ψ' = (Re from R, Re from I) into the eye's other buffer, then flip _eyeSrc
+    this._drawPass(this._progFftMerge, this._u.fftMerge, [Rf, If], eyeFbo, (u) => { gl.uniform1i(u.rfield,0); gl.uniform1i(u.ifield,1); });
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  // SMOKE TEST helper: upload psi64 to the default eye buffer, forward-FFT it, read back (Float64Array(2N)).
+  fftForwardReadback(psi64) {
+    this.selectEyeSlot(null);
+    this.setEyePsiBoth(psi64);
+    this.fftEye(false);
+    return this.readEyePsi();
+  }
+  // SPECTRAL-STEP SMOKE TEST: upload psi64, run ONE stepEyeSpectral(dt), read back. Caller compares to CPU
+  //   mixedRadixPropagate. Needs setLamField() called first.
+  spectralStepReadback(psi64, dt) {
+    this.selectEyeSlot(null);
+    this.setEyePsiBoth(psi64);
+    this.stepEyeSpectral(dt);
+    return this.readEyePsi();
+  }
+
   // ── Public: COEVOLVE superpose ψ_eye += β·obj (GPU). obj = the _obj texture (set via setObjField). One shader pass, ping-pongs the eye buffer.
   applyEyeSuperpose(beta) {
     const gl = this._gl, G = this._G; this._scB();
@@ -1655,19 +2380,33 @@ export class IFSGpu {
   // ── Public: FULL-AUTHORITY HOLD contraction ψ ← (1−λ)ψ + λ·obj (GPU). obj = the _obj texture (setObjField).
   //    A contraction (not the additive superpose): |ψ−obj| shrinks ×(1−λ) per call → cross-GPU float divergence
   //    on the unpinned halo decays, restoring peer-determinism the way W's re-locking drive does. λ=1 = projection.
-  applyEyeContract(lambda) {
+  applyEyeContract(lambda, neutral) {
     const gl = this._gl, G = this._G;
     const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
-    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const dstFbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;   // the OTHER buffer's framebuffer
+    const dstTex = this._eyeSrc === 'A' ? this._eyeB : this._eyeA;         // the OTHER buffer's texture
     const u = this._u.eyeContract;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstFbo); gl.viewport(0, 0, G, G);
     gl.useProgram(this._progEyeContract);
     gl.uniform1i(u.psi, 0); gl.uniform1i(u.obj, 1); gl.uniform1f(u.lambda, lambda);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._obj);
     gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+    if (neutral) {
+      // PARITY-NEUTRAL: the contraction wrote the result into dstTex. Copy it BACK into src (a GPU-side copy, NO readback)
+      //   and LEAVE _eyeSrc unchanged → the ping-pong parity is NET-EVEN. A frame stall / console pause can't catch the
+      //   pair at an odd parity (the flipping contraction was the intermittent post-pause fragility). src now holds the result.
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, dstFbo);
+      gl.bindTexture(gl.TEXTURE_2D, src);
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, G, G);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // _eyeSrc unchanged (net-even parity)
+    } else {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+    }
   }
   // ── Public: COEVOLVE energy-cap ψ *= sqrt(targetE / E) (GPU). E = Σ|ψ|² via a row-reduce → 1×1 readback (G floats, not G²) → scale shader.
   //    Far cheaper than the full-grid readback+JS-loop: one tiny scalar comes back, the scale stays on GPU.
@@ -1715,6 +2454,40 @@ export class IFSGpu {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
   }
+  // applyEyePhaseTilt(om, kx, ky) — ψ ← ψ·e^{i·(om + kx·S(x) + ky·S(y))}, S(u) = (G/2π)·sin(2π(u−c0)/G) (periodic; ≈ u−c0 near the centre): global precession + momentum tilt.
+  //   The mixedRadix-app stepField's precess+tilt, on the GPU (one per-pixel phase pass). c0=(G−1)/2.
+  applyEyePhaseTilt(om, kx, ky, opts = null) {   // opts (2026-10-01): { m, cx, cy, trap, g, well, lin } — the k→field potential's parameters; null = the original tilt
+    //   well = a static isotropic well (phase well·Q per axis, beside the k part) · lin = S = u−c exactly (the ⇥roll kick: k = 2π·m/G, integer m → periodic)
+    if (!om && !kx && !ky && !opts?.well && !opts?.kernW) return;   // nothing to rotate
+    const gl = this._gl, G = this._G;
+    const src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    const u = this._u.eyePhaseTilt;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, G, G);
+    this._scB();
+    gl.useProgram(this._progEyePhaseTilt);
+    gl.uniform1i(u.psi, 0); gl.uniform1f(u.om, om); gl.uniform1f(u.kx, kx); gl.uniform1f(u.ky, ky); gl.uniform1f(u.c0, (G - 1) / 2);
+    gl.uniform1f(u.m, opts?.m || 1); gl.uniform2f(u.cc, opts?.cx ?? (G - 1) / 2, opts?.cy ?? (G - 1) / 2); gl.uniform1f(u.trap, opts?.kern && this._potTex ? 3 : (opts?.lin ? 2 : (opts?.trap ? 1 : 0))); gl.uniform1f(u.g, opts?.g || 0); gl.uniform1f(u.well, opts?.well || 0); gl.uniform1f(u.kern, this._potTex ? (opts?.kernW || 0) : 0);
+    //   u_pot MUST be set on EVERY draw: once pointed at unit 1 it stays there, and unit 1 may hold a texture another pass left — if that is
+    //   THIS pass's render target, WebGL rejects the draw as a FEEDBACK LOOP (INVALID_OPERATION, the pass silently dropped: MEASURED 1256
+    //   failed draws — tilt / trap / roll did nothing after the kernel was once used). Unused → unit 0, the source (as before the kernel).
+    const _kernUse = !!((opts?.kern || opts?.kernW) && this._potTex);
+    gl.uniform1i(u.pot, _kernUse ? 1 : 0);
+    if (_kernUse) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._potTex); }
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);
+    this._scE();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A';
+  }
+  //   setPotField(S) — a G×G real profile (Float32Array) for applyEyePhaseTilt's sampled mode (opts.kern): the app's IFS-native
+  //   potential (its operator's Green's function). R32F, read with texelFetch (no filtering).
+  setPotField(S) { const gl = this._gl, G = this._G; if (!S || S.length !== G * G) return; gl.activeTexture(gl.TEXTURE0);   // upload on unit 0 (every pass rebinds its source there)
+    if (!this._potTex) { this._potTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this._potTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); }
+    gl.bindTexture(gl.TEXTURE_2D, this._potTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, G, G, 0, gl.RED, gl.FLOAT, S); gl.bindTexture(gl.TEXTURE_2D, null); }
   // applyEyeEnergyCapNS(targetE) — the NO-SYNC cap: identical physics to applyEyeEnergyCap (reduce → full
   // normalization √(target/E), both directions) with the scale pass SAMPLING the 1×1 reduce texture instead of
   // reading it back — zero pipeline stalls. The turbo executor's cap (profiled: per-step readPixels was 57% of
@@ -2867,14 +3640,17 @@ highp float ringLap(sampler2D psi, ivec2 coord, int comp,
   // into the Brillouin zone, so a phase-gradient (momentum) actually GRIPS the grid and transports the mass
   // coherently. Weights sum to 0 (conserves constants) → drop-in safe for every stepEyeN/plate consumer.
   int G  = u_G;
-  ivec2 xp   = ivec2((coord.x + 1) % G, coord.y);
-  ivec2 xm   = ivec2((coord.x - 1 + G) % G, coord.y);
-  ivec2 yp   = ivec2(coord.x, (coord.y + 1) % G);
-  ivec2 ym   = ivec2(coord.x, (coord.y - 1 + G) % G);
-  ivec2 xpyp = ivec2((coord.x + 1) % G, (coord.y + 1) % G);
-  ivec2 xmym = ivec2((coord.x - 1 + G) % G, (coord.y - 1 + G) % G);
-  ivec2 xpym = ivec2((coord.x + 1) % G, (coord.y - 1 + G) % G);
-  ivec2 xmyp = ivec2((coord.x - 1 + G) % G, (coord.y + 1) % G);
+  // FAST TORUS WRAP: G is always a power of 2 (128/256/...), so x AND (G-1) equals ((x mod G)+G) mod G but with a
+  //   single bitwise AND instead of a slow integer modulo. Add G first so small negatives wrap correctly.
+  int M = G - 1;   // (G-1) is the wrap mask iff G is a power of 2 (true for every app grid)
+  ivec2 xp   = ivec2((coord.x + 1) & M, coord.y);
+  ivec2 xm   = ivec2((coord.x - 1 + G) & M, coord.y);
+  ivec2 yp   = ivec2(coord.x, (coord.y + 1) & M);
+  ivec2 ym   = ivec2(coord.x, (coord.y - 1 + G) & M);
+  ivec2 xpyp = ivec2((coord.x + 1) & M, (coord.y + 1) & M);
+  ivec2 xmym = ivec2((coord.x - 1 + G) & M, (coord.y - 1 + G) & M);
+  ivec2 xpym = ivec2((coord.x + 1) & M, (coord.y - 1 + G) & M);
+  ivec2 xmyp = ivec2((coord.x - 1 + G) & M, (coord.y + 1) & M);
   float ctr   = texelFetch(psi, coord, 0)[comp];
   float ortho = texelFetch(psi, xp, 0)[comp] + texelFetch(psi, xm, 0)[comp]
               + texelFetch(psi, yp, 0)[comp] + texelFetch(psi, ym, 0)[comp];
@@ -2890,8 +3666,8 @@ highp float ringLap(sampler2D psi, ivec2 coord, int comp,
     float acc   = 0.0;
     for (int i = 0; i < n; i++) {
       ivec2 off = texelFetch(rings, ivec2(start + i, 0), 0).xy;
-      ivec2 nb  = ivec2((coord.x + off.x + G * 4) % G,
-                        (coord.y + off.y + G * 4) % G);
+      ivec2 nb  = ivec2((coord.x + off.x + G * 4) & M,   // & M (=G-1) instead of % G — offsets are ≤ ~G so +G*4 keeps it ≥0
+                        (coord.y + off.y + G * 4) & M);
       acc += texelFetch(psi, nb, 0)[comp];
     }
     lap += norm * (acc - float(n) * ctr);
@@ -3023,6 +3799,83 @@ void main() {
   vec2 b = texelFetch(u_b, coord, 0).xy;
   // complex multiply: (ar+i·ai)(br+i·bi) = (ar·br − ai·bi) + i(ar·bi + ai·br)
   fragColor = vec4(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x, 0.0, 1.0);
+}`;
+
+// QUATERNION SU(2) MIX — the FIELD-LEVEL qedge, fully GPU-resident (zero readback). A quaternion FIELD is the PAIR
+// (ψ_A = z0, ψ_B = z1) of two eye slots (quaternion-pair.js: ℍ = ℂ⊕ℂ·j). This shader applies the SU(2) register
+// u·ψ_ℍ per cell, in the pair basis (Cayley–Dickson, from qmulField with Q=u constant, R=ψ):
+//     pA = u0·ψ_A − conj(ψ_B)·u1        (slot A output)
+//     pB = u1·conj(ψ_A) + ψ_B·u0        (slot B output)
+//   u = (u0, u1) the unit quaternion (u0=[cos(θ/2), nz·sin], u1=[nx·sin, ny·sin]); the U(1) slice (u1=0) reduces to
+//   a per-channel e^{i∠} on both slots — today's lensU1 aging, byte-exact (proven headless). u_which selects the
+//   output channel (0 → pA, 1 → pB) so ONE two-input shader run twice produces BOTH rotated slots. Peer-pure: u is
+//   a SHARED constant (the replicated register element), sampling is fixed-function → deterministic same-device.
+const GLSL_QUAT_MIX = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_a;    // slot-A field ψ_A (.xy = re, im)
+uniform sampler2D u_b;    // slot-B field ψ_B
+uniform vec2 u_u0;        // SU(2) element z0 = [cos(θ/2), nz·sin(θ/2)]
+uniform vec2 u_u1;        // SU(2) element z1 = [nx·sin(θ/2), ny·sin(θ/2)]
+uniform int  u_which;     // 0 → output pA (slot A), 1 → output pB (slot B)
+out vec4 fragColor;
+vec2 cmul(vec2 p, vec2 q) { return vec2(p.x*q.x - p.y*q.y, p.x*q.y + p.y*q.x); }   // complex ·
+vec2 cconj(vec2 p) { return vec2(p.x, -p.y); }                                     // z̄
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 a = texelFetch(u_a, coord, 0).xy;   // ψ_A at this cell
+  vec2 b = texelFetch(u_b, coord, 0).xy;   // ψ_B at this cell
+  vec2 outv;
+  // RIGHT action ψ_ℍ·u (quaternion-pair.js su2ApplyField): the ℂ-LINEAR spinor rotation [[u0,−ū1],[u1,ū0]]·(ψ_A,ψ_B).
+  //   (It was the LEFT action u·ψ_ℍ, which is antilinear and does not commute with the medium's own step.)
+  if (u_which == 0) outv = cmul(u_u0, a) - cmul(cconj(u_u1), b);   // pA = u0·ψ_A − ū1·ψ_B
+  else              outv = cmul(u_u1, a) + cmul(cconj(u_u0), b);   // pB = u1·ψ_A + ū0·ψ_B
+  fragColor = vec4(outv, 0.0, 1.0);
+}`;
+
+// DUAL-QUATERNION SE(3) MIX — the FOUR-slot dqedge, GPU-resident (doc/dual-quaternion-torus.md). A dual-quaternion
+// FIELD is (q_r, q_d) = two quaternion pairs: (A,B)=q_r ROTATION, (C,D)=q_d TRANSLATION. This applies a CONSTANT unit
+// dual quaternion U=(u_r, u_d) (the SE(3) screw register) by RIGHT multiply ψ̂·U per cell (dqApplyField). From ε²=0:
+//     P.r = ψ_r·u_r                       (rotation output — the ℍ product, decoupled from the dual part)
+//     P.d = ψ_r·u_d + ψ_d·u_r             (translation output — the nilpotent CROSS term)
+//   with the pair-basis quaternion product qmul((a,b),(c,d)) = ( a·c − conj(d)·b , b·conj(c) + d·a ) → (p0, p1).
+// u_which ∈ {0,1,2,3} selects the output channel (rA, rB, dA, dB) so ONE 4-input shader run four times produces the
+// whole rotated dual-quaternion field. u_d=0 ⇒ the dual part passes through unrotated by the translation → the SU(2)
+// slice = the ℍ pair on (A,B) (pitch=0). Peer-pure: U is the SHARED replicated screw → deterministic same-device.
+const GLSL_DUAL_QMIX = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_rA;   // ψ_r pair: rotation-quaternion z0 (slot A) and z1 (slot B)
+uniform sampler2D u_rB;
+uniform sampler2D u_dA;   // ψ_d pair: translation-quaternion z0 (slot C) and z1 (slot D)
+uniform sampler2D u_dB;
+uniform vec2 u_ur0;       // U.r (rotation quaternion of the SE(3) screw): z0, z1
+uniform vec2 u_ur1;
+uniform vec2 u_ud0;       // U.d (dual/translation quaternion of the screw): z0, z1
+uniform vec2 u_ud1;
+uniform int  u_which;     // 0→rA, 1→rB, 2→dA, 3→dB
+out vec4 fragColor;
+vec2 cmul(vec2 p, vec2 q) { return vec2(p.x*q.x - p.y*q.y, p.x*q.y + p.y*q.x); }
+vec2 cconj(vec2 p) { return vec2(p.x, -p.y); }
+// pair-basis quaternion product qmul((a,b),(c,d)) → returns p0 (which=0) or p1 (which=1):
+//   p0 = a·c − conj(d)·b ; p1 = b·conj(c) + d·a
+vec2 qmulZ(vec2 a, vec2 b, vec2 c, vec2 d, int part) {
+  if (part == 0) return cmul(a, c) - cmul(cconj(d), b);
+  else           return cmul(b, cconj(c)) + cmul(d, a);
+}
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec2 rA = texelFetch(u_rA, coord, 0).xy, rB = texelFetch(u_rB, coord, 0).xy;   // ψ_r = (rA, rB)
+  vec2 dA = texelFetch(u_dA, coord, 0).xy, dB = texelFetch(u_dB, coord, 0).xy;   // ψ_d = (dA, dB)
+  vec2 outv;
+  // RIGHT action ψ̂·Û (dual-quaternion.js dqApplyField) — the field is the LEFT factor of every product.
+  if (u_which == 0 || u_which == 1) {
+    // rotation output = ψ_r · u_r
+    outv = qmulZ(rA, rB, u_ur0, u_ur1, u_which);
+  } else {
+    // translation output = ψ_r · u_d + ψ_d · u_r   (part = which−2)
+    int part = u_which - 2;
+    outv = qmulZ(rA, rB, u_ud0, u_ud1, part) + qmulZ(dA, dB, u_ur0, u_ur1, part);
+  }
+  fragColor = vec4(outv, 0.0, 1.0);
 }`;
 
 // §7.92 ROTATE-ABOUT-CENTERS — the θ-operator as a pure-medium field transform. A coordinate REMAP (resample),
@@ -3249,6 +4102,194 @@ void main() {
 // FILM PEAK (log-step reduction): max |ψ|² over the film, computed GPU-side into a 1×1 texture the render shader
 // SAMPLES — never read back, so no pipeline stall. A DISPLAY quantity only (the colormap normalizer): it never
 // enters the register, so GPU float precision stays a view concern, exactly as the meta-circular split requires.
+// USER SHADER over the live field — the user supplies `vec4 medium(vec2 uv, vec2 psi)`. field(uv) samples the complex field
+//   (blended between two sub-step frames); the u_* uniforms are the medium's clock and register at the presented virtual time.
+const GLSL_USER_HEAD = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psiA;
+uniform sampler2D u_psiB;
+uniform float u_mix;
+uniform int u_G;
+uniform float u_vt, u_tickFrac, u_tau, u_beatFrac, u_age, u_cyc, u_phase, u_omega, u_beta, u_E, u_lock, u_qtheta, u_slot;
+uniform vec2 u_k, u_shift;
+out vec4 fragColor;
+const float PI = 3.141592653589793;
+vec2 field(vec2 uv) { ivec2 c = ivec2(floor(fract(uv) * float(u_G))); return mix(texelFetch(u_psiA, c, 0).xy, texelFetch(u_psiB, c, 0).xy, u_mix); }
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+vec3 hue(float h) { return clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0); }
+`;
+const GLSL_USER_TAIL = /* glsl */`
+void main() { vec2 uv = gl_FragCoord.xy / float(u_G); fragColor = medium(uv, field(uv)); }`;
+
+// TILE PROBE — one output texel per tile of B×B cells: (mean|ψ|², mean Re ψ, mean Im ψ, mean |∇ψ|²), periodic differences.
+//   BAND PROBE, pass 1: pixel (b, y) = Σ over x of row y's modes in band b of (|S|², S·conj(P)) — S the spectrum now, P one lag earlier
+const GLSL_BAND_ROW = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_cur, u_lag;
+uniform int u_G, u_nb;
+uniform vec2 u_k;
+out vec4 fragColor;
+const float PI = 3.141592653589793;
+float wrapPi(float v) { return mod(v + PI, 2.0 * PI) - PI; }
+void main() {
+  int b = int(gl_FragCoord.x), y = int(gl_FragCoord.y), G = u_G;
+  float qy = wrapPi(float(y <= G / 2 ? y : y - G) * 2.0 * PI / float(G) + u_k.y);
+  float se = 0.0, cr = 0.0, ci = 0.0;
+  for (int x = 0; x < G; x++) {
+    float qx = wrapPi(float(x <= G / 2 ? x : x - G) * 2.0 * PI / float(G) + u_k.x), k = length(vec2(qx, qy));
+    if (k > PI) continue;
+    int bb = min(u_nb - 1, int(floor(k / PI * float(u_nb) + 1e-5)));   // +1e-5: a lattice mode exactly on a band edge falls where the f64 binning puts it
+    if (bb != b) continue;
+    vec2 s = texelFetch(u_cur, ivec2(x, y), 0).xy, p = texelFetch(u_lag, ivec2(x, y), 0).xy;
+    se += dot(s, s); cr += s.x * p.x + s.y * p.y; ci += s.y * p.x - s.x * p.y;
+  }
+  fragColor = vec4(se, cr, ci, 0.0);
+}`;
+//   SECTOR BAND PROBE, pass 1: pixel (b, y) → three targets, each RGBA = sectors 0..3 of row y's modes in band b: |S|², re and im of S·conj(P)
+const GLSL_BAND_ROW_SEC = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_cur, u_lag;
+uniform int u_G, u_nb;
+uniform vec2 u_k;
+uniform int u_rf;
+uniform ivec2 u_b2, u_b2L;
+uniform float u_r2;
+uniform int u_kcm;     // the EYE's spectral H-compute on the PLATE's mode read (rows 0–3 under an eye op): 0 none · 1 low-pass keep |p|² ≤ u_kc2 · 2 high-pass keep > u_kc2
+uniform float u_kc2;
+//   the EYE's k-space ops — RELABELS of the plate's own spectrum, no transform (the ear "in the dual", like ◐medium's mirror):
+//   conjugate (ψ → ψ̄): F̃(p) = conj F(−p) · the ANALYSER θ (Malus on the phasor): ψ̃ = ½(ψ + e^{2iθ}·ψ̄) → F̃(p) = ½(F(p) + e^{2iθ}·conj F(−p))
+//   · the BEAM STOP: no plate mode within √u_bsr2 of a beam bin (a block in the Fourier plane)
+uniform int u_cjk;
+uniform vec3 u_pol;    // (on, cos 2θ, sin 2θ)
+uniform int u_bsN;
+uniform ivec2 u_bs0, u_bs1, u_bs2, u_bs3;
+uniform float u_bsr2;
+layout(location = 0) out vec4 oE;
+layout(location = 1) out vec4 oCr;
+layout(location = 2) out vec4 oCi;
+layout(location = 3) out vec4 oP;   // the shell's PLACE: Σ s(q+e_x)·conj s(q), Σ s(q+e_y)·conj s(q) — the shift theorem: N·Σ|ψ|²·e^{−2πi x/G} (the shell's centroid and concentration)
+const float PI = 3.141592653589793;
+float wrapPi(float v) { return v > PI ? v - 2.0 * PI : (v < -PI ? v + 2.0 * PI : v); }   // exact inside [−π, π] (no mod rounding: ±x stay exact opposites)
+int wq(int v, int G) { v = ((v % G) + G) % G; return v <= G / 2 ? v : v - G; }
+vec2 rdF(sampler2D t, int px, int py, int G) { vec2 v = texelFetch(t, ivec2(px, py), 0).xy;
+  if (u_cjk == 1 || u_pol.x > 0.5) { vec2 w = texelFetch(t, ivec2((G - px) % G, (G - py) % G), 0).xy * vec2(1.0, -1.0);
+    v = u_cjk == 1 ? w : 0.5 * (v + vec2(u_pol.y * w.x - u_pol.z * w.y, u_pol.y * w.y + u_pol.z * w.x)); }
+  return v; }
+bool gated(int px, int py, int G) { int ax = wq(px, G), ay = wq(py, G);
+  if (u_kcm != 0) { float d2 = float(ax * ax + ay * ay); if (u_kcm == 1 ? d2 > u_kc2 : d2 <= u_kc2) return true; }
+  for (int k = 0; k < 4; k++) { if (k >= u_bsN) break; ivec2 bk = k == 0 ? u_bs0 : (k == 1 ? u_bs1 : (k == 2 ? u_bs2 : u_bs3)); int dx = wq(px - bk.x, G), dy = wq(py - bk.y, G); if (float(dx * dx + dy * dy) < u_bsr2) return true; }
+  return false; }
+void main() {
+  int b = int(gl_FragCoord.x), y = int(gl_FragCoord.y), G = u_G, qyi = y <= G / 2 ? y : y - G;
+  float qy = wrapPi(float(qyi) * 2.0 * PI / float(G) + u_k.y);
+  vec4 E = vec4(0.0), CR = vec4(0.0), CI = vec4(0.0), P = vec4(0.0);
+  for (int x = 0; x < G; x++) {
+    int qxi = x <= G / 2 ? x : x - G;
+    float qx = wrapPi(float(qxi) * 2.0 * PI / float(G) + u_k.x), k = length(vec2(qx, qy));
+    if (k > PI) continue;
+    int bb = min(u_nb - 1, int(floor(k / PI * float(u_nb) + 1e-5)));
+    if (bb != b) continue;
+    int sec = abs(qx) >= abs(qy) ? (qx >= 0.0 ? 0 : 2) : (qy >= 0.0 ? 1 : 3);   // exact comparisons: a lattice mode on a diagonal goes to the horizontal sector in f32 and f64 alike
+    vec4 m = vec4(float(sec == 0), float(sec == 1), float(sec == 2), float(sec == 3));
+    vec2 s, p;
+    if (u_rf == 1) {   // the MIRRORED read (the ◐medium analyser in the dual): the shown bin q holds conj F((2b − q) mod G) on the disk |q| < r — now and at the lag (its own b)
+      if (float(qxi * qxi + qyi * qyi) >= u_r2) continue;
+      int px = (u_b2.x - qxi + 2 * G) % G, py = (u_b2.y - qyi + 2 * G) % G; if (gated(px, py, G)) continue;
+      s = rdF(u_cur, px, py, G) * vec2(1.0, -1.0);
+      p = rdF(u_lag, (u_b2L.x - qxi + 2 * G) % G, (u_b2L.y - qyi + 2 * G) % G, G) * vec2(1.0, -1.0);
+      { int nx = (px + G - 1) % G, ny = (py + G - 1) % G;   // the shown neighbours q + e_x, q + e_y are the plate's p − e_x, p − e_y
+        if (float((qxi + 1) * (qxi + 1) + qyi * qyi) < u_r2 && !gated(nx, py, G)) { vec2 n = rdF(u_cur, nx, py, G) * vec2(1.0, -1.0); P.xy += vec2(n.x * s.x + n.y * s.y, n.y * s.x - n.x * s.y); }
+        if (float(qxi * qxi + (qyi + 1) * (qyi + 1)) < u_r2 && !gated(px, ny, G)) { vec2 n = rdF(u_cur, px, ny, G) * vec2(1.0, -1.0); P.zw += vec2(n.x * s.x + n.y * s.y, n.y * s.x - n.x * s.y); } } }
+    else { if (u_rf == 2 && float(qxi * qxi + qyi * qyi) >= u_r2) continue;   // u_rf 2: the field read DIRECTLY on the disk (the ear res)
+      if (gated(x, y, G)) continue;
+      s = rdF(u_cur, x, y, G); p = rdF(u_lag, x, y, G);
+      { int nx = (x + 1) % G, ny = (y + 1) % G, wx = wq(x + 1, G), wy = wq(y + 1, G);
+        if (!(u_rf == 2 && float(wx * wx + qyi * qyi) >= u_r2) && !gated(nx, y, G)) { vec2 n = rdF(u_cur, nx, y, G); P.xy += vec2(n.x * s.x + n.y * s.y, n.y * s.x - n.x * s.y); }
+        if (!(u_rf == 2 && float(qxi * qxi + wy * wy) >= u_r2) && !gated(x, ny, G)) { vec2 n = rdF(u_cur, x, ny, G); P.zw += vec2(n.x * s.x + n.y * s.y, n.y * s.x - n.x * s.y); } } }
+    E += m * dot(s, s); CR += m * (s.x * p.x + s.y * p.y); CI += m * (s.y * p.x - s.x * p.y);
+  }
+  oE = E; oCr = CR; oCi = CI; oP = P;
+}`;
+//   THE EYE's PLATE OP (the ear under the eye): s = (re, cj·im) → phase quantised to qL levels (0 = off) → mixed toward the intensity-only
+//   record (|s|, 0) by amix → out = (mr + i·mi)·s + (|ψ| + 1e-4)·(n1 + i·n2). Per cell (mr, mi, n1, n2) from the app's table (_eyeTab):
+//   masks (mr 0/1), phase screens (e^{iθ}), mu1's noise fill — the app's CPU twin is the same algebra
+const GLSL_EYE_OP = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_src, u_msk;
+uniform float u_cj, u_qL, u_amix;
+out vec4 fragColor;
+const float TAU = 6.283185307179586;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy); vec2 s0 = texelFetch(u_src, c, 0).xy; vec4 m = texelFetch(u_msk, c, 0); float a = length(s0) + 1e-4;
+  vec2 s = vec2(s0.x, u_cj * s0.y);
+  if (u_qL > 0.0) { float st = TAU / u_qL, th = floor(atan(s.y, s.x) / st + 0.5) * st, r = length(s); s = vec2(r * cos(th), r * sin(th)); }
+  if (u_amix > 0.0) s = mix(s, vec2(length(s), 0.0), u_amix);
+  fragColor = vec4(m.x * s.x - m.y * s.y + a * m.z, m.x * s.y + m.y * s.x + a * m.w, 0.0, 1.0);
+}`;
+//   DISK GATHER: texel (u, y0 + v) = modes 2(v·128 + u), +1 of the disk — the mirrored, conjugated spectrum at (2b − q) mod G
+const GLSL_GATHER_DISK = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_spec, u_idx;
+uniform int u_G, u_M, u_y0, u_direct;
+uniform ivec2 u_b2;
+out vec4 fragColor;
+vec2 rd(vec2 q) { if (u_direct == 1) return texelFetch(u_spec, ivec2((int(q.x) + 2 * u_G) % u_G, (int(q.y) + 2 * u_G) % u_G), 0).xy;   // the field itself (the lock ear)
+  ivec2 s = ivec2((u_b2.x - int(q.x) + 2 * u_G) % u_G, (u_b2.y - int(q.y) + 2 * u_G) % u_G); return texelFetch(u_spec, s, 0).xy * vec2(1.0, -1.0); }
+void main() {
+  int u = int(gl_FragCoord.x), v = int(gl_FragCoord.y) - u_y0, t = (v * 128 + u) * 2;
+  vec4 q = texelFetch(u_idx, ivec2(u, v), 0);
+  vec2 a = t < u_M ? rd(q.xy) : vec2(0.0), b = t + 1 < u_M ? rd(q.zw) : vec2(0.0);
+  fragColor = vec4(a, b);
+}`;
+//   SECTOR BAND PROBE, pass 2: atlas pixel (x0 + b, r) = Σ over the G rows of target r's column b (r = 0 energy, 1 re, 2 im)
+const GLSL_BAND_COL_SEC = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_e, u_cr, u_ci, u_p;
+uniform int u_G, u_x0, u_ry;
+out vec4 fragColor;
+void main() {
+  int b = int(gl_FragCoord.x) - u_x0, r = int(gl_FragCoord.y) - u_ry; vec4 acc = vec4(0.0);
+  for (int y = 0; y < u_G; y++) acc += r == 0 ? texelFetch(u_e, ivec2(b, y), 0) : (r == 1 ? texelFetch(u_cr, ivec2(b, y), 0) : (r == 2 ? texelFetch(u_ci, ivec2(b, y), 0) : texelFetch(u_p, ivec2(b, y), 0)));
+  fragColor = acc;
+}`;
+//   BAND PROBE, pass 2: atlas pixel (x0 + b) = Σ over the G rows of pass 1's column b
+const GLSL_BAND_COL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_rows;
+uniform int u_G, u_x0;
+out vec4 fragColor;
+void main() {
+  int b = int(gl_FragCoord.x) - u_x0; vec4 acc = vec4(0.0);
+  for (int y = 0; y < u_G; y++) acc += texelFetch(u_rows, ivec2(b, y), 0);
+  fragColor = acc;
+}`;
+const GLSL_TILE_PROBE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform int u_G;
+uniform int u_B;
+uniform ivec2 u_off;
+uniform vec2 u_shift, u_k, u_center;   // the display pose (zero = the raw texture)
+uniform float u_phi;
+out vec4 fragColor;
+vec2 torus(vec2 p) {   // bilinear, periodic — renderDescField's sampleTorus
+  vec2 f = fract(p); ivec2 i0 = ivec2(floor(p)), G2 = ivec2(u_G), a = ((i0 % G2) + G2) % G2, b = (((i0 + 1) % G2) + G2) % G2;
+  return mix(mix(texelFetch(u_psi, a, 0).xy, texelFetch(u_psi, ivec2(b.x, a.y), 0).xy, f.x), mix(texelFetch(u_psi, ivec2(a.x, b.y), 0).xy, texelFetch(u_psi, b, 0).xy, f.x), f.y); }
+vec2 posed(vec2 x) { vec2 B = torus(x - u_shift); float th = u_phi + dot(u_k, x - u_center); float c = cos(th), s = sin(th); return vec2(B.x * c - B.y * s, B.x * s + B.y * c); }
+void main() {
+  ivec2 t = ivec2(gl_FragCoord.xy) - u_off;
+  float se = 0.0, sr = 0.0, si = 0.0, sg = 0.0;
+  for (int dy = 0; dy < u_B; dy++) for (int dx = 0; dx < u_B; dx++) {
+    vec2 c = vec2(t * u_B + ivec2(dx, dy));
+    vec2 v  = posed(c);
+    vec2 vx = posed(c + vec2(1.0, 0.0)) - v;
+    vec2 vy = posed(c + vec2(0.0, 1.0)) - v;
+    se += dot(v, v); sr += v.x; si += v.y; sg += dot(vx, vx) + dot(vy, vy);
+  }
+  float inv = 1.0 / float(u_B * u_B);
+  fragColor = vec4(se * inv, sr * inv, si * inv, sg * inv);
+}`;
+
 const GLSL_FILM_PEAK = /* glsl */`#version 300 es
 precision highp float;
 uniform sampler2D u_src;
@@ -3846,6 +4887,23 @@ void main() {
   fragColor = vec4(psi + u_beta*obj, 0.0, 1.0);
 }`;
 
+// SPECTRAL SPRING blend — ĥat ← ĥat + k·(âhat − ĥat), applied per MODE (in momentum space), on ONE real-FFT
+// field (the two-field spectral propagator keeps Re and Im FFT'd separately, so this runs once per field with the
+// matching att-spectrum field). Faithful to the CPU spring (medium-core spring: ψ̂ += kEff·(ât−ψ̂)); a soft,
+// frequency-selective pull toward the att's spectrum — gentler than the additive real-space superpose.
+const GLSL_FFT_SPRING = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_hat;   // the current spectral field (R̂ or Î)
+uniform sampler2D u_ahat;  // the att's matching spectral field (Âr or Âi)
+uniform float u_k;         // spring stiffness kEff
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 h  = texelFetch(u_hat,  c, 0).xy;
+  vec2 ah = texelFetch(u_ahat, c, 0).xy;
+  fragColor = vec4(h + u_k*(ah - h), 0.0, 1.0);
+}`;
+
 // EYE CONTRACT — ψ ← (1−λ)·ψ + λ·obj, a CONTRACTION toward the operator (full-authority hold). Unlike superpose
 // (ψ += β·obj, additive → the previous field's GPU-float deviation survives forever), this SHRINKS |ψ−obj| by
 // factor (1−λ) each application → cross-GPU float spread on the unpinned halo decays geometrically, the same
@@ -3877,12 +4935,90 @@ void main() { float E = texelFetch(u_e, ivec2(0,0), 0).x;
   float s = (E > 1e-9 && u_target > 0.0) ? sqrt(u_target / E) : 1.0;
   ivec2 c = ivec2(gl_FragCoord.xy); fragColor = vec4(texelFetch(u_psi, c, 0).xy * s, 0.0, 1.0); }`;
 
+// GROUP SPM — the saturable SPM of GLSL_NL_SPM with the intensity taken over the GROUP density (u_nd = 1 or 2 inputs):
+//   I = |d0|² (+ |d1|²),  ψ ← ψ·e^{−i·γ·dt·I/(1+I/Isat)}. One common phase per cell for every member ⇒ it commutes
+//   with the pair's SU(2) / the body's SE(3) right action (both preserve I). u_nd = 1 with d0 = ψ is GLSL_NL_SPM exactly.
+const GLSL_GROUP_SPM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_d0;
+uniform sampler2D u_d1;
+uniform int u_nd;
+uniform float u_gamma;
+uniform float u_isat;
+uniform float u_dt;
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  vec2 a = texelFetch(u_d0, c, 0).xy;
+  float I = a.x*a.x + a.y*a.y;
+  if (u_nd > 1) { vec2 b = texelFetch(u_d1, c, 0).xy; I += b.x*b.x + b.y*b.y; }
+  float g  = u_gamma * I / (1.0 + I / u_isat);
+  float ph = -g * u_dt;
+  float cs = cos(ph), sn = sin(ph);
+  fragColor = vec4(cs*psi.x - sn*psi.y, sn*psi.x + cs*psi.y, 0.0, 1.0);
+}`;
+
+// GROUP CAP — ONE scale s = √(target / (E_a (+ E_b))) for every member, E read from the 1×1 reduce textures (no
+//   readback). A common scale preserves every member ratio, so the pair's spin direction / the body's translation
+//   b = 2ψ_r⁻¹ψ_d are untouched by it. u_nd = 1 is GLSL_EYE_CAP_SCALE exactly.
+const GLSL_GROUP_CAP = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform sampler2D u_ea;
+uniform sampler2D u_eb;
+uniform int u_nd;
+uniform float u_target;
+out vec4 fragColor;
+void main() {
+  float E = texelFetch(u_ea, ivec2(0,0), 0).x;
+  if (u_nd > 1) E += texelFetch(u_eb, ivec2(0,0), 0).x;
+  float s = (E > 1e-9 && u_target > 0.0) ? sqrt(u_target / E) : 1.0;
+  ivec2 c = ivec2(gl_FragCoord.xy); fragColor = vec4(texelFetch(u_psi, c, 0).xy * s, 0.0, 1.0); }`;
+
 const GLSL_EYE_SCALE = /* glsl */`#version 300 es
 precision highp float;
 uniform sampler2D u_psi;
 uniform float u_s;
 out vec4 fragColor;
 void main() { ivec2 c = ivec2(gl_FragCoord.xy); fragColor = vec4(texelFetch(u_psi, c, 0).xy * u_s, 0.0, 1.0); }`;
+
+// ── GLSL_EYE_PHASE_TILT — global precession ω + momentum tilt k·x, in ONE per-pixel phase multiply. ──
+//    Mirrors mixedRadix-app stepField's precess + tilt: ψ ← ψ·e^{i·(u_om + u_kx·(x−c0) + u_ky·(y−c0))},
+//    c0 = (G−1)/2. Both are pure phase (amplitude-invariant), but they matter: the field precessing between
+//    steps means the REAL injected att adds at a rotating relative phase → the beat/interference that shapes
+//    the turbulence (without it the lock is static/smooth — the "looks like leapfrog" symptom).
+const GLSL_EYE_PHASE_TILT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_om;   // global precession angle this step (omEff)
+uniform float u_kx;   // momentum tilt kxE
+uniform float u_ky;   // momentum tilt kyE
+uniform float u_c0;   // (G−1)/2 centering
+uniform float u_m;    // harmonic (1 = the original single hill/valley across the torus)
+uniform vec2 u_cc;    // the potential's centre (x, y) — (c0, c0) by default
+uniform float u_trap; // 0 = tilt S = sin(w(u−c))/w · 1 = trap Q = (1−cos(w(u−c)))/w² (≈ ½(u−c)²)
+uniform float u_g;    // gain: the potential is (1 + i·g)·θ → amp·e^{−g·θ} (declared non-Hermitian drive)
+uniform float u_well; // a static isotropic well beside the k part: phase u_well·(Qx + Qy), Q = −(1−cos(w·d))/w² (Hermitian, no gain)
+uniform sampler2D u_pot; // trap 3: a sampled profile S(x, y) (the app's IFS-native kernel well) — the k part is u_kx·S
+uniform float u_kern;    // the STATIC native well beside any shape: phase u_kern·S (Hermitian, no gain)
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 psi = texelFetch(u_psi, c, 0).xy;
+  // PERIODIC TILT POTENTIAL (2026-09-23): S(u) = (G/2π)·sin(2π(u−c0)/G) — equal to (u−c0) near the centre (within 1%
+  //   over ±G/10) and periodic on the torus. A linear ramp k·(u−c0) is a potential V = −F·x, which a torus cannot
+  //   hold: it jumped by k·G across the edge (a phase SEAM every sub-step). Same force where the symbol sits, no seam.
+  float Gf = 2.0 * u_c0 + 1.0, w = 6.283185307179586 * max(1.0, u_m) / Gf;
+  float dx = float(c.x) - u_cc.x, dy = float(c.y) - u_cc.y;
+  float Qx = -(1.0 - cos(w * dx)) / (w * w), Qy = -(1.0 - cos(w * dy)) / (w * w);   // trap: −Q so k > 0 is a WELL (V = −k·S; see the CPU _potProfile)
+  float Sx = (u_trap > 1.5) ? dx : ((u_trap > 0.5) ? Qx : sin(w * dx) / w);   // 2 = linear (the ⇥roll kick; periodic only for an integer lattice k)
+  float Sy = (u_trap > 1.5) ? dy : ((u_trap > 0.5) ? Qy : sin(w * dy) / w);
+  float tk = (u_trap > 2.5) ? u_kx * texelFetch(u_pot, c, 0).r : u_kx * Sx + u_ky * Sy, th = u_om + tk + u_well * (Qx + Qy) + (u_kern != 0.0 ? u_kern * texelFetch(u_pot, c, 0).r : 0.0), am = exp(-u_g * tk);
+  float cs = cos(th) * am, sn = sin(th) * am;
+  fragColor = vec4(cs*psi.x - sn*psi.y, sn*psi.x + cs*psi.y, 0.0, 1.0);
+}`;
 
 // IFS-NATIVE GPE — saturable DENSITY-DEPENDENT CONTRACTION ψ→ψ/(1+γ|ψ|²). The |ψ|²ψ Gross-Pitaevskii term expressed AS the medium's own
 // contraction biased by intensity (NOT a grafted explicit exp(−iγ|ψ|²dt) phase kick — probe_native_gpe_charge.mjs measured that the PHASE
@@ -3926,6 +5062,186 @@ void main() {
   float cs = cos(ph), sn = sin(ph);
   fragColor = vec4(cs*psi.x - sn*psi.y, sn*psi.x + cs*psi.y, 0.0, 1.0);
 }`;
+
+// ── GLSL_FFT_STAGE — ONE Stockham mixed-radix FFT stage along one axis (rows or cols). ──────────────
+//    Ports mixed-radix-core.js's mixedRadix1d stage loop to the GPU (Stockham auto-sort: no separate
+//    digit-reversal pass — each stage reads r inputs at stride u_len and writes them contiguously, so the
+//    output ends naturally ordered after the last stage). The r-point cores (_dft2/4/8/16) MIRROR the CPU
+//    _dftR bit-for-bit, INCLUDING the twiddle sign wi = -s·sin (the CPU's "-s·w[1]" convention). u_axis
+//    picks the transform direction; the OTHER coordinate just passes through. u_sign = -1 fwd / +1 inv (the
+//    CPU's S). The 1/N inverse normalisation is done ONCE by the caller (u_norm pass), not per stage.
+//    THE MATH per output index j along the axis (Stockham):
+//      Ns = u_len (product of already-done radices); r = u_radix.
+//      k  = j % Ns;  base = (j / Ns) * (Ns*r) + k;   input q ∈ [0,r): idx = base + q*Ns.
+//      twiddle each input by exp(sign·2πi·q·k / (Ns*r)) BEFORE the r-point DFT (matches the CPU's _gr build).
+//      the r outputs write to j_out = (j/Ns)*(Ns*r) + p*Ns + k  for p ∈ [0,r) — but since THIS invocation
+//      computes ONE output pixel, we invert: given our out-index j, find which (group,p,k) it is and emit p.
+//    To keep it one-pixel-one-output we compute the WHOLE r-point core for this pixel's group and select p.
+const GLSL_FFT_STAGE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform int   u_axis;    // 0 = transform along X (rows), 1 = along Y (cols)
+uniform int   u_radix;   // r for this stage (2,4,8,16)
+uniform int   u_len;     // Ns = product of radices already applied (1 on the first stage)
+uniform int   u_G;       // grid size along the axis
+uniform float u_sign;    // -1.0 forward, +1.0 inverse (the CPU's S / s)
+out vec4 fragColor;
+const float TAU = 6.28318530717958647692;
+// complex helpers
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
+// twiddle exp(sign·2πi·num/den) with the sign carried in u_sign (angle = sign·TAU·num/den)
+vec2 tw(float num, float den) { float ang = u_sign * TAU * num / den; return vec2(cos(ang), sin(ang)); }
+// r-point DFT of the r complex inputs x[0..r-1] (already twiddled). Returns output p. Mirrors _dftR:
+//   the CPU cores use s = inv?1:-1 = u_sign, and twiddle imag = -s·sin. We build cores with the SAME sign.
+// _dft4 (twiddle-free ±1,±i): j = (∓i)·t3 with the -s convention.
+void dft4(vec2 x0, vec2 x1, vec2 x2, vec2 x3, out vec2 o0, out vec2 o1, out vec2 o2, out vec2 o3) {
+  vec2 t0 = x0 + x2, t1 = x0 - x2, t2 = x1 + x3, t3 = x1 - x3;
+  // jr = -s·t3.y, ji = s·t3.x   (s = u_sign)
+  vec2 j = vec2(-u_sign * t3.y, u_sign * t3.x);
+  o0 = t0 + t2; o1 = t1 + j; o2 = t0 - t2; o3 = t1 - j;
+}
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  int j    = (u_axis == 0) ? c.x : c.y;    // our output index ALONG the axis
+  int other= (u_axis == 0) ? c.y : c.x;    // the pass-through coordinate
+  int len  = u_len;                         // CPU len = product of radices already applied
+  int r    = u_radix;
+  int nlen = len * r;
+  // invert the CPU stage's OUTPUT index j = base + k + p·len  (base multiple of nlen):
+  int base = (j / nlen) * nlen;
+  int rem  = j - base;                      // rem = k + p·len,  k∈[0,len), p∈[0,r)
+  int p    = rem / len;                     // which r-point output THIS pixel is
+  int k    = rem - p * len;                 // index within the length-len sub-DFT
+  // gather + pre-twiddle the r inputs (CPU: idx = base+k+q·len; _gr[q] = x·exp(sign·2π·q·k/nlen))
+  float den = float(nlen);
+  vec2 xr[16];
+  for (int q = 0; q < 16; q++) {
+    if (q >= r) break;
+    int idx = base + k + q * len;
+    ivec2 fc = (u_axis == 0) ? ivec2(idx, other) : ivec2(other, idx);
+    vec2 v = texelFetch(u_psi, fc, 0).xy;
+    xr[q] = cmul(v, tw(float(q * k), den));
+  }
+  vec2 outp;
+  if (r == 2) {
+    outp = (p == 0) ? (xr[0] + xr[1]) : (xr[0] - xr[1]);
+  } else if (r == 4) {
+    vec2 o0,o1,o2,o3; dft4(xr[0],xr[1],xr[2],xr[3], o0,o1,o2,o3);
+    outp = (p==0)?o0:(p==1)?o1:(p==2)?o2:o3;
+  } else {
+    // r = 8 or 16: nested cores (mirror _dft8 / _dft16). Do the FULL r-point DFT directly here via
+    // the O(r²) sum for correctness parity — r≤16 so it's cheap in a fragment. Twiddle imag sign = u_sign
+    // (matches the direct-DFT reference _dftDirect: a = s·2π·k·n/r, so exp(i·a) with s=u_sign).
+    vec2 acc = vec2(0.0);
+    for (int n = 0; n < 16; n++) {
+      if (n >= r) break;
+      float ang = u_sign * TAU * float(p * n) / float(r);
+      vec2 w = vec2(cos(ang), sin(ang));
+      acc += cmul(xr[n], w);
+    }
+    outp = acc;
+  }
+  fragColor = vec4(outp, 0.0, 1.0);
+}`;
+
+// ── GLSL_FFT_PERM — mixed-radix DIGIT-REVERSAL permutation along one axis (one pass before the stages). ──
+//    Mirrors mixed-radix-core.js _buildPerm: out[i] = in[digitReverse(i)]. The reversal is computed inline
+//    from the factor list (passed as u_fac[0..u_nfac-1], MSD→LSD as factor() returns). For output index i,
+//    the source is rev(i). CPU: for each factor r (in order), rem/=r; rev += (x%r)*rem; x/=r.
+const GLSL_FFT_PERM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform int u_axis;
+uniform int u_G;
+uniform int u_nfac;
+uniform int u_fac[8];   // the factor sequence (same order as factor()), max 8 stages
+out vec4 fragColor;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  int i     = (u_axis == 0) ? c.x : c.y;
+  int other = (u_axis == 0) ? c.y : c.x;
+  // rev(i): the CPU digit-reversal
+  int x = i, rev = 0, rem = u_G;
+  for (int s = 0; s < 8; s++) {
+    if (s >= u_nfac) break;
+    int r = u_fac[s];
+    rem /= r;
+    rev += (x - (x / r) * r) * rem;   // (x % r) * rem
+    x /= r;
+  }
+  ivec2 fc = (u_axis == 0) ? ivec2(rev, other) : ivec2(other, rev);
+  fragColor = vec4(texelFetch(u_psi, fc, 0).xy, 0.0, 1.0);
+}`;
+
+// ── GLSL_FFT_NORM — the inverse 1/N normalisation (one pass after a full inverse 2D FFT). ────────────
+const GLSL_FFT_NORM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform float u_inv;   // 1.0/float(N) for inverse, else 1.0
+out vec4 fragColor;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); vec2 v = texelFetch(u_psi, c, 0).xy; fragColor = vec4(v*u_inv, 0.0, 1.0); }`;
+
+// ── GLSL_FFT_BLOCK — the FAITHFUL per-mode 2×2 propagator (mixedRadixPropagate, T=1). ────────────────
+//    The CPU op is NOT a scalar exp(iλdt): it FFTs Re(ψ) and Im(ψ) as TWO separate real fields → two
+//    COMPLEX spectral fields R̂ (u_rhat) and Î (u_ihat), then couples them per-mode by the 2×2 block:
+//        R̂' = A11·R̂ + A12·Î ;  Î' = A21·R̂ + A11·Î
+//    with (T=1)  x = 1 − hf,  hf = (dt/4·λ)·(dt/2·λ);  A11 = x;  A12 = −h·(2 − hf), h = (dt/4)·λ;
+//    A21 = f = (dt/2)·λ  — all COMPLEX (λ complex). u_which selects the output field (0 = R̂', 1 = Î').
+//    Byte-verified vs mixedRadixPropagate at the f64 floor (scratchpad/prop-verify.mjs). ───────────────
+const GLSL_FFT_BLOCK = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_rhat;   // R̂ = FFT(Re ψ)  (complex)
+uniform sampler2D u_ihat;   // Î = FFT(Im ψ)  (complex)
+uniform sampler2D u_lam;    // λ(k) = (re, im) per mode
+uniform float u_dt;
+uniform int   u_which;      // 0 → output R̂' , 1 → output Î'
+uniform int   u_T;          // ≤ 1: one step (unchanged) · > 1: M^T by binary powering (stepEyeJump)
+out vec4 fragColor;
+vec2 cmul(vec2 a, vec2 b){ return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 Rh = texelFetch(u_rhat, c, 0).xy;
+  vec2 Ih = texelFetch(u_ihat, c, 0).xy;
+  vec2 lam= texelFetch(u_lam,  c, 0).xy;
+  // build the block (all complex), MIRRORING mixedRadixPropagate T=1:
+  vec2 h  = 0.25 * u_dt * lam;              // h  = (dt/4)·λ
+  vec2 f  = 0.5  * u_dt * lam;              // f  = (dt/2)·λ
+  vec2 hf = cmul(h, f);                     // hf = h·f
+  vec2 x  = vec2(1.0, 0.0) - hf;            // x  = 1 − hf   (= A11)
+  vec2 t2 = vec2(2.0, 0.0) - hf;            // t2 = 2 − hf
+  vec2 A12= -cmul(h, t2);                   // A12 = −h·t2
+  vec2 A21= f;                               // A21 = f
+  vec2 A11= x;
+  if (u_T > 1) {   // M = x·I + N, N² = q·I, det M = 1 → M^T = a·I + b·N (a = T_T(x), b = U_{T−1}(x)), by squaring
+    vec2 q = cmul(A12, f), a = vec2(1.0, 0.0), b = vec2(0.0), p = x, s = vec2(1.0, 0.0); int n = u_T;
+    for (int it = 0; it < 31; it++) { if (n <= 0) break;
+      if ((n & 1) == 1) { vec2 bs = cmul(b, s); vec2 na = cmul(a, p) + cmul(bs, q); vec2 nb = cmul(a, s) + cmul(b, p); a = na; b = nb; }
+      n = n >> 1; if (n > 0) { vec2 ss = cmul(s, s); vec2 np = cmul(p, p) + cmul(ss, q); vec2 ns = 2.0 * cmul(p, s); p = np; s = ns; } }
+    A11 = a; A12 = cmul(b, A12); A21 = cmul(b, f);
+  }
+  vec2 outv = (u_which == 0)
+      ? (cmul(A11, Rh) + cmul(A12, Ih))     // R̂' = A11·R̂ + A12·Î
+      : (cmul(A21, Rh) + cmul(A11, Ih));    // Î' = A21·R̂ + A11·Î
+  fragColor = vec4(outv, 0.0, 1.0);
+}`;
+
+// ── GLSL_FFT_SPLIT — extract Re(ψ) or Im(ψ) into a real field (imag part = 0), for the two-field FFT. ──
+const GLSL_FFT_SPLIT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_psi;
+uniform int u_part;   // 0 → (Re ψ, 0) , 1 → (Im ψ, 0)
+out vec4 fragColor;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); vec2 v = texelFetch(u_psi, c, 0).xy;
+  fragColor = vec4((u_part == 0) ? v.x : v.y, 0.0, 0.0, 1.0); }`;
+
+// ── GLSL_FFT_MERGE — recombine ψ' = (Re from Rfield, Re from Ifield) after the inverse FFTs. ──────────
+const GLSL_FFT_MERGE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_rfield;   // IFFT(R̂') — take .x = Re
+uniform sampler2D u_ifield;   // IFFT(Î') — take .x = Im
+out vec4 fragColor;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy);
+  fragColor = vec4(texelFetch(u_rfield, c, 0).x, texelFetch(u_ifield, c, 0).x, 0.0, 1.0); }`;
 
 //  (b) GLSL_DISSIP — driven-dissipative amplitude relaxation: ψ → ψ·exp((−α + pump·max(0,1−|ψ|²/Pt))·dt).
 //      NON-UNITARY (a saturable gain/absorber = a CGL-style cavity). α=loss, pump+Pt=saturable gain toward
@@ -4466,6 +5782,7 @@ uniform sampler2D u_peakTex; // GPU-reduced peak (1x1) — texture-direct path; 
 uniform int   u_usePeakTex;  // 1 = take the normalizer from u_peakTex instead of u_smoothMax
 uniform float u_peakGain;    // display gain applied to the sampled peak (the legacy path's _GLOW factor)
 uniform int   u_ampView;  // 0 = phase colormap (hue = arg ψ — motion visible), 1 = amplitude hologram colormap (same convention as the field view; global phase honestly invisible)
+uniform float u_phaseFloor;  // phase view: brightness FLOOR (0 = fade low-amp to black [default, other callers]; >0 = a constant floor so the WHOLE field's phase stays visible, like the CPU hsl 0.12 floor)
 in vec2 v_uv;
 out vec4 fragColor;
 ${GLSL_HOLOGRAM_COLORMAP}
@@ -4498,6 +5815,24 @@ void main() {
   }
   float hue  = (atan(psi.y, psi.x) / (2.0 * 3.14159265) + 1.0);
   hue = hue - floor(hue);
+  if (u_phaseFloor > 0.0) {
+    // CPU-MATCH phase colormap: HSL with lightness = floor + mag·0.48, saturation 0.70 (the _paintCPU hsl2rgb
+    //   formula). mag uses a gentle log lift of the peak-normalized amp so the whole field's phase reads like
+    //   the CPU (which maps raw |ψ| with a 0.12 floor). This keeps the background visibly coloured, not black.
+    float mag = clamp(log(1.0 + 12.0 * amp) / log(13.0), 0.0, 1.0);
+    float L = u_phaseFloor + mag * 0.48;   // CPU: 0.12 + mag·0.48
+    float S = 0.70;
+    // HSL → RGB (matches hsl2rgb in the app)
+    float a = S * min(L, 1.0 - L);
+    vec3 rgb;
+    for (int ch = 0; ch < 3; ch++) {
+      float n = (ch == 0) ? 0.0 : (ch == 1) ? 8.0 : 4.0;
+      float k = mod(n + hue * 12.0, 12.0);
+      rgb[ch] = L - a * clamp(min(k - 3.0, min(9.0 - k, 1.0)), -1.0, 1.0);
+    }
+    fragColor = vec4(rgb, 1.0);
+    return;
+  }
   float v  = clamp(log(1.0 + 6.0 * amp) / log(7.0), 0.0, 1.0);
   float h6 = hue * 6.0;
   float hi = floor(h6);
@@ -4512,7 +5847,7 @@ void main() {
   else if (sec == 3) rgb = vec3(0.0,q,  v);
   else if (sec == 4) rgb = vec3(t0, 0.0,v);
   else               rgb = vec3(v,  0.0,q);
-  float fade = smoothstep(0.004, 0.03, amp);
+  float fade = smoothstep(0.004, 0.03, amp);   // legacy fade-to-black (floor=0 callers)
   fragColor = vec4(rgb * fade, 1.0);
 }`;
 

@@ -540,13 +540,20 @@ const probeObjects = {
 // names in display order (cube/attractor are app-injected, appended by the app).
 const PROBE_OBJECT_NAMES = ['ring','point','pair','grid','cross','blob','letterA','depthscene'];
 // 3×3 anti-aliased dot into the REAL channel (shared by the generators above).
-function _pdot(f, G, px, py, a) { for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){ const X=Math.round(px)+dx, Y=Math.round(py)+dy;
+//   _dotPose (set only inside makeProbeField when region.rot ≠ 0): every dot's POSITION is turned about the region's centre —
+//   the GENERATOR turned (its strokes drawn along turned lines), never its samples resampled. Absent → the identity, byte-for-byte.
+let _dotPose = null;
+function _pdot(f, G, px, py, a) { if (_dotPose) { const P = _dotPose, ux = px - P.cx, uy = py - P.cy; px = P.cx + P.c * ux - P.s * uy; py = P.cy + P.s * ux + P.c * uy; }
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){ const X=Math.round(px)+dx, Y=Math.round(py)+dy;
   if(X>=0&&X<G&&Y>=0&&Y<G){ const w=(dx||dy)?a*0.45:a, i=(Y*G+X)*2; if(w>Math.abs(f[i])) f[i]=w; } } }
 // build a probe object's field. name → generator (core or app-extra); returns Float64[2·G·G].
+//   region.rot (rad, optional): the generator's dots turned about the region's centre (see _dotPose).
 function makeProbeField(name, G, region, opts = {}, extra = {}) {
   const f = new Float64Array(2*G*G);
   const gen = (extra && extra[name]) || probeObjects[name] || probeObjects.ring;
-  gen(f, G, region, opts);
+  const rot = +(region && region.rot) || 0;
+  _dotPose = rot ? { cx: region.x0 + region.side / 2, cy: region.y0 + region.side / 2, c: Math.cos(rot), s: Math.sin(rot) } : null;
+  try { gen(f, G, region, opts); } finally { _dotPose = null; }
   return f;
 }
 

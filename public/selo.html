@@ -21,9 +21,8 @@ const { AVATAR_WORLD_SCRIPT, makeSendCursorMove, makePeerControl } = ui;
 // both core and UI helpers from a single object.
 const appApi = { ...core, ...ui };
 
-const WS_URL = 'ws://localhost:3000';
-
 const params  = new URLSearchParams(window.location.search);
+const WS_URL  = params.get('ws') ?? 'ws://localhost:3000';   // ?ws=ws://host:port — reach another reflector (e.g. a test server); default unchanged
 const appKey  = params.get('app') ?? 'counter';
 const app     = APPS[appKey];
 

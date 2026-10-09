@@ -4738,7 +4738,7 @@ function makeMediumU1Renderer(core) {
 }
 
 export default {
-  title:       'Medium-U1 | transport = W.virtGo · slot-centric register (medium.js successor)',
+  title:       'Medium-U1 | slot-centric register (medium.js successor)',
   selo:        'medium-u1',
   reflectorMs: REFLECTOR_MS,
   metaOptions: { _subtickMs: SUBTICK_MS },

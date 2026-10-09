@@ -89,8 +89,12 @@ function createSelo(seloId) {
             if (ev?.data?.type === 'snapshot_response') {
                 const targetId = ev.data.targetUser, targetClient = app.clients.get(targetId), pending = app.pendingJoiners.get(targetId);
                 if (targetClient && targetClient.ws.readyState === 1 && pending) {
-                    const snapTime = ev.data.payload?.time ?? 0;
-                    targetClient.ws.send(JSON.stringify({ type: 'snapshot_apply', snapshot: ev.data.payload, history: [], seloId: app.seloId }));
+                    //   payloadRaw: the fast path (ws handler) — the snapshot as the leader's own JSON text, spliced verbatim
+                    const hasRaw = typeof ev.data.payloadRaw === 'string';
+                    const snapTime = hasRaw ? (ev.data.payloadTime ?? 0) : (ev.data.payload?.time ?? 0);
+                    targetClient.ws.send(hasRaw
+                        ? '{"type":"snapshot_apply","history":[],"seloId":' + JSON.stringify(app.seloId) + ',"snapshot":' + ev.data.payloadRaw + '}'
+                        : JSON.stringify({ type: 'snapshot_apply', snapshot: ev.data.payload, history: [], seloId: app.seloId }));
                     const toFlush = pending.buffer.filter(m => m.type === 'pulse' ? m.logicalTime > snapTime : true);
                     console.log('[Selo ' + app.seloId + '] snapshot->' + targetId + ' snapTime=' + snapTime + ' flushing ' + toFlush.length + '/' + pending.buffer.length);
                     console.log('[flush]', toFlush.map(m => m.type === 'pulse' ? (m._isHeartbeat ? 'HB@' + m.logicalTime : 'EV@' + m.logicalTime) : m.type));
@@ -215,11 +219,40 @@ wss.on('connection', (ws, req) => {
     clients.set(clientId, { ws, seloId: null, clientId });
 
     ws.on('message', (data) => {
-        console.log(`📦 RAW message received from ${clientId}:`, data.toString());
-        
+        const raw = data.toString();
+        // ── SNAPSHOT FAST PATH (2026-09-26). A join snapshot is 7–16 MB. Printing it (RAW log → a terminal is a
+        //   synchronous write), parsing it, logging the parsed object and re-stringifying it to forward it blocked this
+        //   ONE event loop — every selo's heartbeat — for 2.0–2.7 s per join (measured on the leader: no pulse for that
+        //   long, then a burst). The reflector never needs the snapshot's contents: only the small header (targetUser)
+        //   and payload.time (to filter the joiner's buffered pulses). So the header is parsed, the payload is cut out
+        //   as TEXT and spliced verbatim into the snapshot_apply message. It still goes through sendToSelo with the
+        //   reflector's arrival timestamp, so ordering against pulses/events is exactly as before.
+        //   The peer sends JSON.stringify({ type, targetUser, payload: { time, worlds, rng } }) — payload last, time
+        //   first. Anything else (or a small message) takes the ordinary path below.
+        if (raw.length > 65536 && currentSeloId && raw.startsWith('{"type":"snapshot_response"') && raw.endsWith('}')) {
+            const i = raw.indexOf(',"payload":');
+            const payloadRaw = i > 0 ? raw.slice(i + 11, -1) : '';
+            const tm = /^\{"time":(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[,}]/.exec(payloadRaw);
+            let head = null; try { head = i > 0 ? JSON.parse(raw.slice(0, i) + '}') : null; } catch (e) { head = null; }
+            if (head && head.targetUser && tm) {
+                console.log(`📥 snapshot_response from ${clientId} → ${head.targetUser} · ${(raw.length / 1e6).toFixed(2)} MB · time=${tm[1]} (forwarded as text, not re-parsed)`);
+                sendToSelo(currentSeloId, {
+                    type: 'client_msg',
+                    from: clientId,
+                    data: { type: 'snapshot_response', targetUser: head.targetUser, payloadRaw, payloadTime: +tm[1] },
+                    timestamp: Date.now(),
+                    _arrivedAt: Date.now()
+                });
+                return;
+            }
+        }
+        //   large bodies are summarised, never printed (see above); small ones are logged as before
+        if (raw.length > 4096) console.log(`📦 message from ${clientId}: ${(raw.length / 1e6).toFixed(2)} MB (body not printed)`);
+        else console.log(`📦 RAW message received from ${clientId}:`, raw);
+
         try {
-            const message = JSON.parse(data.toString());
-            console.log(`📥 Parsed message from ${clientId}:`, message.type, message);
+            const message = JSON.parse(raw);
+            if (raw.length <= 4096) console.log(`📥 Parsed message from ${clientId}:`, message.type, message);
             
             if (message.type === 'join_selo') {
                 const seloId = message.seloId || 'default';
@@ -331,8 +364,9 @@ wss.on('connection', (ws, req) => {
         }
     });
 
-    ws.on('close', () => {
-        console.log(`[ws.close] client=${clientId} selo=${currentSeloId}`);
+    ws.on('error', (e) => { console.log(`[ws.error] client=${clientId} selo=${currentSeloId}: ${e && e.message}`); });
+    ws.on('close', (code, reason) => {
+        console.log(`[ws.close] client=${clientId} selo=${currentSeloId} code=${code} reason=${reason ? reason.toString() : ''}`);
         if (currentSeloId) {
             const selo = selos.get(currentSeloId);
             if (selo) {

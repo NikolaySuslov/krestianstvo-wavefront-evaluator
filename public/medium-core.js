@@ -533,6 +533,102 @@ export function bankAge(ops, i, tauK, name, kp, kk, beat) {
   return beat;
 }
 
+// ── THE FULL ℂ* DOP REGISTER, as a portable object (makeDopRegister) — so the KWE-node AHC apps
+//    (ahc-mixed-radix, mixed-radix-field, …) carry the SAME register medium-u1 does, not a scalar
+//    subset. medium-u1's register is a makeObserverBank of full lensU1 descriptors {mode, phase,
+//    beta, omega, prec, kx, ky, tx, ty, gain, A[4]} aged by bankAge, coupled by kuramotoStep. This
+//    factory bundles exactly that so a thin app drops it into its replicated `register` node and
+//    gets the WHOLE dop, not just ∠. It is PURE DATA + the lensU1 algebra (no field, no GPU): every
+//    method is a fn of replicated register state → byte-identical across peers by construction, the
+//    same contract regHash pins. The field step reads what it needs via applyDop (below).
+//
+//    n     — worldline count (4 = W/V/P1/P2).
+//    omega — the default precession rate written into each fresh dop (medium-u1's lensTau ω).
+//    Returns { ops, phase(i), beat(kstep,rates), age(i,beats), edgeSet(a,b,κ), edge(), kuramoto(kstep,period),
+//              angle(i), evalAt(i,dTau), setPin(i,β), setTilt(i,kx,ky), setMetric(i,A,tx,ty),
+//              save(), restore(s) } — all pure fns of (ops, edge). The app owns WHEN to call beat/kuramoto
+//              (its shared-step clock); this owns WHAT each does to the register.
+export function makeDopRegister({ n = 4, omega = 0 } = {}) {
+  const bank = makeObserverBank(n);
+  const ops = bank.ops;
+  for (const o of ops) o.omega = omega;              // seed each dop's precession rate (lensTau ω)
+  let edge = null;                                   // n×n symmetric κ (edge coupling), replicated
+  const beats = new Array(n).fill(0);                // per-slot integer beat count (matter-paced)
+
+  // BEAT: advance each slot's integer beat count to floor(kstep·rate_i) and precess ∠ by ω per NEW
+  //   beat (the W-convention aging: phase absorbs its own precession). Pure fn of (kstep, rates).
+  const beat = (kstep, rates) => { for (let i = 0; i < n; i++) { const b = Math.floor(kstep * (rates?.[i] ?? 1));
+    while (beats[i] < b) { beats[i]++; ops[i].phase = wrap2pi(ops[i].phase + (ops[i].omega || 0)); } } };
+
+  // KURAMOTO edge step on the OWN replicated phases (deterministic; same κ that couples the field-mix).
+  const kuramoto = (kstep, period = 21) => { if (!edge || (kstep % period) !== 0) return;
+    const phases = ops.map((o) => o.phase); const { dth, any } = kuramotoStep(phases, edge, {});
+    if (any) for (let j = 0; j < n; j++) if (dth[j]) ops[j].phase = wrap2pi(ops[j].phase + dth[j]); };
+
+  const edgeSet = (a, b, kappa) => { edge = edge ? edge.map((r) => r.slice()) : Array.from({ length: n }, () => new Array(n).fill(0));
+    edge[a][b] = kappa; edge[b][a] = kappa; };   // symmetric
+
+  return {
+    ops, beats, edge: () => edge,
+    op: (i) => ops[i],
+    angle: (i) => lensU1.angle(ops[i]),                       // ∠ = phase + prec (the center reference)
+    evalAt: (i, dTau) => lensU1.evalAt(ops[i], dTau),         // predicted ∠ dTau ahead (the aging law)
+    beta: (i) => (ops[i].beta ?? 1),                          // pin stiffness
+    beat, kuramoto, edgeSet,
+    setPin: (i, b) => { ops[i].beta = b; },
+    setTilt: (i, kx, ky) => { ops[i].kx = kx; ops[i].ky = ky; ops[i].mode = (kx || ky || ops[i].tx || ops[i].ty) ? (ops[i].tx || ops[i].ty ? 'gauge' : 'phase') : 'id'; },
+    setMetric: (i, A, tx, ty) => { ops[i].A = [...A]; ops[i].tx = tx; ops[i].ty = ty; ops[i].mode = 'metric'; },
+    save: () => ({ ops: bank.save(), edge: edge ? edge.map((r) => r.slice()) : null, beats: beats.slice() }),
+    restore: (s) => { if (!s) return false; bank.restore(s.ops); edge = s.edge ? s.edge.map((r) => r.slice()) : null;
+      for (let i = 0; i < n; i++) beats[i] = s.beats?.[i] ?? 0; return true; },
+  };
+}
+
+// ── PURE-FUNCTIONAL dop-register steps (for KWE reducer nodes) — the SAME transforms makeDopRegister
+//    wraps, but operating on PLAIN replicated state {ops, edge, beats} (no mutable closure object), so a
+//    Renkon collect-node holds the register as serializable data and steps it purely. A KWE node keeps
+//    { ops: dopFresh(n, omega), edge, beats } in its reduced state and calls dopBeat / dopKuramoto in the
+//    reducer. dopFresh's ops are plain lensU1.id() objects → JSON-safe → snapshot/replay-exact.
+export function dopFresh(n = 4, omega = 0) { return Array.from({ length: n }, () => ({ ...lensU1.id(), omega })); }
+// dopBeat(ops, beats, kstep, rates) — advance beats to floor(kstep·rate_i), precess ∠ per NEW beat.
+//   Returns NEW {ops, beats} (immutable — the reducer discipline); pure fn of (kstep, rates, prev state).
+export function dopBeat(ops, beats, kstep, rates) {
+  const nOps = ops.map((o) => ({ ...o })), nBeats = beats.slice();
+  for (let i = 0; i < nOps.length; i++) { const b = Math.floor(kstep * (rates?.[i] ?? 1));
+    while (nBeats[i] < b) { nBeats[i]++; nOps[i].phase = wrap2pi(nOps[i].phase + (nOps[i].omega || 0)); } }
+  return { ops: nOps, beats: nBeats };
+}
+// dopKuramoto(ops, edge, kstep, period) — edge phase-entrainment on the OWN phases; returns NEW ops (or the
+//   same array when it's not an edge step / no edge). Deterministic (same κ on every peer → same ∠).
+export function dopKuramoto(ops, edge, kstep, period = 21) {
+  if (!edge || (kstep % period) !== 0) return ops;
+  const phases = ops.map((o) => o.phase); const { dth, any } = kuramotoStep(phases, edge, {});
+  if (!any) return ops;
+  return ops.map((o, j) => (dth[j] ? { ...o, phase: wrap2pi(o.phase + dth[j]) } : o));
+}
+// dopEdgeSet(edge, n, a, b, kappa) — symmetric κ write; returns a NEW edge matrix (immutable).
+export function dopEdgeSet(edge, n, a, b, kappa) {
+  const e = edge ? edge.map((r) => r.slice()) : Array.from({ length: n }, () => new Array(n).fill(0));
+  e[a][b] = kappa; e[b][a] = kappa; return e;
+}
+
+// applyDop(op, field, G) — the ONE mapping from a ℂ* dop to what a field STEP consumes, so a KWE-node
+// field step drives itself from the SAME register medium-u1 uses. Returns the pieces the spectral step
+// needs, all derived from the dop via lensU1 (no new physics):
+//   phaseRot — the global e^{iφ} rotation (φ = ∠op) applied per step (precession the field feels);
+//   beta     — the pin stiffness (spring gain toward the attractor);
+//   kx, ky   — the momentum tilt (rad/cell) folded into the propagator / render phasor;
+//   warp     — { A, tx, ty } | null: the metric read (only when the dop carries a real A/translation).
+// The step applies lensU1.apply(op, ψ) when it wants the FULL operator (metric+tilt+phase), or uses
+// (phaseRot, kx, ky, beta) directly for the fast diagonal path. Pure fn of the dop.
+export function applyDop(op) {
+  const phi = lensU1.angle(op);
+  const A = op.A || [1, 0, 0, 1];
+  const hasWarp = A[0] !== 1 || A[1] !== 0 || A[2] !== 0 || A[3] !== 1 || !!(op.tx || op.ty);
+  return { phaseRot: phi, gain: op.gain ?? 1, beta: op.beta ?? 1, kx: op.kx || 0, ky: op.ky || 0,
+    warp: hasWarp ? { A: [...A], tx: op.tx || 0, ty: op.ty || 0 } : null };
+}
+
 // makeRegisterReadout(ctx) — THE FULL U(1) REGISTER INTROSPECTION, shared by every app's `regPhase()`. A thin app
 // is a U1 demo in thin mode, so it should expose the SAME register readout as the full medium — the field-specific
 // parts simply absent. The UNIVERSAL register state (what EVERY U1 worldline carries regardless of its matter) is:
@@ -847,6 +943,14 @@ export function kernelLambdaGrid(radii, weights, offs, G) {
 // come from a per-G scratch pool instead of fresh allocations (~6 × 128 KB of garbage per step otherwise — GC
 // pauses read as visual lag). RESULT VALUES are bit-identical to the alloc path (same ops, same order); the
 // caller must consume/copy the returned field before the NEXT reuse:true call (it is the pool's buffer).
+//   _chebPow(xr, xi, qr, qi, T, out) — (U_{T−1}, U_{T−2}) of x for the one-step map M = x·I + N, N² = q·I, det M = x² − q = 1: M^T = α·I + β·N
+//   by BINARY POWERING (log₂T complex multiplies, not T−2), then U_{T−1} = β, U_{T−2} = x·β − α — the same algebra as the 2nd-kind Chebyshev
+//   recurrence (2026-10-07; MEASURED identical to 4e-12 relative over 20 000 random modes, T 1 … 300). T = 1 never comes here (bit-exact path).
+function _chebPow(xr, xi, qr, qi, T, out) { let ar = 1, ai = 0, br = 0, bi = 0, pr = xr, pi = xi, sr = 1, si = 0, n = T;
+  while (n > 0) { if (n & 1) { const bbr = br * sr - bi * si, bbi = br * si + bi * sr, nar = ar * pr - ai * pi + bbr * qr - bbi * qi, nai = ar * pi + ai * pr + bbr * qi + bbi * qr, nbr = ar * sr - ai * si + br * pr - bi * pi, nbi = ar * si + ai * sr + br * pi + bi * pr; ar = nar; ai = nai; br = nbr; bi = nbi; }
+    n >>= 1; if (n) { const ssr = sr * sr - si * si, ssi = 2 * sr * si, npr = pr * pr - pi * pi + ssr * qr - ssi * qi, npi = 2 * pr * pi + ssr * qi + ssi * qr, nsr = 2 * (pr * sr - pi * si), nsi = 2 * (pr * si + pi * sr); pr = npr; pi = npi; sr = nsr; si = nsi; } }
+  out[0] = br; out[1] = bi; out[2] = xr * br - xi * bi - ar; out[3] = xr * bi + xi * br - ai; }
+const _cp = new Float64Array(4);
 const _kpsPool = new Map();
 export function kernelPropagateSpectral(field, radii, weights, offs, { T = 1, dt = 1, kCut = 0, G = Math.round(Math.sqrt(field.length / 2)), lam = null, reuse = false } = {}) {
   const N = G * G;
@@ -872,13 +976,11 @@ export function kernelPropagateSpectral(field, radii, weights, offs, { T = 1, dt
     // arithmetic (f64 diffs ~1e-13); ~5× fewer flops in the mode loop than iterating the substeps.
     const hfr = hr * fr - hi * fi, hfi = hr * fi + hi * fr;              // hf
     const xr = 1 - hfr, xi = -hfi;                                       // x = m11 = m22
-    let u1r, u1i, u0r, u0i;                                              // U_{T−1}, U_{T−2}
-    if (T === 1) { u1r = 1; u1i = 0; u0r = 0; u0i = 0; }
-    else { u0r = 1; u0i = 0; u1r = 2 * xr; u1i = 2 * xi;
-      for (let s = 2; s < T; s++) { const nr = 2 * (xr * u1r - xi * u1i) - u0r, ni = 2 * (xr * u1i + xi * u1r) - u0i;
-        u0r = u1r; u0i = u1i; u1r = nr; u1i = ni; } }
     const t2r = 2 - hfr, t2i = -hfi;                                     // 2 − hf
     const m12r = -(hr * t2r - hi * t2i), m12i = -(hr * t2i + hi * t2r);  // m12 = −h·(2−hf)
+    let u1r, u1i, u0r, u0i;                                              // U_{T−1}, U_{T−2}
+    if (T === 1) { u1r = 1; u1i = 0; u0r = 0; u0i = 0; }
+    else { _chebPow(xr, xi, m12r * fr - m12i * fi, m12r * fi + m12i * fr, T, _cp); u1r = _cp[0]; u1i = _cp[1]; u0r = _cp[2]; u0i = _cp[3]; }   // O(log T), see _chebPow
     const A11r = (u1r * xr - u1i * xi) - u0r, A11i = (u1r * xi + u1i * xr) - u0i;
     const A12r = u1r * m12r - u1i * m12i, A12i = u1r * m12i + u1i * m12r;
     const A21r = u1r * fr - u1i * fi, A21i = u1r * fi + u1i * fr;        // m21 = f · A22 = A11
