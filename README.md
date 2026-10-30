@@ -16,7 +16,10 @@ It replaces the Krestianstvo VM with a fundamentally different approach to time,
 
 > Live demo: https://wavefront.krestianstvo.org 
 
-Source code: https://github.com/NikolaySuslov/krestianstvo-wavefront-evaluator
+### UPDATE 10/2026
+
+*The recent update includes*: coherent sheaves, clock instanton tunnelling, quantum phase slip, qubit circuits, spectrometer, twin physical unclonable hash function, fractional Fourier lens, multiverse. [**Read details**](/doc/abstract-holographic-computer-sheaves.md)
+> Live demo: https://wavefront.krestianstvo.org/selo.html?app=ahc-mixed-radix&k=demo&G=128
 
 ![Wave 2D demo](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l6lqb0ei3pcz92fwkrzh.gif)
 
