@@ -15,6 +15,8 @@ Krestianstvo medium used to be a field with a pinned symbol, an eye that read it
 Krestianstvo treats a laser and a hologram as dual manifestations of the same wave propagation and scattering equations. Active gain, standing wave cavity modes, Bragg/Lippmann color selectivity, and holographic recording/reconstruction share the exact same leapfrog propagator and saturable refractive index equations.
 Deeply faithful to wave optics. Optically, a hologram is simply a frozen laser cavity mode, and a laser is an active holographic interferometer. By formulating both under the same operator, the code correctly models how a recorded refractive index guide acts as a grating that regenerates the phase-conjugated wave when illuminated by the reference beam.
 
+![demo cube](https://dev-to-uploads.s3.us-east-2.amazonaws.com/uploads/articles/j7ssnef0vcyny61sboa0.gif)
+
 ## 2. Self-Pinning ("Pin Done by Field Itself")
 
 Instead of anchoring the field to an external rigid coordinate template, the reference phase and frequency are derived dynamically from the field's own internal projection. The instantaneous frequency is computed directly from the field's spatial envelope and operator eigenvalue integration.
@@ -31,6 +33,8 @@ The perception stack: field → ⇀ multiverse branches (slots dreaming the worl
 Arrows, the multiverse and the dream.
 
 An arrow ⇀ is an observation. The target reads the source, the source does not feel it. Through the propagator continued into complex time, an arrow becomes a softened, lossy view. The multiverse is the medium dreaming: each branch is a full slot that observes a world through an arrow with an operator. A branch can be a world in turn. Two branches with the same prior, operator and medium are identical. The eye's dream  is different: it runs in the eye's own medium on what the eye already read. It is perception's activity, not a claim about the world.
+
+![demo 2](https://dev-to-uploads.s3.us-east-2.amazonaws.com/uploads/articles/mpq7y45o8m0ypfkhs96r.gif)
 
 In the context of the medium's native cellular sheaf and quantum graph architecture, pointwise coupling refers to interactions, constraints, or transformations that are evaluated locally at individual nodes (vertices and their associated stalks) rather than globally across the entire network at once. Replacing matrix exponentials with the native differential physics of the medium transforms holographic medium from a heavy linear-algebra simulator into a true analog-style wave medium. It trades away large, unphysical time-steps for blazing-fast, localized spatial updates, opening the door to complex, non-linear topological phenomena that heavy matrix math obscures.
 
@@ -60,6 +64,8 @@ Because the propagation engine is entirely deterministic and shares identical se
 Integrated into the operator matrix and coupling definitions via fractional Fourier transformations (frft), moving smoothly between spatial and momentum representations (fractional turns in phase space).
 Implemented as a clean parameter-driven unitary group rather than a visual approximation, ensuring mathematical reversibility and rigorous optical coherence.
 
+![demo lenses](https://dev-to-uploads.s3.us-east-2.amazonaws.com/uploads/articles/2jreb0ucaw3aeri1hqdo.gif)
+
 ## 7. Spectrometer
 
 Decomposes the field into radial wave-number bands, calculating energy-weighted mean values and coherent versus turbulent energy fractions.
@@ -74,6 +80,8 @@ To translate wave dynamics into auditory pitch, the spectrometer computes the en
 ### Extracting "Color" (Optical Spectral Mapping)
 
 Just as an optical spectrometer separates white light into a rainbow based on wavelength, the virtual spectrometer divides the radial wave-number bands into discrete color channels (such as red, green, and blue components). The relative energy fraction residing in each band dictates the RGB intensity tuple. By continuously sampling these metrics, the spectrometer turns the invisible physics of the holographic manifold into a fully immersive, multi-sensory diagnostic environment.
+
+![demo color](https://dev-to-uploads.s3.us-east-2.amazonaws.com/uploads/articles/3qnul3c1rpvii8ytoeef.gif)
 
 ## 8. Synthesising spectral dimension
 
