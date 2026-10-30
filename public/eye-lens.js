@@ -43,9 +43,63 @@ eye-lens — THE EYE's LENS ALGEBRA (ahc, 2026-10-06).
 */
 import { lensU1 } from "./soliton-algebra.js";
 import { makeHutchinson } from "./ifs-core.js";   // the NATIVE Hutchinson operator (the IFS's Banach set-attractor face: setwise W, a proven bound)
-import { FRESNEL_MAPS } from "./fresnel-cascade.js";   // the medium's CLOCK: the cascade's contraction ratios (clockGenome)
+import { FRESNEL_MAPS } from "./fresnel-cascade.js";
+import { mixedRadix1d, mixedRadix2d, factor } from "./mixed-radix-core.js";
+import { frftCentred } from "./native-fft.js";   // (2026-10-20, optional: the "frft" kind — the fractional transform F^a built from the medium's own operations)   // (the shear's per-line band-limited shift)   // the medium's CLOCK: the cascade's contraction ratios (clockGenome)
 
-export const LENS_KINDS = ["time", "relabel", "gate", "space", "u1", "cavity", "corr"];
+export const LENS_KINDS = ["time", "relabel", "gate", "space", "u1", "cavity", "corr", "roll", "shear", "kmul", "frft"];
+//   NATIVE LINEAR OPTICS (2026-10-19) — one source for the app's ⇔ / ⟲ elements, the eye's cavity copies (CPU and GPU) and the world's
+//   Hutchinson sums: a linear map of the plane made of the medium's own optics, not a resample. Pure, memoised per (G, parameters).
+//   telescopeElems(M, G) — magnification M: a soft square FIELD STOP (half-width (G/2)·min(1, 1/M), a 4-cell cosine edge: a magnification is
+//     no symmetry of the torus) then L(α)·T(u)·L(β)·T(v) = diag(M, 1/M) exactly (rays x′ = x + u·p, p′ = p − l·x; β = (1 − M)/u, α = −β/M,
+//     v = −u/M; u the shortest keeping both chirps sampled): thin lenses are chirps e^{−iqr²} (q = l/2, r the torus' nearest distance to the
+//     centre), travel is the ideal drift's table e^{−i(u/2)|k|²} (kmul).
+//   rotatorElems(θ, G) — a ROUND field stop, the exact half turn first if |θ| > 90°, then three shears Sx(−tan θ/2)·Sy(sin θ)·Sx(−tan θ/2).
+//   nativeLinElems(A, G) — A = s·R(θ) (conformal): the rotator then the telescope; else null (the caller keeps its resample).
+//   nativeLinCopy(G) — (f interleaved, A) → the copy (or null): hutchSum's `copy`.
+const _natMemo = new Map();
+const _natPut = (k, v) => { if (_natMemo.size > 96) _natMemo.delete(_natMemo.keys().next().value); _natMemo.set(k, v); return v; };
+function _chirpE(G, q) { const k = "c|" + G + "|" + q.toFixed(12); let v = _natMemo.get(k); if (v) return v; const N = G * G, m = new Float64Array(N), mi = new Float64Array(N), c0 = (G - 1) / 2;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { let dx = Math.abs(x - c0), dy = Math.abs(y - c0); dx = Math.min(dx, G - dx); dy = Math.min(dy, G - dy); const ph = -q * (dx * dx + dy * dy); m[y * G + x] = Math.cos(ph); mi[y * G + x] = Math.sin(ph); }
+  return _natPut(k, { kind: "space", m, mi, key: "chirp:" + q.toFixed(12) }); }
+function _driftE(G, h) { const k = "d|" + G + "|" + h.toFixed(12); let v = _natMemo.get(k); if (v) return v; const N = G * G, m = new Float64Array(N), mi = new Float64Array(N);   // e^{−i·h·|k|²}
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G, th = -h * (kx * kx + ky * ky); m[y * G + x] = Math.cos(th); mi[y * G + x] = Math.sin(th); }
+  return _natPut(k, { kind: "kmul", m, mi, key: "drift:" + h.toFixed(12) }); }
+function _stopE(G, w, round) { const k = "s|" + G + "|" + w.toFixed(4) + "|" + (round ? 1 : 0); let v = _natMemo.get(k); if (v) return v; const N = G * G, m = new Float64Array(N), c0 = (G - 1) / 2, e = (d) => { const a = d - (w - 4); return a <= 0 ? 1 : a >= 4 ? 0 : 0.5 + 0.5 * Math.cos(Math.PI * a / 4); };
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) m[y * G + x] = round ? e(Math.hypot(x - c0, y - c0)) : e(Math.abs(x - c0)) * e(Math.abs(y - c0));
+  return _natPut(k, { kind: "space", m, mi: new Float64Array(N), key: (round ? "disc:" : "stop:") + w.toFixed(4) }); }
+export function telescopeElems(M, G) { if (!(M > 0) || Math.abs(M - 1) < 1e-9) return []; const lmax = Math.PI / G, u = Math.abs(1 - M) * Math.max(1, 1 / M) / lmax, beta = (1 - M) / u, alpha = -beta / M, v = -u / M;
+  return [_stopE(G, Math.max(2, (G / 2) * Math.min(1, 1 / M) - 2), false), _driftE(G, v / 2), _chirpE(G, beta / 2), _driftE(G, u / 2), _chirpE(G, alpha / 2)]; }
+export function rotatorElems(th, G) { th = Math.atan2(Math.sin(th), Math.cos(th)); if (Math.abs(th) < 1e-9) return []; const out = [_stopE(G, G / 2 - 2, true)];
+  if (Math.abs(th) > Math.PI / 2) { out.push({ kind: "u1", op: { ...lensU1.id(), mode: "metric", A: [-1, 0, 0, -1] } }); th = Math.atan2(Math.sin(th - Math.PI), Math.cos(th - Math.PI)); }
+  if (Math.abs(th) > 1e-9) { const a = -Math.tan(th / 2), b = Math.sin(th); out.push({ kind: "shear", axis: 0, s: a }, { kind: "shear", axis: 1, s: b }, { kind: "shear", axis: 0, s: a }); } return out; }
+export function nativeLinElems(A, G) { const k = "L|" + G + "|" + A.map((v) => v.toFixed(9)).join(","); if (_natMemo.has(k)) return _natMemo.get(k);
+  let L = null; if (Math.abs(A[0] - A[3]) < 1e-9 && Math.abs(A[1] + A[2]) < 1e-9) { const sc = Math.hypot(A[0], A[2]), th = Math.atan2(A[2], A[0]); L = [...rotatorElems(th, G), ...telescopeElems(sc, G)]; }
+  return _natPut(k, L); }
+export function nativeLinCopy(G) { const fft = (re, im, inv) => mixedRadix2d(re, im, G, inv), deps = { G, fft, propHat: null, FDT: 1 }, N = G * G;
+  return (f, A) => { const L = nativeLinElems(A, G); if (!L) return null; const re = new Float64Array(N), im = new Float64Array(N); for (let c = 0; c < N; c++) { re[c] = f[2 * c]; im[c] = f[2 * c + 1]; }
+    const o = run(L, { re, im, dom: "x" }, deps); if (o.dom === "k") fft(o.re, o.im, true); const out = new Float64Array(2 * N); for (let c = 0; c < N; c++) { out[2 * c] = o.re[c]; out[2 * c + 1] = o.im[c]; } return out; }; }
+//   kmul { m, mi } — a per-mode multiplier IN THE DUAL (2026-10-19): an ideal propagator given as its table (e.g. the ideal drift
+//   e^{−icτ|k|²}) — one transform there and back, no stepping. Unit modulus ⇒ the ear treats it as it treats a time lens.
+//   shear { axis, s } — a SHEAR of the plate (2026-10-19): axis 0 moves each row y by s·(y − c), axis 1 each column x by s·(x − c), c = (G−1)/2,
+//   by the shift theorem per line (F(q)·e^{−2πiq·d/G}, the Nyquist bin at +G/2) — band-limited, UNITARY and exactly invertible on each line. It is the flow of a
+//   linear gauge term (H = s·y·k_x: a uniform magnetic field in the Landau gauge); three of them make an exact rotation (x, y, x — Paeth's
+//   decomposition: tan(θ/2), −sin θ, tan(θ/2)). The seam at the plate's edge is the shear's own (a rotator has an aperture: see the app's
+//   round field stop). Not followed by the ear (it moves energy between |k| shells).
+const _shTab = new Map();   // the shear's per-line phase table e^{−2πi·k·d_l/G}, per (G, s): no trig per call
+function _shearTab(G, s) { const k = G + "|" + s; let t = _shTab.get(k); if (t) return t; const c = (G - 1) / 2, H = G >> 1; t = { c: new Float64Array(G * G), s: new Float64Array(G * G) };
+  for (let l = 0; l < G; l++) { const d = s * (l - c); for (let q = 0; q < G; q++) { const kq = q <= H ? q : q - G, a = -2 * Math.PI * kq * d / G; t.c[l * G + q] = Math.cos(a); t.s[l * G + q] = Math.sin(a); } }
+  if (_shTab.size > 24) _shTab.delete(_shTab.keys().next().value); _shTab.set(k, t); return t; }
+export function applyShear(L, re, im, G) { const s = +L.s || 0; if (!s) return; const fac = factor(G), r = new Float64Array(G), i = new Float64Array(G), ax = L.axis | 0, T = _shearTab(G, s);
+  for (let l = 0; l < G; l++) { for (let u = 0; u < G; u++) { const j = ax ? u * G + l : l * G + u; r[u] = re[j]; i[u] = im[j]; }
+    mixedRadix1d(r, i, G, false, fac);
+    for (let q = 0, o = l * G; q < G; q++) { const cs = T.c[o + q], sn = T.s[o + q], x = r[q], y = i[q]; r[q] = x * cs - y * sn; i[q] = x * sn + y * cs; }   // (the Nyquist bin: the pure phase e^{−iπd} — complex fields, so unitary and exactly invertible)
+    mixedRadix1d(r, i, G, true, fac); for (let u = 0; u < G; u++) { const j = ax ? u * G + l : l * G + u; re[j] = r[u]; im[j] = i[u]; } } }
+//   roll { dx, dy } — a WHOLE-CELL TRANSLATION ON THE TORUS (2026-10-19): out(x + d) = ψ(x), indices modulo G — exact and lossless (a phase
+//   ramp e^{−ik·d} in the dual: no light leaves the plate, because the plate has no edge). lensU1's metric shift zero-fills what it moves past
+//   the plate's frame instead. roll ∘ roll adds; the ear follows it exactly (it moves no energy between shells) unless a mask comes after it.
+export function applyRoll(L, re, im, G) { const N = G * G, dx = (((L.dx | 0) % G) + G) % G, dy = (((L.dy | 0) % G) + G) % G; if (!dx && !dy) return;
+  const r = Float64Array.from(re), i = Float64Array.from(im); for (let y = 0; y < G; y++) { const yd = ((y + dy) % G) * G, ys = y * G; for (let x = 0; x < G; x++) { const d = yd + (x + dx) % G; re[d] = r[ys + x]; im[d] = i[ys + x]; } } void N; }
 //   a GENOME (eye.js rules: x′ = s·R(θ)·x + t on the unit square) as lensU1 elements on a G-plate (centred frame ξ = x − (G−1)/2):
 //   x = u·(G−1) → ξ′ = s·R·ξ + s·R·c + (G−1)·t − c, c = ((G−1)/2, (G−1)/2)
 //   FITTED like eye.js (nlhoFixedPointFit): the raw rules put copies past the unit square (the carpet's attractor spans 0.17 … 1.17), so the
@@ -151,9 +205,11 @@ const _pupMemo = new Map();
 //   _naCut — the band a copy shrunk by s can carry: a SEPARABLE windowed-sinc low-pass at 0.9·s·Nyquist (a decimator's usual margin; Blackman window, ±⌈3/s⌉ taps, unit DC
 //   gain) — the aperture as a real-space transfer, ~10× cheaper than a round trip through the dual; periodic (the torus)
 const _naTaps = new Map();
-function _naCut(f, G, s) { const N = G * G, M = Math.min(G >> 1, Math.ceil(3 / s)), key = G + "|" + s; let h = _naTaps.get(key);
+//   naTaps(G, s) — _naCut's taps (±M, M = min(G/2, ⌈3/s⌉)): exported so a GPU twin of the cut uses the very same filter
+export function naTaps(G, s) { const M = Math.min(G >> 1, Math.ceil(3 / s)), key = G + "|" + s; let h = _naTaps.get(key);
   if (!h) { h = new Float64Array(2 * M + 1); let sum = 0; for (let j = -M; j <= M; j++) { const sc = 0.9 * s, sinc = j === 0 ? sc : Math.sin(Math.PI * sc * j) / (Math.PI * j), w = 0.42 + 0.5 * Math.cos(Math.PI * j / (M + 1)) + 0.08 * Math.cos(2 * Math.PI * j / (M + 1)); h[j + M] = sinc * w; sum += h[j + M]; }
-    for (let j = 0; j <= 2 * M; j++) h[j] /= sum; if (_naTaps.size > 16) _naTaps.clear(); _naTaps.set(key, h); }
+    for (let j = 0; j <= 2 * M; j++) h[j] /= sum; if (_naTaps.size > 16) _naTaps.clear(); _naTaps.set(key, h); } return h; }
+function _naCut(f, G, s) { const N = G * G, M = Math.min(G >> 1, Math.ceil(3 / s)), h = naTaps(G, s);
   const L = G + 2 * M, br = new Float64Array(L), bi = new Float64Array(L), o = new Float64Array(2 * N), T = 2 * M + 1;
   const line = (get, put) => { for (let u = 0; u < L; u++) { const q = get(((u - M) % G + G) % G); br[u] = q[0]; bi[u] = q[1]; }   // the line, wrapped once (the torus)
     for (let x = 0; x < G; x++) { let ar = 0, ai = 0; for (let j = 0; j < T; j++) { const w = h[j]; ar += w * br[x + j]; ai += w * bi[x + j]; } put(x, ar, ai); } };
@@ -164,7 +220,9 @@ function _naCut(f, G, s) { const N = G * G, M = Math.min(G >> 1, Math.ceil(3 / s
 export function pupilOf(G, rho) { const k = G + "|" + rho; let P = _pupMemo.get(k); if (P) return P; const R = Math.max(1, rho * G / 2), c = (G - 1) / 2; P = new Float64Array(G * G);
   for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const r = Math.hypot(x - c, y - c) / R; P[y * G + x] = Math.exp(-Math.LN2 * r ** 8); }
   if (_pupMemo.size > 8) _pupMemo.clear(); _pupMemo.set(k, P); return P; }
-export function hutchSum(f, G, maps, n, fft, lattice = true, pupil = 0) { const N = G * G, H2 = G >> 1, tw = 2 * Math.PI / G; let cur = f;
+//   copy (optional, 2026-10-19): (f, A) → the copy of f under the linear part A made by the caller's NATIVE optics (or null → the resample); such a
+//   copy carries its own band (no aperture taps) and the energy it lets through is what the element keeps (like a cut copy: never re-amplified)
+export function hutchSum(f, G, maps, n, fft, lattice = true, pupil = 0, copy = null) { const N = G * G, H2 = G >> 1, tw = 2 * Math.PI / G; let cur = f;
   const PU = pupil > 0 && pupil < 1 ? pupilOf(G, pupil) : null, stop = (v) => { if (!PU) return v; const o = new Float64Array(2 * N); for (let c = 0; c < N; c++) { o[2 * c] = v[2 * c] * PU[c]; o[2 * c + 1] = v[2 * c + 1] * PU[c]; } return o; };
   const groups = new Map(); for (const w of maps) { const k = w.A.map((v) => v.toFixed(9)).join(","); if (!groups.has(k)) groups.set(k, { A: w.A, t: [] }); groups.get(k).t.push(lattice ? [Math.round(w.tx), Math.round(w.ty)] : [w.tx, w.ty]); }
   const S = lattice ? [] : [...groups.values()].map((g) => { const Sr = new Float64Array(N), Si = new Float64Array(N);
@@ -176,9 +234,11 @@ export function hutchSum(f, G, maps, n, fft, lattice = true, pupil = 0) { const 
   if (lattice) { const G2 = [...groups.values()];
     for (let p = 0; p < Math.max(1, n | 0); p++) { cur = stop(cur); let e0 = 0; for (let c = 0; c < 2 * N; c++) e0 += cur[c] * cur[c]; const out = new Float64Array(2 * N);
       let eS = 0, nS = 0, cut = false;   // the energy the copies' apertures pass (what the element may keep — a cut is a real loss, never re-amplified)
-      for (const g of G2) { const sg = Math.sqrt(Math.abs(g.A[0] * g.A[3] - g.A[1] * g.A[2])), src = PU && sg < 1 ? _naCut(cur, G, sg) : cur;   // (the copy optic's aperture — see pupil)
-        if (src !== cur) { cut = true; let es = 0; for (let c = 0; c < 2 * N; c++) es += src[c] * src[c]; eS += g.t.length * es; } else eS += g.t.length * e0; nS += g.t.length;
-        const o = (g.A[0] === 1 && !g.A[1] && !g.A[2] && g.A[3] === 1) ? cur : lensU1.apply({ ...lensU1.id(), mode: "metric", A: g.A, tx: 0, ty: 0 }, src, G);
+      for (const g of G2) { const idA = g.A[0] === 1 && !g.A[1] && !g.A[2] && g.A[3] === 1, oN = copy && !idA ? copy(cur, g.A) : null;   // (a native copy: its own band and losses)
+        const sg = Math.sqrt(Math.abs(g.A[0] * g.A[3] - g.A[1] * g.A[2])), src = !oN && PU && sg < 1 ? _naCut(cur, G, sg) : cur;   // (the copy optic's aperture — see pupil)
+        if (oN) { cut = true; let es = 0; for (let c = 0; c < 2 * N; c++) es += oN[c] * oN[c]; eS += g.t.length * es; }
+        else if (src !== cur) { cut = true; let es = 0; for (let c = 0; c < 2 * N; c++) es += src[c] * src[c]; eS += g.t.length * es; } else eS += g.t.length * e0; nS += g.t.length;
+        const o = oN || (idA ? cur : lensU1.apply({ ...lensU1.id(), mode: "metric", A: g.A, tx: 0, ty: 0 }, src, G));
         for (const [tx, ty] of g.t) { const ox = ((tx % G) + G) % G, oy = ((ty % G) + G) % G;
           for (let y = 0; y < G; y++) { const yd = (y + oy) % G; for (let x = 0; x < G; x++) { const sj = 2 * (y * G + x), dj = 2 * (yd * G + (x + ox) % G); out[dj] += o[sj]; out[dj + 1] += o[sj + 1]; } } } }
       let e1 = 0; for (let c = 0; c < 2 * N; c++) e1 += out[c] * out[c]; const sc = e1 > 0 ? Math.sqrt((cut ? eS / nS : e0) / e1) : 0; for (let c = 0; c < 2 * N; c++) out[c] *= sc; cur = out; }
@@ -216,20 +276,20 @@ export function hutchMetric(f, G, cells, copies, n = 1) { const N = G * G, c = (
 //   trav (optional): THE ROUND TRIP's TRAVEL — after the element the light travels t steps through the eye's glass (w ↦ U(t)·w, the medium's
 //   own propagator): a real resonator is its element AND the path between its mirrors; the glass's dispersion then decides which of the
 //   cavity's (fractal) modes come back in phase — they resonate, the rest wash out.
-export function cavitySum(f, G, maps, k, nMax = 24, fft = null, pupil = 0, trav = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
+export function cavitySum(f, G, maps, k, nMax = 24, fft = null, pupil = 0, trav = null, copy = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
   //   the FIXED POINT D = ψ + k·W(D), iterated (D₀ = ψ): the same element and the same fixed point as the live fold (cavityStep) — W is the
   //   energy-normalised Hutchinson element, so the round trips are summed through it rather than as separately normalised powers
   const n = Math.min(nMax, Math.max(1, Math.ceil(Math.log(1e-3) / Math.log(Math.abs(kk))))); let D = f, e0 = 0;
   for (let c = 0; c < 2 * N; c++) e0 += f[c] * f[c];
-  for (let q = 0; q < n; q++) { let w = hutchSum(D, G, maps, 1, fft, true, pupil); if (trav) w = trav(w); const Dn = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) Dn[c] = f[c] + kk * w[c]; D = Dn; }
+  for (let q = 0; q < n; q++) { let w = hutchSum(D, G, maps, 1, fft, true, pupil, copy); if (trav) w = trav(w); const Dn = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) Dn[c] = f[c] + kk * w[c]; D = Dn; }
   let e1 = 0; for (let c = 0; c < 2 * N; c++) e1 += D[c] * D[c]; const sc = e1 > 0 ? Math.sqrt(e0 / e1) : 0, acc = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) acc[c] = D[c] * sc;
   return acc; }
 //   cavityStep(f, G, maps, k, S, pupil) — THE SAME RESONATOR LIVE: ONE round trip per new read, D ← ψ + k·W(D) (S.D the state it keeps).
 //   A pure FOLD over the stream of reads (a scan, Renkon's collect): its fixed point is the resolvent (I − kW)⁻¹ψ of cavitySum, reached
 //   as the round trips accumulate — the cavity's own time (a round trip per read) instead of ⌈log 1e-3 / log k⌉ trips per frame. A new
 //   size or a first read starts from ψ. Shown at the input's energy (a display read).
-export function cavityStep(f, G, maps, k, S, pupil = 0, trav = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
-  const prev = S.D && S.D.length === 2 * N ? S.D : f, w0 = hutchSum(prev, G, maps, 1, null, true, pupil), w = trav ? trav(w0) : w0, D = new Float64Array(2 * N); let e0 = 0, e1 = 0;
+export function cavityStep(f, G, maps, k, S, pupil = 0, trav = null, copy = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
+  const prev = S.D && S.D.length === 2 * N ? S.D : f, w0 = hutchSum(prev, G, maps, 1, null, true, pupil, copy), w = trav ? trav(w0) : w0, D = new Float64Array(2 * N); let e0 = 0, e1 = 0;
   for (let c = 0; c < 2 * N; c++) { D[c] = f[c] + kk * w[c]; e0 += f[c] * f[c]; e1 += D[c] * D[c]; } S.D = D;
   const sc = e1 > 0 ? Math.sqrt(e0 / e1) : 0, o = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) o[c] = D[c] * sc; return o; }
 //   correlate(re, im, G, ref) — ⊛ RECOGNITION (soliton-algebra's recognizePure, ahc's _xcorrScan): out(x) = Σ_y ψ(x + y)·conj(r(y)) — a
@@ -301,6 +361,8 @@ export function fuse(chain) {
   for (const L0 of chain || []) { if (!L0) continue; const L = { ...L0 }, P = out[out.length - 1];
     if (P && P.kind === "time" && L.kind === "time" && P.lam === L.lam) { P.t = (P.t | 0) + (L.t | 0); if (!P.t) out.pop(); continue; }
     if (P && _isU1(P) && _isU1(L)) { const c = lensU1.compose(_u1Of(P), _u1Of(L)); if (c) { out[out.length - 1] = { kind: "u1", op: c }; continue; } }   // the algebra's own product
+    if (P && P.kind === "shear" && L.kind === "shear" && (P.axis | 0) === (L.axis | 0)) { P.s = (+P.s || 0) + (+L.s || 0); continue; }
+    if (P && P.kind === "roll" && L.kind === "roll") { P.dx = (P.dx | 0) + (L.dx | 0); P.dy = (P.dy | 0) + (L.dy | 0); continue; }
     if (P && P.kind === "gate" && L.kind === "gate") { out[out.length - 1] = { kind: "gate", parts: [...(P.parts || [P]), ...(L.parts || [L])] }; continue; }
     if (P && P.kind === "space" && L.kind === "space" && _linSpace(L)) { out[out.length - 1] = _spaceProduct(P, L); continue; }
     if (L.kind === "time" && !(L.t | 0)) continue;
@@ -326,11 +388,12 @@ export function applySpace(L, R, I) { const N = R.length, { m, mi, n1, n2 } = L,
 //   a relabel in REAL space (pointwise there): the conjugate, the analyser θ
 export function applyRelabelX(L, R, I) { const N = R.length, c2 = Math.cos(2 * (+L.pol || 0)), s2 = Math.sin(2 * (+L.pol || 0));
   for (let c = 0; c < N; c++) { let xr = R[c], xi = I[c]; if (L.cj) xi = -xi; if (L.pol) { const ur = 0.5 * (xr + c2 * xr + s2 * xi), ui = 0.5 * (xi + s2 * xr - c2 * xi); xr = ur; xi = ui; } R[c] = xr; I[c] = xi; } }
-//   a gate in k (on the lattice's signed modes): pupil disk r2 (keep inside), spectral cut (kcm 1 keep ≤, 2 keep >), beam stop (bs, bsr2)
+//   a gate in k (on the lattice's signed modes): pupil disk r2 (keep inside), spectral cut (kcm 1 keep ≤, 2 keep >), beam stop (bs, bsr2), half-plane (hp)
 export function gated(px, py, g, G) { const H2 = G >> 1, w = (v) => ((v + H2) % G + G) % G - H2, d2 = px * px + py * py;
   if (g.r2 && d2 >= g.r2) return true;
   if (g.kcm) { if (g.kcm === 1 ? d2 > g.kc2 : d2 <= g.kc2) return true; }
   if (g.bs) for (const [bx, by] of g.bs) { const dx = w(px - bx), dy = w(py - by); if (dx * dx + dy * dy < g.bsr2) return true; }
+  if (g.hp && px * g.hp[0] + py * g.hp[1] >= 0) return true;   // hp = [nx, ny]: a HALF-PLANE stop — keep only the light travelling AGAINST n (an app's "⇠back" view)
   return false; }
 export function applyGateK(L, Rk, Ik, G) { const H2 = G >> 1, parts = L.parts || [L];
   for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const px = x <= H2 ? x : x - G, py = y <= H2 ? y : y - G; if (parts.some((g) => gated(px, py, g, G))) { Rk[y * G + x] = 0; Ik[y * G + x] = 0; } } }
@@ -352,9 +415,32 @@ export function run(chain, field, deps) { const { G, fft, propHat, FDT } = deps;
       const sk = L.liveKey !== undefined && deps.tag !== undefined && deps.live ? deps.tag + "|" + L.liveKey : null, S = sk ? (deps.live.get(sk) || (deps.live.size > 64 && deps.live.clear(), deps.live.set(sk, {}), deps.live.get(sk))) : null;
       const trav = L.trav && (L.trav.t | 0) > 0 ? (w) => { const m = w.length >> 1, a = new Float64Array(m), b = new Float64Array(m); for (let j = 0; j < m; j++) { a[j] = w[2 * j]; b[j] = w[2 * j + 1]; }
           fft(a, b, false); const [pr, pi] = propHat(a, b, L.trav.lam, L.trav.t | 0, FDT); fft(pr, pi, true); const o2 = new Float64Array(2 * m); for (let j = 0; j < m; j++) { o2[2 * j] = pr[j]; o2[2 * j + 1] = pi[j]; } return o2; } : null;   // forward, t steps (the glass)
-      const o = S ? (deps.tick !== undefined && S.tick === deps.tick && S.o && S.o.length === 2 * n ? S.o : (S.tick = deps.tick, S.o = cavityStep(fl, G, L.maps, L.k, S, +L.pupil || 0, trav))) : cavitySum(fl, G, L.maps, L.k, L.nMax || 24, fft, +L.pupil || 0, trav); re = new Float64Array(n); im = new Float64Array(n); for (let j = 0; j < n; j++) { re[j] = o[2 * j]; im[j] = o[2 * j + 1]; } }   // (not fused, not heard)
-    else if (L.kind === "time") { toK(); const T = Math.abs(L.t | 0); if (T) { const r = propHat(re, im, L.lam, T, L.t > 0 ? -FDT : FDT); re = r[0]; im = r[1]; } } }
+      const o = S ? (deps.tick !== undefined && S.tick === deps.tick && S.o && S.o.length === 2 * n ? S.o : (S.tick = deps.tick, S.o = cavityStep(fl, G, L.maps, L.k, S, +L.pupil || 0, trav, L.copy || null))) : cavitySum(fl, G, L.maps, L.k, L.nMax || 24, fft, +L.pupil || 0, trav, L.copy || null); re = new Float64Array(n); im = new Float64Array(n); for (let j = 0; j < n; j++) { re[j] = o[2 * j]; im[j] = o[2 * j + 1]; } }   // (not fused, not heard)
+    else if (L.kind === "time") { toK(); const T = Math.abs(L.t | 0); if (T) { const r = propHat(re, im, L.lam, T, L.t > 0 ? -FDT : FDT); re = r[0]; im = r[1]; } }
+    else if (L.kind === "box") { toX(); applyBox(L, re, im, G); }
+    else if (L.kind === "roll") { toX(); applyRoll(L, re, im, G); }
+    else if (L.kind === "shear") { toX(); applyShear(L, re, im, G); }
+    else if (L.kind === "kmul") { toK(); const m = L.m, mi = L.mi; for (let c = 0; c < re.length; c++) { const a = re[c], b = im[c], x = m[c], y = mi ? mi[c] : 0; re[c] = a * x - b * y; im[c] = a * y + b * x; } }
+    else if (L.kind === "frft") { toX(); frftCentred(re, im, G, +L.a || 0, L.form === "clock" ? "clock" : (L.form === "native" && L.sym) ? "native" : "lattice", L.sym || null, L.symKey || null); } }   // (form "native", 2026-10-26: the medium's own oscillator — L.sym / L.symKey; optional)   // F^a about the centre (native-fft.js; not fused, not heard)
   return { re, im, dom }; }
+
+//   applyBox(L, R, I, G) — a HARD-WALLED BOX GUIDE (the self-imaging multimode guide), in place: the W×W box centred on the grid (cells
+//   [a, a + W), a = ⌊(G − W)/2⌋) evolved for the ideal drift e^{−i·ct·k²} on its own modes — the sines φ_n(u) = √(2/(W+1))·sin(πn(u+1)/(W+1)),
+//   k_n = πn/(W+1) (DST-I, orthogonal and its own inverse), separable in x and y; light outside the box is not in the guide (zeroed). With
+//   ct = v·2(W+1)²/π (v the fraction of the revival time) the box's Talbot law is exact: v ½ the image MIRRORED about the centre, v 1 the image,
+//   v ¼ two copies. The matrix per W is memoised; O(W³) per axis.
+const _boxMemo = new Map();
+const _boxMat = (W) => { let S = _boxMemo.get(W); if (S) return S; S = new Float64Array(W * W); const c = Math.sqrt(2 / (W + 1));
+  for (let n = 0; n < W; n++) for (let u = 0; u < W; u++) S[n * W + u] = c * Math.sin(Math.PI * (n + 1) * (u + 1) / (W + 1));
+  if (_boxMemo.size > 4) _boxMemo.clear(); _boxMemo.set(W, S); return S; };
+export function applyBox(L, R, I, G) { const W = Math.max(2, Math.min(G, L.W | 0)), a = Math.floor((G - W) / 2), S = _boxMat(W), ct = +L.ct || 0;
+  const pr = new Float64Array(W), pi = new Float64Array(W); for (let n = 0; n < W; n++) { const k = Math.PI * (n + 1) / (W + 1), th = -ct * k * k; pr[n] = Math.cos(th); pi[n] = Math.sin(th); }
+  const br = new Float64Array(W * W), bi = new Float64Array(W * W); for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) { const c = (a + y) * G + a + x; br[y * W + x] = R[c]; bi[y * W + x] = I[c]; }
+  const tr = new Float64Array(W), ti = new Float64Array(W), axis = (row) => {   // one axis: transform each line, phase, transform back (S is its own inverse)
+    for (let l = 0; l < W; l++) { for (let n = 0; n < W; n++) { let sr = 0, si = 0; for (let u = 0; u < W; u++) { const j = row ? l * W + u : u * W + l, s = S[n * W + u]; sr += s * br[j]; si += s * bi[j]; } tr[n] = sr * pr[n] - si * pi[n]; ti[n] = sr * pi[n] + si * pr[n]; }
+      for (let u = 0; u < W; u++) { let sr = 0, si = 0; for (let n = 0; n < W; n++) { const s = S[n * W + u]; sr += s * tr[n]; si += s * ti[n]; } const j = row ? l * W + u : u * W + l; br[j] = sr; bi[j] = si; } } };
+  axis(true); axis(false);
+  R.fill(0); I.fill(0); for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) { const c = (a + y) * G + a + x; R[c] = br[y * W + x]; I[c] = bi[y * W + x]; } }
 
 //   compileEar(chain) — the GPU ear runs ONE pass: a space table on the field, then (in k, at the read) one relabel and the gates.
 //   Walk the fused chain: space lenses before any relabel/gate/time fold into the table; then at most one relabel; then gates. A
@@ -364,9 +450,11 @@ export function run(chain, field, deps) { const { G, fft, propHat, FDT } = deps;
 export function compileEar(chain, G = 0) { const f = fuse((chain || []).map((L) => (L && _isU1(L) && G && _u1Diag(_u1Of(L))) ? _u1Space(_u1Of(L), G) : L)), op = { table: null, cj: false, pol: 0, gates: [], skipped: [] }; let stage = 0;   // 0 table · 1 relabel · 2 gates · 3 past a time lens
   for (const L0 of f) { const L = (_isU1(L0) && G && _u1Diag(_u1Of(L0))) ? _u1Space(_u1Of(L0), G) : L0;   // a phase / tilt / gain is a per-cell multiplier: one more space lens
     if (_isU1(L)) { if (_u1Diag(_u1Of(L))) continue; op.skipped.push(L); continue; }   // (no G: a uniform phase changes no shell energy) · an AFFINE map resamples space — not one pass
-    if (L.kind === "space" && stage === 0) { op.table = op.table ? (_linSpace(L) ? _spaceProduct(op.table, L) : (op.skipped.push(L), op.table)) : L; continue; }
+    if (L.kind === "roll") { if (stage === 0) op.rolled = true; continue; }   // a roll moves no energy between shells; a mask AFTER it would see the moved field (skipped)
+    if (L.kind === "frft" && stage === 0 && !op.rolled && !op.frft) { op.frft = { a: +L.a || 0, form: L.form === "clock" ? "clock" : (L.form === "native" && L.sym) ? "native" : "lattice", ...((L.form === "native" && L.sym) ? { sym: L.sym, symKey: L.symKey || null } : {}) }; stage = 1; continue; }   // ◷ / ◠ F^a: after the table, before the transform (a space lens after it: not heard)
+    if (L.kind === "space" && stage === 0 && !op.rolled) { op.table = op.table ? (_linSpace(L) ? _spaceProduct(op.table, L) : (op.skipped.push(L), op.table)) : L; continue; }
     if (L.kind === "relabel" && stage <= 1 && !op.cj && !op.pol) { op.cj = !!L.cj; op.pol = +L.pol || 0; stage = 1; continue; }
     if (L.kind === "gate" && stage <= 2) { op.gates.push(...(L.parts || [L])); stage = 2; continue; }
-    if (L.kind === "time") { stage = 3; continue; }
+    if (L.kind === "time" || L.kind === "kmul") { stage = 3; continue; }
     op.skipped.push(L); }
   op.exact = !op.skipped.length; return op; }

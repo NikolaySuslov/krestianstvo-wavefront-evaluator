@@ -81,6 +81,7 @@ class AhcScan extends AudioWorkletProcessor {
         for (const s of (d.clock.slots || [])) { if (!s || !Number.isFinite(s.anchorK)) continue; let q = Hh.get(s.i); if (!q) { q = []; Hh.set(s.i, q); }
           while (q.length && q[q.length - 1].k >= s.anchorK) q.pop(); q.push({ k: s.anchorK, th: this.theta(s, s.anchorK), s }); if (q.length > 64) q.splice(0, q.length - 64); } }
       if (Array.isArray(d.maps)) { this.maps = d.maps; this.lattice = null; this.prCache = null; }
+      if (Array.isArray(d.native)) { this.native = d.native; this.prCache = null; }   // the NATIVE axis: the medium's own normal-mode ratios per shell (main thread)
       if (d.holoT) { const q = this.holoT; while (q.length > 1 && q[q.length - 1].at >= d.holoT.at) q.pop(); q.push(d.holoT); if (q.length > 16) q.splice(0, q.length - 16); }
       if (d.holo && Number.isFinite(d.holo.n)) { this.holo.set(d.holo.n | 0, d.holo); if (this.holo.size > 8) this.holo.delete(this.holo.keys().next().value); }
       if (d.frame) { const f = d.frame, q = this.frames; while (q.length && q[q.length - 1].vt >= f.vt) q.pop(); q.push(f); if (q.length > 64) q.splice(0, q.length - 64); }
@@ -156,15 +157,20 @@ class AhcScan extends AudioWorkletProcessor {
     r = new Float64Array(n);
     //   "k" — shell n at n·f0: frequency PROPORTIONAL to |k| (the harmonic axis without its +1 offset; DC = 0 Hz, not voiced). A periodic
     //   object's Bragg orders m·k_g then sound as a true harmonic series (the grid's, at shells 3, 6, 9 … → 3, 6, 9 × f0).
-    for (let h = 0; h < n; h++) { if (mode === "k") r[h] = h; else if (mode === "lattice") r[h] = L[Math.min(L.length - 1, h)];
+    //   "native" — shell h at the medium's own normal-mode frequency ratio (Ω_h − Ω_0)/(Ω_1 − Ω_0): inharmonic, the operator's eigenfrequencies
+    for (let h = 0; h < n; h++) { if (mode === "native") r[h] = this.native ? Math.max(0, +this.native[h] || 0) : h; else if (mode === "k") r[h] = h; else if (mode === "lattice") r[h] = L[Math.min(L.length - 1, h)];
       else if (mode === "ifs") { const x = h + 1; let lo = 0, hi = L.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (L[m] < x) lo = m + 1; else hi = m; }
         const a = L[Math.max(0, lo - 1)], b = L[lo]; r[h] = (Math.abs(Math.log(x / a)) <= Math.abs(Math.log(b / x))) ? a : b; }
       else r[h] = h + 1; }
     this.prCache.set(key, r); return r; }
-  pitchOf(st, slot) { const P = st.pitch; const m = Array.isArray(P) ? P[slot] : P; return (m === "ifs" || m === "lattice" || m === "k") ? m : "harmonic"; }
+  pitchOf(st, slot) { const P = st.pitch; const m = Array.isArray(P) ? P[slot] : P; return (m === "ifs" || m === "lattice" || m === "k" || m === "native") ? m : "harmonic"; }
   //   GLIDE: the slot's glide phase G(vt) (ticks) from its band frames — the ∫(g − 1) of the register-angle detune (see the main thread);
   //   a partial of frequency f then advances 2π·f·tickSec·(vt + G)
   glAt(slot, vt) { const q = this.sub.get(slot); if (!q || !q.length) return 0; const F = this.lerpAt(q, vt); const a = F.a.gl || 0, b = F.b.gl ?? a; return a + (b - a) * F.w; }
+  //   ◈ PITCH: shell h's own transposition phase (ticks) — ∫(565/λ_h − 1), λ_h its measured rate on the ◈ colour scale (main thread); 0 when off
+  //   read from the frame pair the caller ALREADY interpolated (F = lerpAt of the slot's frames) — no search of its own: a per-partial search
+  //   at every control point (64 × up to 4000 frames, even with ◈ pitch off) starved the audio thread (heard as an interrupted, jittering voice)
+  spOf(F, h) { if (!F || !F.a || !F.a.sp) return 0; const a = F.a.sp[h] || 0, b = F.b && F.b.sp ? (F.b.sp[h] ?? a) : a; return a + (b - a) * F.w; }
   tAt(vt) { const q = this.holoT; for (let i = q.length - 1; i >= 0; i--) if (q[i].at <= vt) return q[i].T; return q[0].T; }
   //   FRACTAL RHYTHM — a cascade beat is not a click on the whole spectrum: it is the ring (radius r cells) it adds to the medium's
   //   operator, and a ring acts at its own spatial scale, k ≈ j₀,₁/r. So a beat accents the shells around s(r) = (2.405/r)/π·nb (±~1
@@ -219,14 +225,18 @@ class AhcScan extends AudioWorkletProcessor {
   //   grid (every GRC grid points, anchored in vt, not in the block) — each control point a pure fn of its grid index, so the result is pure
   //   in vt. The controls vary far below the control rate (frames at 160/s, linewidths ≤ 40 Hz), so nothing audible is lost; the cost drops
   //   from every lookup per partial per sample to one per control point.
-  sampleAt(vt) {
-    const x = vt * GR / GRC, M = Math.floor(x), fr = x - M, c0 = this.ctrlAt(M), c1 = this.ctrlAt(M + 1); if (!c0) return [0, 0];
-    const look = this.lerpAt(this.frames, vt, this.hLook ?? -1); if (!look) return [0, 0]; this.hLook = look.i;
-    const loud = (look.a.loud ?? 0) + (((look.b.loud ?? look.a.loud) ?? 0) - (look.a.loud ?? 0)) * look.w, g = this.gainAt(vt) * loud; if (!(g > 0)) return [0, 0];
+  //   NO ALLOCATION ON THE AUDIO THREAD's per-sample / per-control-point path (2026-10-20): the stereo pair is one reused array (the caller
+  //   copies it at once), the control points come from a small pool (ctrlAt / ctrlCompute), the shells' and the comb's complex amplitudes
+  //   are written into fixed scratch arrays. MEASURED on a recorded G 128 stream: ~25 MB/s of short-lived arrays had the worklet's blocks
+  //   over their 2.67 ms budget ~1/s (GC pauses, up to 6 ms — heard as clicks); the samples are bit-identical before and after.
+  sampleAt(vt) { const o = this.so || (this.so = [0, 0]); o[0] = 0; o[1] = 0;
+    const x = vt * GR / GRC, M = Math.floor(x), fr = x - M, c0 = this.ctrlAt(M), c1 = this.ctrlAt(M + 1); if (!c0) return o;
+    const look = this.lerpAt(this.frames, vt, this.hLook ?? -1); if (!look) return o; this.hLook = look.i;
+    const loud = (look.a.loud ?? 0) + (((look.b.loud ?? look.a.loud) ?? 0) - (look.a.loud ?? 0)) * look.w, g = this.gainAt(vt) * loud; if (!(g > 0)) return o;
     const same = c1 && c1.n === c0.n && c1.key === c0.key, ts = this.tickSec, u = same ? fr : 0, v1 = same ? c1 : c0; let l = 0, r = 0;
     //   the CARRIER channel C (an angle, wrapped): interpolated by the SHORTEST ARC between control points, then × R — a linear lerp across
     //   a ±π wrap swept 2π in one control interval (a click at every wrap of the carrier). Per pair (c0, v1), computed once.
-    if (c0.cFor !== v1) { c0.cFor = v1; const n = c0.n, p0 = c0.Pc0 || (c0.Pc0 = new Float64Array(c0.C.length)), dp = c0.dPc || (c0.dPc = new Float64Array(c0.C.length));
+    if (c0.cFor !== v1 || c0.cForId !== v1.id) { c0.cFor = v1; c0.cForId = v1.id; const n = c0.n, p0 = c0.Pc0 || (c0.Pc0 = new Float64Array(c0.C.length)), dp = c0.dPc || (c0.dPc = new Float64Array(c0.C.length));
       for (let i = 0; i < n; i++) { const a = c0.C[i], d = v1.C[i] - a; p0[i] = c0.R * a; dp[i] = v1.R * (a + Math.atan2(Math.sin(d), Math.cos(d))) - p0[i]; } }
     const Pc0 = c0.Pc0, dPc = c0.dPc;
     //   partial i: Re(A_ch·e^{i(ω t + P)}) per channel = A_re·sin + A_im·cos — the complex amplitude A (its sectors' measured phasors,
@@ -234,10 +244,11 @@ class AhcScan extends AudioWorkletProcessor {
     for (let i = 0; i < c0.n; i++) { const f = c0.f[i], cyc = f * ts * vt, P = c0.P[i] + (v1.P[i] - c0.P[i]) * u + Pc0[i] + dPc[i] * u, ph = TAU * (cyc - Math.floor(cyc)) + P, sn = Math.sin(ph), cs = Math.cos(ph);
       l += (c0.Lr[i] + (v1.Lr[i] - c0.Lr[i]) * u) * sn + (c0.Li[i] + (v1.Li[i] - c0.Li[i]) * u) * cs;
       r += (c0.Rr[i] + (v1.Rr[i] - c0.Rr[i]) * u) * sn + (c0.Ri[i] + (v1.Ri[i] - c0.Ri[i]) * u) * cs; }
-    return [Math.tanh(l * g), Math.tanh(r * g)];
+    o[0] = Math.tanh(l * g); o[1] = Math.tanh(r * g); return o;
   }
   //   the controls at grid point M (memoized: the last few points — a pure fn of M)
-  ctrlAt(M) { const cc = this.cc || (this.cc = new Map()); let c = cc.get(M); if (c !== undefined) return c; c = this.ctrlCompute(M * GRC / GR); cc.set(M, c); if (cc.size > 4) cc.delete(cc.keys().next().value); return c; }
+  ctrlAt(M) { const cc = this.cc || (this.cc = new Map()); let c = cc.get(M); if (c !== undefined) return c; c = this.ctrlCompute(M * GRC / GR); cc.set(M, c);
+    if (cc.size > 4) { const k = cc.keys().next().value, old = cc.get(k); cc.delete(k); const pl = this.ctrlPool || (this.ctrlPool = []); if (old && pl.length < 4) pl.push(old); } return c; }
   ctrlCompute(vt) {
     const st = this.setAt(vt), C = this.clock, S = C && C.slots && C.slots[0], slot = S ? S.i : 0, ts = this.tickSec, beats = this.beats || [];
     const look = this.lerpAt(this.frames, vt); if (!look) return null;
@@ -261,13 +272,15 @@ class AhcScan extends AudioWorkletProcessor {
     //   PLACE (the app's space "place"): a frame carries pos[h] — WHERE shell h's energy is on the plate (−1 left … +1 right, × its
     //   concentration; measured from the spectrum by the shift theorem) — and every sector of the shell sits there instead
     const posOf = (F, h) => { if (!F.a.pos) return null; const x = F.a.pos[h] ?? 0, y = F.b.pos ? (F.b.pos[h] ?? x) : x; return x + (y - x) * F.w; };
-    const shellA = (F, h, vtq, hi, scale, nS) => { let Lr = 0, Li = 0, Rr = 0, Ri = 0; const ps = posOf(F, h);
+    const shellA = (F, h, vtq, hi, scale, nS, A) => { let Lr = 0, Li = 0, Rr = 0, Ri = 0; const ps = posOf(F, h);
       for (let q = 0; q < SEC; q++) { const j = h * SEC + q, a = ampOf(F, j); if (!a) continue; const ph = this.phiAt1(slot, vtq, j, hi), c = Math.cos(ph), sn = Math.sin(ph);
         const pl = ps !== null ? Math.max(-1, Math.min(1, ps)) : SEC > 1 ? Math.max(-1, Math.min(1, pan + SECPAN[q % 4])) : panOf(h, nS), l = a * gL(pl), r = a * gR(pl);
         Lr += l * c; Li += l * sn; Rr += r * c; Ri += r * sn; }
-      return [Lr * scale, Li * scale, Rr * scale, Ri * scale]; };
-    const cap = 3 * H + NC * HC + REFN, out = { n: 0, key: "s" + SEC, R: Rl, f: new Float64Array(cap), P: new Float64Array(cap), C: new Float64Array(cap), Lr: new Float64Array(cap), Li: new Float64Array(cap), Rr: new Float64Array(cap), Ri: new Float64Array(cap) };
-    const push = (f, P, A, c = 0) => { const i = out.n++; out.f[i] = f; out.P[i] = P; out.C[i] = c; out.Lr[i] = A[0]; out.Li[i] = A[1]; out.Rr[i] = A[2]; out.Ri[i] = A[3]; };
+      A[0] = Lr * scale; A[1] = Li * scale; A[2] = Rr * scale; A[3] = Ri * scale; return A; };
+    const refA = this.refA || (this.refA = [0, 0, 0, 0]), mxL = this.mxL || (this.mxL = [0, 0]), mxR = this.mxR || (this.mxR = [0, 0]);
+    const cap = 3 * H + NC * HC + REFN, pool = this.ctrlPool, out = (pool && pool.length) ? pool.pop() : { n: 0, key: "", R: 1, id: 0, cFor: null, cForId: -1, f: new Float64Array(cap), P: new Float64Array(cap), C: new Float64Array(cap), Lr: new Float64Array(cap), Li: new Float64Array(cap), Rr: new Float64Array(cap), Ri: new Float64Array(cap), Pc0: new Float64Array(cap), dPc: new Float64Array(cap) };   // (one shape, every field present)
+    out.n = 0; out.key = "s" + SEC; out.R = Rl; out.id = this.ctrlSer = (this.ctrlSer | 0) + 1;   // (id: a pooled object is a new control point)
+    const push = (f, P, a0, a1, a2, a3, c = 0) => { const i = out.n++; out.f[i] = f; out.P[i] = P; out.C[i] = c; out.Lr[i] = a0; out.Li[i] = a1; out.Rr[i] = a2; out.Ri[i] = a3; };
     //   TILT — a LISTENING EQ, not physics (replicated, labelled): partial h scaled by tilt dB per octave, 0 = the measured spectrum as is.
     //   REF — the ω REFERENCE (replicated level): the first REFN shells again WITHOUT the carrier term — the same field in the frame the
     //   register rotates against. With it, the carrier is heard as BEATING at exactly its frequency (ω·dτ/2π per tick × R): a slow swell,
@@ -283,17 +296,18 @@ class AhcScan extends AudioWorkletProcessor {
     //   interpolated phase (shortest arc) — each shell's energy used once, in its own region; its real phase (carrier, holo delay) is
     //   interpolated along the same axis. M = 1 is the plain voice: partial n is shell n.
     //   PITCH AXIS of the sounding slot (pitchRatios) and its GLIDE phase G (glAt). The comb (a harmonic source) only on the harmonic axis.
-    const pm = this.pitchOf(st, slot), PR = this.pitchRatios(pm, H), M = pm === "harmonic" ? Math.max(1, Math.min(3, (st.comb | 0) || 1)) : 1;
+    //   ◈ NATIVE colour-pitch (frame spn): every partial on the source's pitch f0 — its own ◈ phase sp carries the light's frequency ratio
+    const spn = !!(SF.a && SF.a.spn), pm = this.pitchOf(st, slot), PR = spn ? (this.ones || (this.ones = new Float64Array(H).fill(1))) : this.pitchRatios(pm, H), M = !spn && pm === "harmonic" ? Math.max(1, Math.min(3, (st.comb | 0) || 1)) : 1;
     const shA = this.shA || (this.shA = Array.from({ length: H }, () => [0, 0, 0, 0])), shP = this.shP || (this.shP = new Float64Array(H)), shD = this.shD || (this.shD = new Float64Array(H)), shG = this.shG || (this.shG = new Float64Array(H)), shC = this.shC || (this.shC = new Float64Array(H));   // shC: the carrier angle (× R in sampleAt); shP: the rest of the phase
-    const emit = (nS, del) => { out.key += pm[0] + (M > 1 ? "m" + M : "") + "n" + nS;
-      if (M === 1) { for (let h = 0; h < nS; h++) { const f = f0 * PR[h]; if (f > ny) break; if (!(f > 0)) continue; const t = tg(h), A = shA[h]; push(f, (del ? -TAU * f * del[h] : 0) + shP[h] + (shG[h] ? TAU * f * ts * shG[h] : 0), [A[0] * t, A[1] * t, A[2] * t, A[3] * t], shC[h]); } return; }
-      const mix = (a0r, a0i, a1r, a1i, w) => { const e = ((1 - w) * (a0r * a0r + a0i * a0i) + w * (a1r * a1r + a1i * a1i)) / M; if (!(e > 0)) return [0, 0];
-        const p0 = Math.atan2(a0i, a0r), p1 = Math.atan2(a1i, a1r), dp = Math.atan2(Math.sin(p1 - p0), Math.cos(p1 - p0)), p = p0 + w * dp, m = Math.sqrt(e); return [m * Math.cos(p), m * Math.sin(p)]; };
+    const emit = (nS, del) => { out.key += (spn ? "N" : pm[0]) + (M > 1 ? "m" + M : "") + "n" + nS;
+      if (M === 1) { for (let h = 0; h < nS; h++) { const f = f0 * PR[h]; if (f > ny) { if (pm === "native") continue; break; } if (!(f > 0)) continue; const t = tg(h), A = shA[h]; push(f, (del ? -TAU * f * del[h] : 0) + shP[h] + (shG[h] ? TAU * f * ts * shG[h] : 0), A[0] * t, A[1] * t, A[2] * t, A[3] * t, shC[h]); } return; }
+      const mix = (a0r, a0i, a1r, a1i, w, D) => { const e = ((1 - w) * (a0r * a0r + a0i * a0i) + w * (a1r * a1r + a1i * a1i)) / M; if (!(e > 0)) { D[0] = 0; D[1] = 0; return D; }
+        const p0 = Math.atan2(a0i, a0r), p1 = Math.atan2(a1i, a1r), dp = Math.atan2(Math.sin(p1 - p0), Math.cos(p1 - p0)), p = p0 + w * dp, m = Math.sqrt(e); D[0] = m * Math.cos(p); D[1] = m * Math.sin(p); return D; };
       for (let q = 1; q <= M * nS; q++) { const f = q * f0 / M; if (f > ny) break; const x = Math.max(0, q / M - 1), s0 = Math.min(nS - 1, Math.floor(x)), s1 = Math.min(nS - 1, s0 + 1), w = x - s0;
-        const A0 = shA[s0], A1 = shA[s1], t = tg(x), Lc = mix(A0[0], A0[1], A1[0], A1[1], w), Rc = mix(A0[2], A0[3], A1[2], A1[3], w);
+        const A0 = shA[s0], A1 = shA[s1], t = tg(x), Lc = mix(A0[0], A0[1], A1[0], A1[1], w, mxL), Rc = mix(A0[2], A0[3], A1[2], A1[3], w, mxR);
         const dl = del ? del[s0] + (del[s1] - del[s0]) * w : 0, gg = shG[s0] + (shG[s1] - shG[s0]) * w;
         const dC = shC[s1] - shC[s0];
-        push(f, -TAU * f * dl + shP[s0] + (shP[s1] - shP[s0]) * w + (gg ? TAU * f * ts * gg : 0), [Lc[0] * t, Lc[1] * t, Rc[0] * t, Rc[1] * t], shC[s0] + Math.atan2(Math.sin(dC), Math.cos(dC)) * w); } };
+        push(f, -TAU * f * dl + shP[s0] + (shP[s1] - shP[s0]) * w + (gg ? TAU * f * ts * gg : 0), Lc[0] * t, Lc[1] * t, Rc[0] * t, Rc[1] * t, shC[s0] + Math.atan2(Math.sin(dC), Math.cos(dC)) * w); } };
     if ((st.mode || this.mode) === "holo") {
       //   HOLO (legato): the continuous voice passed through the medium's operator λ(k)^T — each partial is the ADD partial evaluated at its
       //   own RETARDED time vt − τ_h (τ_h the group delay the operator's phase implies, −dφ/dω) and shifted by that phase (leg·R·T·Ω_h).
@@ -308,18 +322,18 @@ class AhcScan extends AudioWorkletProcessor {
         const del = hA.del[h] + (hB.del[h] - hA.del[h]) * u, ph = hA.phi[h] + (hB.phi[h] - hA.phi[h]) * u, vh = vt - del / ts;
         const F = sq ? this.lerpAt(sq, vh, hint[h]) : look; if (F.i !== undefined) hint[h] = F.i;
         //   sin(2π·f·ts·vh + …) = sin(2π·f·ts·vt − 2π·f·del + …): the oscillator term stays exact per sample, the delay is a phase offset
-        shA[h] = shellA(F, h, vh, hint[h], 1 + this.accentAt(beats, vh, acK, h, hn), hn); shD[h] = del; const cv = sq ? this.carAt(slot, vh) : null; shC[h] = cv !== null ? cv : this.thetaAt(S, vh); shP[h] = ph; shG[h] = this.glAt(slot, vh); }
+        shellA(F, h, vh, hint[h], 1 + this.accentAt(beats, vh, acK, h, hn), hn, shA[h]); shD[h] = del; const cv = sq ? this.carAt(slot, vh) : null; shC[h] = cv !== null ? cv : this.thetaAt(S, vh); shP[h] = ph; shG[h] = this.glAt(slot, vh) + (sq ? this.spOf(F, h) : 0); }
       emit(hn, shD);
       if (ref > 0) { out.key += "r"; for (let h = 0; h < Math.min(REFN, hn); h++) { const f = f0 * PR[h]; if (f > ny) break; if (!(f > 0)) continue;
-        push(f, 0, shellA(SF, h, vt, this.hSF ?? -1, ref * tg(h) * (1 + this.accentAt(beats, vt, acK, h, hn)), hn)); } }   // the reference: unrotated, undispersed, unglided
+        const A = shellA(SF, h, vt, this.hSF ?? -1, ref * tg(h) * (1 + this.accentAt(beats, vt, acK, h, hn)), hn, refA); push(f, 0, A[0], A[1], A[2], A[3]); } }   // the reference: unrotated, undispersed, unglided
       return out;
     }
     //   ADD: every partial on the carrier R·∠ — measured (car) where the frames carry it, else the closed form θ(vt) — its sectors on their measured phase paths
     const cA = sq ? this.carAt(slot, vt) : null, th = cA !== null ? cA : (S ? this.thetaAt(S, vt) : 0), G0 = sq ? this.glAt(slot, vt) : 0; out.key += "a";
-    for (let h = 0; h < nb; h++) { shA[h] = shellA(SF, h, vt, this.hSF ?? -1, 1 + this.accentAt(beats, vt, acK, h, nb), nb); shC[h] = th; shP[h] = 0; shG[h] = G0; }
+    for (let h = 0; h < nb; h++) { shellA(SF, h, vt, this.hSF ?? -1, 1 + this.accentAt(beats, vt, acK, h, nb), nb, shA[h]); shC[h] = th; shP[h] = 0; shG[h] = G0 + (sq ? this.spOf(SF, h) : 0); }
     emit(nb, null);
     if (ref > 0) { out.key += "r"; for (let h = 0; h < Math.min(REFN, nb); h++) { const f = f0 * PR[h]; if (f > ny) break; if (!(f > 0)) continue;
-      push(f, 0, shellA(SF, h, vt, this.hSF ?? -1, ref * tg(h) * (1 + this.accentAt(beats, vt, acK, h, nb)), nb)); } }   // the reference: the same shells without the carrier (and without the glide)
+      const A = shellA(SF, h, vt, this.hSF ?? -1, ref * tg(h) * (1 + this.accentAt(beats, vt, acK, h, nb)), nb, refA); push(f, 0, A[0], A[1], A[2], A[3]); } }   // the reference: the same shells without the carrier (and without the glide)
     //   companions: their own first shells (energy of all their sectors), at their own Kuramoto phase
     const comp = C && C.slots ? C.slots.slice(1, 1 + NC) : [];
     for (let j = 0; j < comp.length; j++) { const s = comp[j], q = fresh(this.sub.get(s.i)), F = q ? this.lerpAt(q, vt) : null;
@@ -327,7 +341,7 @@ class AhcScan extends AudioWorkletProcessor {
       const tj = this.thetaAt(s, vt), pc = Math.max(-1, Math.min(1, -0.8 + 1.6 * (s.i / 3))), SJ = F ? Math.max(1, (F.a.sec | 0) || 1) : 1;
       const PRj = this.pitchRatios(this.pitchOf(st, s.i), H), Gj = q ? this.glAt(s.i, vt) : 0; out.key += this.pitchOf(st, s.i)[0];   // each companion on ITS OWN pitch axis, with its own glide
       for (let h = 0; h < HC; h++) { let e = 0; if (F) for (let q2 = 0; q2 < SJ; q2++) e += ampOf(F, h * SJ + q2) ** 2; const a = 0.6 * tg(h) * (F ? Math.sqrt(e) : (ca[h] || 0)), f = f0 * PRj[h]; if (!(f > 0)) continue;
-        push(f, Gj ? TAU * f * ts * Gj : 0, [a * gL(pc), 0, a * gR(pc), 0], tj); } }
+        push(f, Gj ? TAU * f * ts * Gj : 0, a * gL(pc), 0, a * gR(pc), 0, tj); } }
     return out;
   }
 }

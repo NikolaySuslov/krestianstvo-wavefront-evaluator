@@ -90,7 +90,10 @@ export function makeFresnelCascade(opts = {}) {
       if (e.gen === 0 && e.depth + 1 < o.depth && cd > o.minDelay) push(e.t + sd + cd, { depth: e.depth + 1, delay: cd, gen: 0 });
       const ri = Math.max(1, Math.round(e.delay / o.delayScale)); if (ri < (G >> 1)) radii.push(ri); times.push(e.t); rb.push(ri); beats++; }
     const k = buildNativeKernel(radii, o.alpha, o.maxBands);
-    return { n, r: k.fRadii, w: k.fWeights, o: buildRingOffsets(k.fRadii).map((a) => Float64Array.from(a)), beats, times: Float64Array.from(times), rb: Float64Array.from(rb), sEff: k.sEff };
+    //   tilt (optional, 2026-10-26 — the medium's SCALE CONTENT as a declared parameter): w ← w·r^tilt, renormalised so Σ w·r² (the long-wavelength
+    //   coefficient: the k² regime, the large-scale physics) is unchanged — only the mid-scale content (the spectral dimension there) moves. 0 = as before.
+    let fw = k.fWeights; if (+o.tilt) { let s0 = 0, s1 = 0; const tw = k.fWeights.map((w, i) => { const r = k.fRadii[i], v = w * Math.pow(r, +o.tilt); s0 += w * r * r; s1 += v * r * r; return v; }); fw = s1 > 0 ? tw.map((v) => v * s0 / s1) : k.fWeights; }
+    return { n, r: k.fRadii, w: fw, o: symRingOffsets(k.fRadii), beats, times: Float64Array.from(times), rb: Float64Array.from(rb), sEff: k.sEff };
   };
   const cycle = (n) => { n = Math.max(0, Math.floor(n)); let c = memo.get(n);
     if (!c) { c = run(n); if (memo.size >= 256) memo.delete(memo.keys().next().value); memo.set(n, c); } return c; };
@@ -117,6 +120,19 @@ export function makeFresnelCascade(opts = {}) {
 // makeFresnelOperator(cascade, G) — cycle → the medium's linear operator, memoized: the ring (for the real-space
 //   leapfrog / GPU stepEye), λ(k) = kernelLambdaGrid(ring) (for the spectral step), and the two scale bands of λ
 //   (medium-core's lambdaScale split at the ring's geometric-mean radius). All pure functions of the cycle.
+//   symRingOffsets(fRadii) — the ring's lattice points, POINT-SYMMETRIC (2026-10-16): an EVEN count, the second half the exact negatives of the
+//   first. The shared core's buildRingOffsets samples ⌈2πr⌉ angles; when that is odd (r 8 → 51, r 17 → 107) some points have no mirror −o, the
+//   kernel is not symmetric (K(x) ≠ K(−x)) and its symbol gains an ODD imaginary part — inside the wave equation a DIRECTIONAL GAIN (a plane
+//   wave at the strongest bin ×0.87 at +k, ×1.15 at −k over 300 steps: light made along some directions, removed along their mirrors). That
+//   was a rasterizing artifact, not the IFS's physics (the radii and weights are the IFS's; the sampling is geometry), so the honest fix is to
+//   sample symmetrically: λ is then REAL (Hermitian, energy-conserving) and every stepper (spectral, the real-space leapfrog, the GPU rings, ◇exact)
+//   stays the same law. Even rings keep their points (exact negatives also avoid Math.round's asymmetric .5 ties). ahc's operator only.
+export function symRingOffsets(fRadii) {
+  return fRadii.map((r) => { const half = Math.max(4, Math.ceil(Math.PI * r)), n = 2 * half, flat = new Float64Array(n * 2), rnd = (v) => Math.sign(v) * Math.round(Math.abs(v));
+    for (let kk = 0; kk < half; kk++) { const th = kk * 2 * Math.PI / n, x = rnd(r * Math.cos(th)), y = rnd(r * Math.sin(th)); flat[kk * 2] = x; flat[kk * 2 + 1] = y; flat[(kk + half) * 2] = -x; flat[(kk + half) * 2 + 1] = -y; }
+    return flat; });
+}
+
 export function makeFresnelOperator(cascade, G) {
   const memo = new Map();
   const band = (c, coarse, rMid) => { const kr = [], kw = [], ko = [];

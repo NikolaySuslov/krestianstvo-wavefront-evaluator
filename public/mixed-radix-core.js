@@ -192,12 +192,13 @@ function _chebPow(xr, xi, qr, qi, T, out) { let ar = 1, ai = 0, br = 0, bi = 0, 
   out[0] = br; out[1] = bi; out[2] = xr * br - xi * bi - ar; out[3] = xr * bi + xi * br - ai; }
 const _cp = new Float64Array(4);
 // ── the AHC linear step via mixed-radix (the diagonal M^T Chebyshev op, per mode) ──
-// Byte-identical map to kernelPropagateSpectral, transform via mixed-radix (f64 floor).
-export function mixedRadixPropagate(field, G, lam, { T = 1, dt = 1, kCut = 0 } = {}) {
+// Byte-identical map to kernelPropagateSpectral, transform via mixed-radix (f64 floor). Optional fft: another (re, im, G, inv) transform
+//   with the same conventions (ahc passes its native FFT); omitted = mixedRadix2d, as before.
+export function mixedRadixPropagate(field, G, lam, { T = 1, dt = 1, kCut = 0, fft = mixedRadix2d } = {}) {
   const N = G * G;
   const Rr = new Float64Array(N), Ri = new Float64Array(N), Ir = new Float64Array(N), Ii = new Float64Array(N);
   for (let j = 0; j < N; j++) { Rr[j] = field[j * 2]; Ir[j] = field[j * 2 + 1]; }
-  mixedRadix2d(Rr, Ri, G, false); mixedRadix2d(Ir, Ii, G, false);
+  fft(Rr, Ri, G, false); fft(Ir, Ii, G, false);
   for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) { const j = y * G + x;
     const kx = 2 * Math.PI * (x <= G / 2 ? x : x - G) / G, ky = 2 * Math.PI * (y <= G / 2 ? y : y - G) / G;
     if (kCut > 0 && Math.hypot(kx, ky) > kCut) { Rr[j] = Ri[j] = Ir[j] = Ii[j] = 0; continue; }
@@ -215,7 +216,7 @@ export function mixedRadixPropagate(field, G, lam, { T = 1, dt = 1, kCut = 0 } =
     Rr[j] = A11r * Rre - A11i * Rim + A12r * Ire - A12i * Iim; Ri[j] = A11r * Rim + A11i * Rre + A12r * Iim + A12i * Ire;
     Ir[j] = A21r * Rre - A21i * Rim + A11r * Ire - A11i * Iim; Ii[j] = A21r * Rim + A21i * Rre + A11r * Iim + A11i * Ire;
   }
-  mixedRadix2d(Rr, Ri, G, true); mixedRadix2d(Ir, Ii, G, true);
+  fft(Rr, Ri, G, true); fft(Ir, Ii, G, true);
   const out = new Float64Array(2 * N);
   for (let j = 0; j < N; j++) { out[j * 2] = Rr[j]; out[j * 2 + 1] = Ir[j]; }
   return { field: out, total: N };
