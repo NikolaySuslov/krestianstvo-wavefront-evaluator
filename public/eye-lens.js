@@ -276,20 +276,22 @@ export function hutchMetric(f, G, cells, copies, n = 1) { const N = G * G, c = (
 //   trav (optional): THE ROUND TRIP's TRAVEL — after the element the light travels t steps through the eye's glass (w ↦ U(t)·w, the medium's
 //   own propagator): a real resonator is its element AND the path between its mirrors; the glass's dispersion then decides which of the
 //   cavity's (fractal) modes come back in phase — they resonate, the rest wash out.
-export function cavitySum(f, G, maps, k, nMax = 24, fft = null, pupil = 0, trav = null, copy = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
+//   W (optional, 2026-11-03): the round trip's ELEMENT given by the caller (a field → field map, e.g. a Hutchinson engine's W for maps hutchSum cannot
+//   make — conformal, graph-directed, exact-torus); absent: hutchSum as before.
+export function cavitySum(f, G, maps, k, nMax = 24, fft = null, pupil = 0, trav = null, copy = null, W = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
   //   the FIXED POINT D = ψ + k·W(D), iterated (D₀ = ψ): the same element and the same fixed point as the live fold (cavityStep) — W is the
   //   energy-normalised Hutchinson element, so the round trips are summed through it rather than as separately normalised powers
   const n = Math.min(nMax, Math.max(1, Math.ceil(Math.log(1e-3) / Math.log(Math.abs(kk))))); let D = f, e0 = 0;
   for (let c = 0; c < 2 * N; c++) e0 += f[c] * f[c];
-  for (let q = 0; q < n; q++) { let w = hutchSum(D, G, maps, 1, fft, true, pupil, copy); if (trav) w = trav(w); const Dn = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) Dn[c] = f[c] + kk * w[c]; D = Dn; }
+  for (let q = 0; q < n; q++) { let w = W ? W(D) : hutchSum(D, G, maps, 1, fft, true, pupil, copy); if (trav) w = trav(w); const Dn = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) Dn[c] = f[c] + kk * w[c]; D = Dn; }
   let e1 = 0; for (let c = 0; c < 2 * N; c++) e1 += D[c] * D[c]; const sc = e1 > 0 ? Math.sqrt(e0 / e1) : 0, acc = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) acc[c] = D[c] * sc;
   return acc; }
 //   cavityStep(f, G, maps, k, S, pupil) — THE SAME RESONATOR LIVE: ONE round trip per new read, D ← ψ + k·W(D) (S.D the state it keeps).
 //   A pure FOLD over the stream of reads (a scan, Renkon's collect): its fixed point is the resolvent (I − kW)⁻¹ψ of cavitySum, reached
 //   as the round trips accumulate — the cavity's own time (a round trip per read) instead of ⌈log 1e-3 / log k⌉ trips per frame. A new
 //   size or a first read starts from ψ. Shown at the input's energy (a display read).
-export function cavityStep(f, G, maps, k, S, pupil = 0, trav = null, copy = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
-  const prev = S.D && S.D.length === 2 * N ? S.D : f, w0 = hutchSum(prev, G, maps, 1, null, true, pupil, copy), w = trav ? trav(w0) : w0, D = new Float64Array(2 * N); let e0 = 0, e1 = 0;
+export function cavityStep(f, G, maps, k, S, pupil = 0, trav = null, copy = null, W = null) { const N = G * G, kk = Math.max(-0.95, Math.min(0.95, +k || 0)); if (!kk) return f;
+  const prev = S.D && S.D.length === 2 * N ? S.D : f, w0 = W ? W(prev) : hutchSum(prev, G, maps, 1, null, true, pupil, copy), w = trav ? trav(w0) : w0, D = new Float64Array(2 * N); let e0 = 0, e1 = 0;
   for (let c = 0; c < 2 * N; c++) { D[c] = f[c] + kk * w[c]; e0 += f[c] * f[c]; e1 += D[c] * D[c]; } S.D = D;
   const sc = e1 > 0 ? Math.sqrt(e0 / e1) : 0, o = new Float64Array(2 * N); for (let c = 0; c < 2 * N; c++) o[c] = D[c] * sc; return o; }
 //   correlate(re, im, G, ref) — ⊛ RECOGNITION (soliton-algebra's recognizePure, ahc's _xcorrScan): out(x) = Σ_y ψ(x + y)·conj(r(y)) — a
@@ -404,6 +406,7 @@ export function run(chain, field, deps) { const { G, fft, propHat, FDT } = deps;
   const toX = () => { if (dom === "k") { fft(re, im, true); dom = "x"; } }, toK = () => { if (dom === "x") { fft(re, im, false); dom = "k"; } };
   for (const L of fuse(chain)) {
     if (L.kind === "space") { toX(); applySpace(L, re, im); }
+    else if (L.kind === "natc" && typeof L.run === "function") { toX(); const o = L.run(re, im); re = o.re; im = o.im; }   // (optional, 2026-11-04) a caller's native chain on the field (x in, x out) — inert unless a chain carries one
     else if (L.kind === "relabel") { toX(); applyRelabelX(L, re, im); }
     else if (_isU1(L)) { toX(); const n = re.length, fl = new Float64Array(2 * n); for (let j = 0; j < n; j++) { fl[2 * j] = re[j]; fl[2 * j + 1] = im[j]; }
       const o = lensU1.apply(_u1Of(L), fl, G); if (o) { re = new Float64Array(n); im = new Float64Array(n); for (let j = 0; j < n; j++) { re[j] = o[2 * j]; im[j] = o[2 * j + 1]; } } }
@@ -415,7 +418,7 @@ export function run(chain, field, deps) { const { G, fft, propHat, FDT } = deps;
       const sk = L.liveKey !== undefined && deps.tag !== undefined && deps.live ? deps.tag + "|" + L.liveKey : null, S = sk ? (deps.live.get(sk) || (deps.live.size > 64 && deps.live.clear(), deps.live.set(sk, {}), deps.live.get(sk))) : null;
       const trav = L.trav && (L.trav.t | 0) > 0 ? (w) => { const m = w.length >> 1, a = new Float64Array(m), b = new Float64Array(m); for (let j = 0; j < m; j++) { a[j] = w[2 * j]; b[j] = w[2 * j + 1]; }
           fft(a, b, false); const [pr, pi] = propHat(a, b, L.trav.lam, L.trav.t | 0, FDT); fft(pr, pi, true); const o2 = new Float64Array(2 * m); for (let j = 0; j < m; j++) { o2[2 * j] = pr[j]; o2[2 * j + 1] = pi[j]; } return o2; } : null;   // forward, t steps (the glass)
-      const o = S ? (deps.tick !== undefined && S.tick === deps.tick && S.o && S.o.length === 2 * n ? S.o : (S.tick = deps.tick, S.o = cavityStep(fl, G, L.maps, L.k, S, +L.pupil || 0, trav, L.copy || null))) : cavitySum(fl, G, L.maps, L.k, L.nMax || 24, fft, +L.pupil || 0, trav, L.copy || null); re = new Float64Array(n); im = new Float64Array(n); for (let j = 0; j < n; j++) { re[j] = o[2 * j]; im[j] = o[2 * j + 1]; } }   // (not fused, not heard)
+      const o = S ? (deps.tick !== undefined && S.tick === deps.tick && S.o && S.o.length === 2 * n ? S.o : (S.tick = deps.tick, S.o = cavityStep(fl, G, L.maps, L.k, S, +L.pupil || 0, trav, L.copy || null, L.W || null))) : cavitySum(fl, G, L.maps, L.k, L.nMax || 24, fft, +L.pupil || 0, trav, L.copy || null, L.W || null); re = new Float64Array(n); im = new Float64Array(n); for (let j = 0; j < n; j++) { re[j] = o[2 * j]; im[j] = o[2 * j + 1]; } }   // (not fused, not heard)
     else if (L.kind === "time") { toK(); const T = Math.abs(L.t | 0); if (T) { const r = propHat(re, im, L.lam, T, L.t > 0 ? -FDT : FDT); re = r[0]; im = r[1]; } }
     else if (L.kind === "box") { toX(); applyBox(L, re, im, G); }
     else if (L.kind === "roll") { toX(); applyRoll(L, re, im, G); }

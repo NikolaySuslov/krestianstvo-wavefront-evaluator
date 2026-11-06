@@ -24,6 +24,12 @@
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 16px;
   }
+   .maincard {
+    background: #f5f5f5; border: 4px dotted #4f4f4f; border-radius: 12px;
+    padding: 28px 24px;
+    display: flex; flex-direction: column; gap: 16px;
+    flex-wrap: wrap;
+  }
   .card {
     background: #fff; border: 1px solid #e0ddd6; border-radius: 12px;
     padding: 28px 24px;
@@ -63,16 +69,16 @@ const grid = document.getElementById('grid');
 for (const [appKey, app] of Object.entries(APPS)) {
   const url = `./selo.html?app=${appKey}&k=1`;
   const card = document.createElement('div');
-  card.className = 'card';
-  card.innerHTML =
-    `<div>
+  card.className = appKey !== "ahc-mixed-radix" ? 'card':'maincard';
+  card.innerHTML = `<div>
        <div class="card-title">${app.title}</div>
        <div class="card-app">${appKey}</div>
      </div>
      <a href="${url}" target="_blank">
        <span class="url">?app=${appKey}&amp;k=1</span>
        <span class="arrow">→</span>
-     </a>`;
+     </a>`
+     ;
   grid.appendChild(card);
 }
 </script>

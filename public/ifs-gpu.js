@@ -1448,6 +1448,10 @@ void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec2 x = texelFetch(u_psi, q, 0)
   fragColor = vec4((u_first == 1 ? vec2(0.0) : texelFetch(u_box, q, 0).xy) + x, 0.0, 1.0); }`);
     return (this._ftsP[L] = { acc, push, box, ub: { psi: ul(box, 'u_psi'), box: ul(box, 'u_box'), rot: ul(box, 'u_rot'), first: ul(box, 'u_first') }, ua: { psi: ul(acc, 'u_psi'), acc: ul(acc, 'u_acc'), h: Array.from({ length: K }, (_, k) => ul(acc, 'u_h' + k)), a: ul(acc, 'u_a'), rot: ul(acc, 'u_rot'), Q0: ul(acc, 'u_Q0'), V0: ul(acc, 'u_V0'), Qr: ul(acc, 'u_Qr'), Qi: ul(acc, 'u_Qi'), Vr: ul(acc, 'u_Vr'), Vi: ul(acc, 'u_Vi') },
       up: { psi: ul(push, 'u_psi'), p: ul(push, 'u_p'), t: [0, 1, 2, 3].map((k) => ul(push, 'u_t' + k)), first: ul(push, 'u_first'), sc: ul(push, 'u_sc') } }); }
+  //   specFtsReset(id) — optional (2026-10-31): drops id's FT-spectrometer state (history, accumulator, box); the next use re-allocates it at zero.
+  //   For a view that was re-seeded: its stored samples belong to another scene (and a poisoned NaN accumulator cannot recover by mixing). Inert unless called.
+  specFtsReset(id) { const gl = this._gl, s = this._spec && this._spec[id]; if (!s || !s.ftsH) return; const del = (o) => { for (const t of o.T.flat()) gl.deleteTexture(t); for (const f of o.F.flat()) gl.deleteFramebuffer(f); };
+    del(s.ftsH); del(s.ftsA); del(s.ftsB); s.ftsH = s.ftsA = s.ftsB = null; s.ftsL = 0; }
   specFtsAccum(id, L, a, Q, rot = [1, 0]) { const gl = this._gl, s = this._ftsSlot(id, L), P = this._ftsProgs(L), H = s.ftsH, A = s.ftsA, psi = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
     this._nlPass(P.acc, A.F[1 - A.src], [psi, A.T[A.src], ...H.T[H.src]], () => { gl.uniform1i(P.ua.psi, 0); gl.uniform1i(P.ua.acc, 1); P.ua.h.forEach((u, k) => gl.uniform1i(u, 2 + k)); gl.uniform1f(P.ua.a, a); gl.uniform2f(P.ua.rot, rot[0], rot[1]);
       gl.uniform3fv(P.ua.Q0, Q.Q0); gl.uniform1f(P.ua.V0, Q.V0); gl.uniform3fv(P.ua.Qr, Q.Qr); gl.uniform3fv(P.ua.Qi, Q.Qi); gl.uniform1fv(P.ua.Vr, Q.Vr); gl.uniform1fv(P.ua.Vi, Q.Vi); }); A.src = 1 - A.src; }
@@ -1724,13 +1728,21 @@ uniform sampler2D u_v; out vec4 o; void main() { o = vec4(texelFetch(u_v, ivec2(
     refs.forEach((ref, r) => { this._vcCorrInto(T.in.t, ref, T.c.f, false); const er = this._viewEnergy(T.c.t, 'B'), dst = acc ? T.a0 : T.a1, src = acc ? T.a1 : T.a0;
       this._nlPass(P.ba, dst.f, [src.t, T.c.t, e0, er], () => { gl.uniform1i(P.uba.acc, 0); gl.uniform1i(P.uba.c, 1); gl.uniform1i(P.uba.e0, 2); gl.uniform1i(P.uba.er, 3); gl.uniform1i(P.uba.first, r === 0 ? 1 : 0); }); acc = 1 - acc; });
     const fin = acc ? T.a1 : T.a0; this._eyePass(P.sq, [fin.t], () => { gl.uniform1i(P.usq.x, 0); gl.uniform1i(P.usq.a, 1); }); return true; }
+  //   viewCavityRaw(key) (optional, 2026-11-04) — the fold's kept state D under `key` (as the last round trip left it, not renormalised) into the
+  //   active eye; false if that fold has not run. Inert unless called.
+  viewCavityRaw(key) { const S = this._cvSt && this._cvSt.get(key); if (!S || !S.primed) return false; const gl = this._gl, P = this._viewProgs(), fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    this._nlPass(P.c, fbo, [S.t], () => gl.uniform1i(P.uc, 0)); this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; return true; }
   //   viewCavity(key, groups, kk, pu, trav) — on the active eye (its field f): one round trip of the fold kept under `key` (D starts at f);
   //   groups [{ A, t: [[tx, ty]…], sg, taps }] (the maps grouped by linear part, whole-cell shifts; taps = eye-lens naTaps for a cut copy), pu the
   //   pupil table (or null), trav { lam, t } (the round trip's travel through that operator, forward). The eye then holds D at f's energy.
   //   natCopy (optional, 2026-10-19): (srcTex, group) → a texture holding that group's copy made by NATIVE optics (the caller's lens elements —
   //   a rotator's shears, a telescope — run on a scratch eye slot), in place of the affine resample; such a copy carries its own band, so no
   //   aperture taps, and the energy it lets through is what the element keeps (like a cut copy: never re-amplified)
-  viewCavity(key, groups, kk, pu, trav, natCopy = null) { const gl = this._gl, G = this._G, P = this._viewProgs(), ul = (p, n) => gl.getUniformLocation(p, n);
+  //   planKey (optional, 2026-11-04): a cavPlanSet plan (the app's native element — optics chains, the exact pull) makes the copy w = W(D) instead
+  //   of the groups' rolls: cavW on the pupil-limited D, kept as is (the element renormalises nothing); the fold then as before
+  //   frame (optional, 2026-11-04) { pre, post } — the frame as OPTICS around the fixed element: w = F(W(F⁻¹·D)) (the app's native chains), so a turn
+  //   or zoom of the lens moves no plan — a few passes a frame (was: a new element per angle — the fern's lens drag lagged)
+  viewCavity(key, groups, kk, pu, trav, natCopy = null, planKey = null, frame = null) { const gl = this._gl, G = this._G, P = this._viewProgs(), ul = (p, n) => gl.getUniformLocation(p, n);
     if (!P.cv) { P.cv = this._compileStep(GLSL_VIEW_CONV); P.ro = this._compileStep(GLSL_VIEW_ROLLS); P.es = this._compileStep(GLSL_VIEW_ESCALE); P.sm = this._compileStep(GLSL_SCAL_MAD);
       P.ucv = Object.fromEntries(['x', 'h', 'G', 'M', 'axis'].map((n) => [n, ul(P.cv, 'u_' + n)])); P.uro = Object.fromEntries(['o', 'acc', 'G', 'n', 'first', 't'].map((n) => [n, ul(P.ro, 'u_' + n)]));
       P.ues = Object.fromEntries(['x', 'n', 'd'].map((n) => [n, ul(P.es, 'u_' + n)])); P.usm = Object.fromEntries(['acc', 'e', 'w', 'first'].map((n) => [n, ul(P.sm, 'u_' + n)]));
@@ -1748,7 +1760,15 @@ uniform sampler2D u_v; out vec4 o; void main() { o = vec4(texelFetch(u_v, ivec2(
     if (pu) { const tm = this.viewTable(pu, pu, null); this._nlPass(P.mu, T.cur.f, [prev, tm, tm], () => { gl.uniform1i(P.umu.x, 0); gl.uniform1i(P.umu.m, 1); gl.uniform1i(P.umu.n, 2); gl.uniform1i(P.umu.hasM, 1); gl.uniform1i(P.umu.hasN, 0); gl.uniform1f(P.umu.qL, 0); gl.uniform1f(P.umu.amix, 0); }); }
     else copy(prev, T.cur.f);
     const e0 = this._viewEnergy(T.cur.t, 'A'); copy(e0, T.eA.f);   // (e0 kept: slots A / B are reused below)
-    let nS = 0, cut = false; for (const g of groups) { nS += g.t.length; if ((pu && g.sg < 1) || (natCopy && g.nat)) cut = true; }
+    const VS = this._vcStat || (this._vcStat = { plan: 0, framed: 0, groups: 0 }); let srcP = T.cur.t; if (planKey && frame && frame.pre && this.natChainTex(T.cur.t, frame.pre, [T.tmp.t, T.tmp.f])) { srcP = T.tmp.t; VS.framed++; }   // (VS: which fold path ran — a diagnostic, ahc.hvPath)   // F⁻¹ (the frame's inverse optics) — (the scratch is { t, f }: the chain's dst is a [tex, fbo] pair — 2026-11-04 a turned / zoomed frame drew into nothing: the cavity vanished)
+    if (planKey && this._cvPl && this._cvPl.has(planKey) && this.cavW('eyecv', srcP, planKey, 1, 0, 1, 0)) { let Wt = this._cvS.get('eyecv').term[0]; VS.plan++; if (frame && frame.post && this.natChainTex(Wt, frame.post, [T.src.t, T.src.f])) Wt = T.src.t; const e1 = this._viewEnergy(Wt, 'B');   // ⟲ the native element's copy (note above), then F
+      this._eyePass(P.es, [Wt, e1, e1], () => { gl.uniform1i(P.ues.x, 1); gl.uniform1i(P.ues.n, 2); gl.uniform1i(P.ues.d, 3); });
+      if (trav && (trav.t | 0) > 0) this.stepEyeJumpLam(trav.lam, trav.t | 0, +trav.dt);
+      if (!P.ln) this.viewLin && (P.ln = this._compileStep(GLSL_VIEW_LIN), P.uln = Object.fromEntries(['x', 'b', 'ca', 'cb'].map((n) => [n, ul(P.ln, 'u_' + n)])));
+      this._eyePass(P.ln, [T.f.t], () => { gl.uniform1i(P.uln.x, 0); gl.uniform1i(P.uln.b, 1); gl.uniform1f(P.uln.ca, kk); gl.uniform1f(P.uln.cb, 1); });   // D = f + κ·w
+      copy(this._eyeSrc === 'A' ? this._eyeA : this._eyeB, S.f); S.primed = true; const ef = this._viewEnergy(T.f.t, 'A'), eD = this._viewEnergy(this._eyeSrc === 'A' ? this._eyeA : this._eyeB, 'B');
+      this._eyePass(P.es, [ef, eD], () => { gl.uniform1i(P.ues.x, 0); gl.uniform1i(P.ues.n, 1); gl.uniform1i(P.ues.d, 2); }); return true; }
+    VS.groups++; let nS = 0, cut = false; for (const g of groups) { nS += g.t.length; if ((pu && g.sg < 1) || (natCopy && g.nat)) cut = true; }
     let out = 0, sAcc = 0, firstS = true;
     groups.forEach((g, gi) => { let src = T.cur.t;
       const nat = !!(natCopy && g.nat), oN = nat ? natCopy(T.cur.t, g) : null;   // (a native copy: made first — its energy is what this group keeps)
@@ -1810,13 +1830,48 @@ uniform sampler2D u_x; out vec4 o; void main() { o = vec4(texelFetch(u_x, ivec2(
     this._nlPass(P.c, fbo, [tex], () => gl.uniform1i(P.uc, 0)); this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; this.commitEyeSlot(dstId); return true; }
   //   viewShear(axis, s) — eye-lens applyShear on the active eye: each line moved by s·(l − c) through its band-limited shift kernel (the inverse
   //   DFT of e^{−2πiq·d/G}, a G-tap circular convolution per line, kernels per line in one G×G texture, memoised per s)
+  //   viewQuatAbs(idA, idB, dstId) (optional, 2026-11-05) — an ℍ pair's TOTAL amplitude (√(|a|² + |b|²), 0) into dstId: what an eye without a
+  //   polarizer sees (Stokes S0 = |a|² + |b|²). specCombine(dst, idA, idB) (optional) — the INCOHERENT sum of two ids' ◈ accumulators (orthogonal
+  //   components: their powers add, no cross term): the line correlation / energy, the ⧗ band powers, the FT spectrometer's (X, Y, Z, P) and the
+  //   coherence sums added; the bank's complex amplitudes combined as √(|a|² + |b|²) (its colour reads only |·|²). dst is a composed id (render
+  //   only — never accumulated into). Both inert unless called.
+  _qcP() { if (this._qcPr) return this._qcPr; const gl = this._gl, ul = (p, n) => gl.getUniformLocation(p, n), hd = `#version 300 es
+precision highp float;
+uniform sampler2D u_a, u_b; out vec4 o; void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec4 a = texelFetch(u_a, q, 0), b = texelFetch(u_b, q, 0); `;
+    const abs = this._compileStep(hd + `o = vec4(sqrt(dot(a.xy, a.xy) + dot(b.xy, b.xy)), 0.0, 0.0, 1.0); }`), add = this._compileStep(hd + `o = a + b; }`), mag = this._compileStep(hd + `o = vec4(sqrt(dot(a.xy, a.xy) + dot(b.xy, b.xy)), 0.0, sqrt(dot(a.zw, a.zw) + dot(b.zw, b.zw)), 0.0); }`);
+    return (this._qcPr = { abs, add, mag, u: (p) => [ul(p, 'u_a'), ul(p, 'u_b')] }); }
+  viewQuatAbs(idA, idB, dstId) { const sa = this._slotEye[idA], sb = this._slotEye[idB]; if (!sa || !sb) return false; const gl = this._gl, P = this._qcP(), [ua, ub] = P.u(P.abs);
+    this.selectEyeSlot(dstId); const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA; this._nlPass(P.abs, fbo, [sa.src === 'A' ? sa.A : sa.B, sb.src === 'A' ? sb.A : sb.B], () => { gl.uniform1i(ua, 0); gl.uniform1i(ub, 1); });
+    this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; this.commitEyeSlot(dstId); this.selectEyeSlot(null); return true; }
+  specCombine(dst, idA, idB) { const A = this._spec && this._spec[idA], B = this._spec && this._spec[idB]; if (!A || !B || !A.primed || !B.primed) return false; const gl = this._gl, P = this._qcP();
+    const D = this._spec[dst] || (this._spec[dst] = { primed: true, src: 'A', composed: true }), tex = (slot, k) => { const key = slot + k; if (!D['_' + key]) D['_' + key] = this._specTex4(); return D['_' + key]; };
+    const pass = (prog, ta, tb, out) => { const [ua, ub] = P.u(prog); this._nlPass(prog, out[1], [ta, tb], () => { gl.uniform1i(ua, 0); gl.uniform1i(ub, 1); }); return out[0]; };
+    { const t = pass(P.add, A.src === 'A' ? A.A : A.B, B.src === 'A' ? B.A : B.B, tex('ln', 0)); D.A = D.B = t; D.src = 'A'; }
+    const two = (name, prog) => { const a = A[name], b = B[name]; if (!a || !b) { D[name] = null; return; } const ta = a.T[a.src], tb = b.T[b.src], arr = Array.isArray(ta) ? ta : [ta], brr = Array.isArray(tb) ? tb : [tb], outT = arr.map((t, k) => pass(prog, t, brr[k], tex(name, k))); D[name] = { T: [Array.isArray(ta) ? outT : outT[0], Array.isArray(ta) ? outT : outT[0]], src: 0 }; };
+    two('bank2', P.mag); two('bankP', P.add); two('ftsA', P.add); two('ftsC', P.add); D.bank = D.bank2 ? D.bank2 : null; return true; }
+  //   _shH(s, axis) / _shearFftS(F, axis, s) (optional, 2026-11-05) — THE SHEAR IN THE DUAL OF ITS AXIS: each line's Dirichlet kernel (_shK) is a
+  //   convolution, so its DFT is diagonal — e^{−2πi·k̃·s(l − c)/G}, k̃ the signed bin (−G/2 < k̃ ≤ G/2), built in f64 (the 1-D inverse's scale folded
+  //   in: the Stockham inverse scales only after axis 1, by 1/G²); then axis FFT · table · axis IFFT — the same operator (MEASURED vs the dense
+  //   pass), ~2·log₃₂G passes of ≤ 32 reads instead of one of G reads per texel. Inert unless this._shearFft (and the Stockham driver).
+  _shH(s, axis) { const gl = this._gl, G = this._G; this._shHM = this._shHM || new Map(); const key = s.toFixed(12) + "|" + axis; let T = this._shHM.get(key); if (T) return T;
+    const c = (G - 1) / 2, H = G >> 1, sc = axis === 1 ? G : 1 / G, f = new Float32Array(2 * G * G);
+    for (let l = 0; l < G; l++) { const d = s * (l - c); for (let k = 0; k < G; k++) { const kk = k <= H ? k : k - G, t = kk * d / G, a = -2 * Math.PI * (t - Math.round(t)), o = axis === 0 ? l * G + k : k * G + l; f[2 * o] = sc * Math.cos(a); f[2 * o + 1] = sc * Math.sin(a); } }
+    T = this._makeRGF32Tex(); gl.bindTexture(gl.TEXTURE_2D, T); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindTexture(gl.TEXTURE_2D, null);
+    if (this._shHM.size > 64) { for (const t of this._shHM.values()) gl.deleteTexture(t); this._shHM.clear(); } this._shHM.set(key, T); return T; }
+  _shearFftS(F, axis, s) { const gl = this._gl, P = this._cvProgs(), T = this._shH(s, axis), ax = (inv) => { this._stkAxes = [axis]; try { this._fft2dStockham(F, inv); } finally { this._stkAxes = null; } };
+    ax(false); this._nlPass(P.mul.p, F.src === 'A' ? F.fB : F.fA, [F.src === 'A' ? F.A : F.B, T], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); F.src = F.src === 'A' ? 'B' : 'A'; ax(true); }
   viewShear(axis, s) { const gl = this._gl, G = this._G, P = this._viewProgs(); s = +s || 0; if (!s) return true;
+    if (this._shearFft && this._fftStockham) { const self = this; this._shearFftS({ get A() { return self._eyeA; }, get fA() { return self._fboEyeA; }, get B() { return self._eyeB; }, get fB() { return self._fboEyeB; }, get src() { return self._eyeSrc; }, set src(v) { self._eyeSrc = v; } }, axis | 0, s); return true; }
+    const K = this._shK(s);
+    this._eyePass(P.sh, [K], () => { gl.uniform1i(P.ush.x, 0); gl.uniform1i(P.ush.K, 1); gl.uniform1i(P.ush.G, G); gl.uniform1i(P.ush.axis, axis | 0); }); return true; }
+  //   _shK(s) — the shear's per-line band-limited shift kernels (memoised per s; viewShear's, and the native cavity's — cavW)
+  _shK(s) { const gl = this._gl, G = this._G, P = this._viewProgs();
     if (!P.sh) { P.sh = this._compileStep(GLSL_VIEW_SHEAR); P.ush = Object.fromEntries(['x', 'K', 'G', 'axis'].map((n) => [n, gl.getUniformLocation(P.sh, 'u_' + n)])); P.shK = new Map(); }
     const key = s.toFixed(12); let K = P.shK.get(key);
     if (!K) { const c = (G - 1) / 2, H = G >> 1, f = new Float32Array(2 * G * G);
-      for (let l = 0; l < G; l++) { const d = s * (l - c); for (let n = 0; n < G; n++) { let ar = 0, ai = 0; for (let q = 0; q < G; q++) { const kq = q <= H ? q : q - G, a = 2 * Math.PI * (q * n - kq * d) / G; ar += Math.cos(a); ai += Math.sin(a); } f[2 * (l * G + n)] = ar / G; f[2 * (l * G + n) + 1] = ai / G; } }
-      K = this._makeRGF32Tex(); gl.bindTexture(gl.TEXTURE_2D, K); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindTexture(gl.TEXTURE_2D, null); if (P.shK.size > 16) { for (const t of P.shK.values()) gl.deleteTexture(t); P.shK.clear(); } P.shK.set(key, K); }
-    this._eyePass(P.sh, [K], () => { gl.uniform1i(P.ush.x, 0); gl.uniform1i(P.ush.K, 1); gl.uniform1i(P.ush.G, G); gl.uniform1i(P.ush.axis, axis | 0); }); return true; }
+      for (let l = 0; l < G; l++) { const d = s * (l - c); for (let n = 0; n < G; n++) { const al = 2 * Math.PI * (n - d) / G, sh = Math.sin(al / 2), D = Math.abs(sh) < 1e-12 ? G * Math.cos(G * al / 2) / Math.cos(al / 2) : Math.sin(G * al / 2) / sh; f[2 * (l * G + n)] = Math.cos(al / 2) * D / G; f[2 * (l * G + n) + 1] = Math.sin(al / 2) * D / G; } }   // (the Dirichlet kernel in CLOSED form, Σ_{k=−G/2+1}^{G/2} e^{iαk} = e^{iα/2}·sin(Gα/2)/sin(α/2): O(G²) per kernel, was the O(G³) sum — a turn dragged rebuilt dozens: the freeze)
+      K = this._makeRGF32Tex(); gl.bindTexture(gl.TEXTURE_2D, K); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindTexture(gl.TEXTURE_2D, null); if (P.shK.size > 64) { for (const t of P.shK.values()) gl.deleteTexture(t); P.shK.clear(); } P.shK.set(key, K); }
+    return K; }
   viewLin(idA, idB, ca, cb, dstId) { const gl = this._gl, P = this._viewProgs(), sb = this._slotEye[idB]; if (!sb || !this.viewCopy(idA, dstId)) return false;
     if (!P.ln) { P.ln = this._compileStep(GLSL_VIEW_LIN); P.uln = Object.fromEntries(['x', 'b', 'ca', 'cb'].map((n) => [n, gl.getUniformLocation(P.ln, 'u_' + n)])); }
     this.selectEyeSlot(dstId); this._eyePass(P.ln, [sb.src === 'A' ? sb.A : sb.B], () => { gl.uniform1i(P.uln.x, 0); gl.uniform1i(P.uln.b, 1); gl.uniform1f(P.uln.ca, +ca || 0); gl.uniform1f(P.uln.cb, +cb || 0); }); this.commitEyeSlot(dstId); this.selectEyeSlot(null); return true; }
@@ -3536,7 +3591,7 @@ void main() { vec4 S = texelFetch(u_s, ivec2(0, 0), 0); vec2 pv = texelFetch(u_s
   liveDrop(id) { const L = this._live && this._live.get(id); if (!L) return; const gl = this._gl; for (const t of [L.A, L.B, L.R, L.M]) gl.deleteTexture(t); for (const f of [L.fA, L.fB]) gl.deleteFramebuffer(f); this._live.delete(id); if (this._gdTex) this._gdTex.delete(id); }
   //   setGlassField(id, V) / applyEyeGlass(id, w) — a slot's ◌ GLASS PLATE (the app's tile item kind "glass", 2026-10-16): a static random index
   //   screen (a disordered potential) as its own R32F texture per id, applied like the guide (the phase-tilt pass's sampled kern)
-  setGlassField(id, V) { const gl = this._gl, G = this._G; this._glTex = this._glTex || new Map(); let tx = this._glTex.get(id);
+  setGlassField(id, V) { const gl = this._gl, G = this._G; this._glTex = this._glTex || new Map(); let tx = this._glTex.get(id); if (tx && this._mtGown && this._mtGown.has(tx)) { this._glTex.delete(id); tx = null; }   // (a ⛰ GPU material's texture is not this slot's upload target)
     if (!V) { if (tx) { gl.deleteTexture(tx); this._glTex.delete(id); } return; } if (V.length !== G * G) return;
     const keep = this._potTex; this._potTex = tx || null; this.setPotField(V); this._glTex.set(id, this._potTex); this._potTex = keep; }
   applyEyeGlass(id, w) { const tx = this._glTex && this._glTex.get(id); if (!tx || !w) return; const keep = this._potTex; this._potTex = tx;
@@ -3566,7 +3621,17 @@ uniform sampler2D u_psi, u_p; uniform vec2 u_s; uniform float u_r, u_z, u_rate, 
 float I(ivec2 q) { vec2 v = texelFetch(u_psi, q, 0).xy; return dot(v, v); }
 void main() { ivec2 b = ivec2(gl_FragCoord.xy); float c = (float(u_G) - 1.0) / 2.0; vec2 d = vec2(b) - vec2(c); float cs = cos(-u_r), sn = sin(-u_r); vec2 x = vec2(c) + u_s + u_z * vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
   vec2 f = floor(x), w = x - f; int x0 = int(mod(f.x, float(u_G))), y0 = int(mod(f.y, float(u_G))), x1 = (x0 + 1) % u_G, y1 = (y0 + 1) % u_G;
-  float i = mix(mix(I(ivec2(x0, y0)), I(ivec2(x1, y0)), w.x), mix(I(ivec2(x0, y1)), I(ivec2(x1, y1)), w.x), w.y), P = texelFetch(u_p, b, 0).x; o = vec4(P + u_rate * (i / (i + u_iw) - P), 0.0, 0.0, 1.0); }`, ['psi', 'p', 's', 'r', 'z', 'rate', 'iw', 'G']) };
+  float i = mix(mix(I(ivec2(x0, y0)), I(ivec2(x1, y0)), w.x), mix(I(ivec2(x0, y1)), I(ivec2(x1, y1)), w.x), w.y), P = texelFetch(u_p, b, 0).x; o = vec4(P + u_rate * (i / (i + u_iw) - P), 0.0, 0.0, 1.0); }`, ['psi', 'p', 's', 'r', 'z', 'rate', 'iw', 'G']), writeH: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_psi, u_p; uniform vec2 u_s; uniform float u_r, u_z, u_rate, u_iw; uniform int u_G, u_K; uniform vec4 u_ai[8]; uniform vec2 u_t[8]; uniform float u_w[8]; uniform float u_pr, u_rho; out vec4 o;
+float I(ivec2 q) { vec2 v = texelFetch(u_psi, q, 0).xy; return dot(v, v); }
+float Ib(vec2 x) { vec2 f = floor(x), w = x - f; int x0 = int(mod(f.x, float(u_G))), y0 = int(mod(f.y, float(u_G))), x1 = (x0 + 1) % u_G, y1 = (y0 + 1) % u_G;
+  return mix(mix(I(ivec2(x0, y0)), I(ivec2(x1, y0)), w.x), mix(I(ivec2(x0, y1)), I(ivec2(x1, y1)), w.x), w.y); }
+${bil}
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); float c = (float(u_G) - 1.0) / 2.0, cs = cos(-u_r), sn = sin(-u_r), acc = 0.0, accP = 0.0;
+  for (int k = 0; k < 8; k++) { if (k >= u_K) break; vec2 uv = vec2(b) - vec2(c) - u_t[k], bk = vec2(u_ai[k].x * uv.x + u_ai[k].y * uv.y, u_ai[k].z * uv.x + u_ai[k].w * uv.y) + vec2(c);
+    if (bk.x < 0.0 || bk.y < 0.0 || bk.x > float(u_G - 1) || bk.y > float(u_G - 1)) continue; vec2 d = bk - vec2(c); float pw = u_pr > 0.0 ? exp(-1.386294 * pow(length(d) / u_pr, 8.0)) : 1.0; acc += pw * u_w[k] * Ib(vec2(c) + u_s + u_z * vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs)); if (u_rho > 0.0) accP += u_w[k] * bl(u_p, bk, u_G); }
+  acc += u_rho * u_iw * accP; float P = texelFetch(u_p, b, 0).x; o = vec4(P + u_rate * (acc / (acc + u_iw) - P), 0.0, 0.0, 1.0); }`, ['psi', 'p', 's', 'r', 'z', 'rate', 'iw', 'G', 'K', 'ai', 't', 'w', 'pr', 'rho']) };
     return this._swP2; }
   selfWriteInit(id, P) { const gl = this._gl, G = this._G, N = G * G; this._sw = this._sw || new Map(); let M = this._sw.get(id);
     if (!M) { const [a, fa] = this._makePsiTex(), [b, fb] = this._makePsiTex(), [sT, sF] = this._makePsiTex(); M = { A: a, fA: fa, B: b, fB: fb, S: sT, fS: sF, cur: 'A' }; this._sw.set(id, M); }
@@ -3574,12 +3639,253 @@ void main() { ivec2 b = ivec2(gl_FragCoord.xy); float c = (float(u_G) - 1.0) / 2
     M.cur = 'A'; M.dirty = true; M.pk = null; this._gdTex = this._gdTex || new Map(); this._gdTex.set(id, M.S); }
   selfWritePose(id, pose) { const M = this._sw && this._sw.get(id); if (!M) return; const q = pose || {}, sx = +q.sx || 0, sy = +q.sy || 0, r = +q.r || 0, z = +q.z > 0 ? +q.z : 1, pk = sx + "|" + sy + "|" + r + "|" + z;
     if (!M.dirty && M.pk === pk) return; const gl = this._gl, P = this._swShaders().pose, bIn = M.cur === 'A' ? M.A : M.B;
+    if (q.nat && Array.isArray(q.nat.toField) && this.natChainTex(bIn, q.nat.toField, [M.S, M.fS])) { M.dirty = false; M.pk = pk; this._gdTex.set(id, M.S); return; }   // (optional, 2026-11-04) q.nat: the pose as OPTICS (the app's chain) — no bilinear read
     this._nlPass(P.p, M.fS, [bIn], () => { gl.uniform1i(P.u.b, 0); gl.uniform2f(P.u.s, sx, sy); gl.uniform1f(P.u.r, r); gl.uniform1f(P.u.z, z); gl.uniform1i(P.u.G, this._G); });
     M.dirty = false; M.pk = pk; this._gdTex.set(id, M.S); }
-  selfWriteStep(id, rate, Iw, pose) { const M = this._sw && this._sw.get(id); if (!M) return; const gl = this._gl, P = this._swShaders().write, q = pose || {};
-    const psi = this._eyeSrc === 'A' ? this._eyeA : this._eyeB, pIn = M.cur === 'A' ? M.A : M.B, fOut = M.cur === 'A' ? M.fB : M.fA;
-    this._nlPass(P.p, fOut, [psi, pIn], () => { const u = P.u; gl.uniform1i(u.psi, 0); gl.uniform1i(u.p, 1); gl.uniform2f(u.s, +q.sx || 0, +q.sy || 0); gl.uniform1f(u.r, +q.r || 0); gl.uniform1f(u.z, +q.z > 0 ? +q.z : 1); gl.uniform1f(u.rate, Math.max(0, Math.min(1, +rate || 0))); gl.uniform1f(u.iw, Math.max(1e-12, +Iw || 1)); gl.uniform1i(u.G, this._G); });
+  //   (optional, 2026-11-02) hut: [{ ai: A⁻¹ (4), tx, ty, w }] (≤ 8) — the exposure is the intensity's HUTCHINSON image instead, Σ_k w_k·I(w_k⁻¹(b)) taken in
+  //   the body frame, then posed (the self-written FRACTAL glass). Absent: the write as before.
+  //   rho (optional, with hut, 2026-11-03): the MATERIAL's own copies join the exposure — E = Σ_k w_k·I(…) + rho·Iw·Σ_k w_k·B(w_k⁻¹(b)) (B the written
+  //   state, body frame): the light writes through the fractal's resolvent (scale memory rho; 0 or absent: the write as before, the same arithmetic)
+  //   pupil (optional, with hut): ρ < 1 — the intensity passes a soft ROUND stop (super-Gaussian, half-amplitude at ρ·G/2; its square for intensity) before the copies; ≥ 1 or absent: the field's square edge
+  //   (optional, 2026-11-04) a plan group may carry nx = { sh: four dual tables, a, beta } (the app's exact pull — a type-2 NUFFT: the field's own Fourier series at each preimage) or nat = [{ el, S }, …] (the app's native copy: space / kmul tables, shears, per-line zooms, exact flips, then the
+  //   translations' dual hologram S): cavW then makes that group's copy by those optics instead of the pull-back rows. Absent: as before.
+  //   (optional, 2026-11-03) THE SLOT's CAVITY ON THE GPU — a SUB-TICK computation, nothing read back — running the app's HUTCHINSON ELEMENT as real optics
+  //   (its _hmPlan): cavPlanSet(key, plan) uploads { K, tab (Float32 4·G·G·K, row o·G + y: the source point, the amplitude 1/√(K·|J|), 0), groups
+  //   [{ k0, k1, mask (Float64 N, the copy's numerical aperture in k) }], ap (Float64 N, the round aperture) }; cavW(id, src, key, k, isat, cr, ci): src × ap,
+  //   per group FFT × mask, inverse, the rows' bilinear pull-back × amplitude, summed (NOTHING renormalised), × κ_eff = k/(1 + Ī/isat) (isat > 0, Ī = src's
+  //   mean intensity) × (cr + i·ci) — kept as id's term; cavObjAdd(id): the object field (the injection target) += id's term. curEyeTex / ringTex: the
+  //   selected eye's texture, a filmRingPush ring's texture. Inert unless called.
+  cavPlanSet(key, P) { const gl = this._gl, G = this._G, K = Math.min(32, P.K | 0); this._cvPl = this._cvPl || new Map(); if (this._cvPl.has(key)) return; const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, G, G * K); for (const [a, b] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, a, b);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G * K, gl.RGBA, gl.FLOAT, P.tab.subarray(0, 4 * G * G * K)); gl.bindTexture(gl.TEXTURE_2D, null);
+    if (this._cvPl.size >= 8) { const k0 = this._cvPl.keys().next().value; gl.deleteTexture(this._cvPl.get(k0).tex); this._cvPl.delete(k0); }
+    const natOne = (q) => { if (!q || !Array.isArray(q.el) || !q.S) return null; const el = this._natEls(q.el); if (!el) return null;
+      return { el, S: this.viewTable(q.S, q.S.m, q.S.mi) }; }, natOf = (q) => { if (!Array.isArray(q.nat) || !q.nat.length) return null; const L = q.nat.map(natOne); return L.every(Boolean) ? L : null; };   // (a group's chains: one, or one per graph node)
+    const _unused = (q) => { const el = [];
+      for (const e of q.el) { if (e.kind === 'space' || e.kind === 'kmul') el.push({ kind: e.kind, t: this.viewTable(e, e.m, e.mi || null) }); else if (e.kind === 'shear') el.push({ kind: 'shear', axis: e.axis | 0, s: +e.s || 0 });
+        else if (e.kind === 'zoom' && e.m && e.mi) el.push({ kind: 'zoom', axis: e.axis | 0, t: this.viewTable(e.m, e.m, e.mi) });   // (a per-line Dirichlet resample — keyed by its table, shared by both axes)
+        else if (e.kind === 'u1' && e.op && Array.isArray(e.op.A) && !e.op.A[1] && !e.op.A[2] && Math.abs(Math.abs(e.op.A[0]) - 1) < 1e-9 && Math.abs(Math.abs(e.op.A[3]) - 1) < 1e-9) el.push({ kind: 'flip', fx: e.op.A[0] < 0 ? 1 : 0, fy: e.op.A[3] < 0 ? 1 : 0 }); else return null; }
+      return el; }; void _unused;
+    const nxOf = (q) => q.nx && Array.isArray(q.nx.sh) && q.nx.sh.length === 4 ? { sh: q.nx.sh.map((T) => this.viewTable(T, T.m, T.mi)), a: +q.nx.a, b: +q.nx.beta } : null;   // ⟲ the exact pull (the app's _nxES): four dual tables, the kernel's half-width and β
+    this._cvPl.set(key, { tex, K, ap: this.viewTable(P.ap, P.ap, null), groups: P.groups.filter((q) => q.k0 < K).map((q) => ({ k0: q.k0, k1: Math.min(K, q.k1), m: this.viewTable(q.mask, q.mask, null), nat: natOf(q), nx: nxOf(q) })) }); }
+  //   _natEls(els) — the app's native chain (space / kmul tables, shears, zooms, exact flips / quarter turns) as GPU elements (memoised per array); null if a kind is unknown
+  _natEls(els) { this._neM = this._neM || new WeakMap(); if (this._neM.has(els)) return this._neM.get(els); const el = [];
+    for (const e of els) { if (e.kind === 'space' || e.kind === 'kmul') el.push({ kind: e.kind, t: this.viewTable(e, e.m, e.mi || null) }); else if (e.kind === 'shear') el.push({ kind: 'shear', axis: e.axis | 0, s: +e.s || 0 });
+      else if (e.kind === 'zoom' && e.m && e.mi) el.push({ kind: 'zoom', axis: e.axis | 0, t: this.viewTable(e.m, e.m, e.mi) });
+      else if (e.kind === 'rot90') el.push({ kind: 'rot90', q: e.q | 0 });
+      else if (e.kind === 'u1' && e.op && Array.isArray(e.op.A) && !e.op.A[1] && !e.op.A[2] && Math.abs(Math.abs(e.op.A[0]) - 1) < 1e-9 && Math.abs(Math.abs(e.op.A[3]) - 1) < 1e-9) el.push({ kind: 'flip', fx: e.op.A[0] < 0 ? 1 : 0, fy: e.op.A[3] < 0 ? 1 : 0 }); else { this._neM.set(els, null); return null; } }
+    this._neM.set(els, el); return el; }
+  //   _natRun(el, F) — run converted elements on the ping-pong F in place (the current texture is the field; x domain in and out)
+  _natRun(el, F) { const gl = this._gl, P = this._cvProgs(), cur = () => (F.src === 'A' ? F.A : F.B), other = () => (F.src === 'A' ? F.fB : F.fA), flip = () => { F.src = F.src === 'A' ? 'B' : 'A'; };
+    const mul = (t) => { this._nlPass(P.mul.p, other(), [cur(), t], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); flip(); };
+    for (const e of el) { if (e.kind === 'space') mul(e.t); else if (e.kind === 'kmul') { this._fft2dS(F, false); mul(e.t); this._fft2dS(F, true); }
+      else if (e.kind === 'shear') { if (!e.s) continue; if (this._shearFft && this._fftStockham) { this._shearFftS(F, e.axis | 0, e.s); continue; } const K = this._shK(e.s), V = this._viewProgs(); this._nlPass(V.sh, other(), [cur(), K], () => { gl.uniform1i(V.ush.x, 0); gl.uniform1i(V.ush.K, 1); gl.uniform1i(V.ush.G, this._G); gl.uniform1i(V.ush.axis, e.axis | 0); }); flip(); }
+      else if (e.kind === 'zoom') { this._nlPass(P.zm.p, other(), [cur(), e.t], () => { gl.uniform1i(P.zm.u.a, 0); gl.uniform1i(P.zm.u.K, 1); gl.uniform1i(P.zm.u.G, this._G); gl.uniform1i(P.zm.u.axis, e.axis | 0); }); flip(); }
+      else if (e.kind === 'flip') { this._nlPass(P.fl.p, other(), [cur()], () => { gl.uniform1i(P.fl.u.a, 0); gl.uniform2i(P.fl.u.f, e.fx | 0, e.fy | 0); gl.uniform1i(P.fl.u.G, this._G); }); flip(); }
+      else if (e.kind === 'rot90') { for (let k = 0; k < (e.q | 0); k++) { this._nlPass(P.r9.p, other(), [cur()], () => { gl.uniform1i(P.r9.u.a, 0); gl.uniform1i(P.r9.u.G, this._G); }); flip(); } } } }
+  //   natChainTex(src, els, dst) (optional, 2026-11-04) — the app's native chain on a texture, the result copied into dst ([tex, fbo]); false if a kind is unknown
+  natChainTex(src, els, dst) { const el = this._natEls(els); if (!el) return false; const gl = this._gl, P = this._cvProgs(); if (!this._cvX) { const mk = () => this._makePsiTex(); const a = mk(), b = mk(), c = mk(), d = mk(), e = mk(); this._cvX = { ap: a, accA: b, accB: c, F: { A: d[0], fA: d[1], B: e[0], fB: e[1], src: 'A' } }; }
+    const F = this._cvX.F; F.src = 'A'; this._nlPass(P.cp.p, F.fA, [src], () => gl.uniform1i(P.cp.u.a, 0)); this._natRun(el, F); this._nlPass(P.cp.p, dst[1], [F.src === 'A' ? F.A : F.B], () => gl.uniform1i(P.cp.u.a, 0)); return true; }
+  //   viewNatChain(els) (optional, 2026-11-04) — the app's native chain on the ACTIVE eye in place (x in, x out); false if a kind is unknown
+  viewNatChain(els) { if (!this._vnT) this._vnT = this._makePsiTex(); if (!this.natChainTex(this._eyeSrc === 'A' ? this._eyeA : this._eyeB, els, this._vnT)) return false; const gl = this._gl, P = this._cvProgs(), fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA;
+    this._nlPass(P.cp.p, fbo, [this._vnT[0]], () => gl.uniform1i(P.cp.u.a, 0)); this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; return true; }
+  //   THE ⛰ MATERIAL ON THE GPU (optional, 2026-11-04 — the app's fractal material, r ← r + e·(ρ·M_p r + (1 − ρ)·s − r), advanced per cascade beat
+  //   here instead of the CPU): matPlanSet(key, M) uploads one LAW's step — M = { tab: Float32 4·G·G·Kg (rows kk·G + y: the preimage (x, y), its
+  //   weight a, 0 — the gathered maps by group), groups [{ k0, k1, sh: four dual tables }], ka, kb (the semicircle kernel), pts: Float32 5·P
+  //   (sx, sy, tx, ty, w — the scattered maps' rows, drawn as additive points), nP, src (Float64 N | null) }; matInit(id, r) / matStep(id, key, rho, e)
+  //   / matSnap(id, tag) / matRestore(id, tag) / matRead(id) / matGlass(id, base, win, q) (the slot's glass texture = base + q·win·u/(1 + u),
+  //   u = r/⟨r⟩ — ⟨r⟩ from the step's own spectrum, the DC bin). False (nothing done) without EXT_float_blend or a plan.
+  _matProgs() { if (this._mtP) return this._mtP; const gl = this._gl; if (!gl.getExtension('EXT_float_blend')) return (this._mtP = null);
+    const mk = (src, names) => { const p = this._compileStep(src), u = {}; for (const n of names) u[n] = gl.getUniformLocation(p, 'u_' + n); return { p, u }; };
+    const vs = this._compileShader(gl.VERTEX_SHADER, `#version 300 es
+in vec4 a_st; in float a_w; uniform sampler2D u_r; uniform int u_G; out float v;
+void main() { v = a_w * texelFetch(u_r, ivec2(a_st.xy), 0).x; vec2 p = (a_st.zw + 0.5) / float(u_G) * 2.0 - 1.0; gl_Position = vec4(p, 0.0, 1.0); gl_PointSize = 1.0; }`), fs = this._compileShader(gl.FRAGMENT_SHADER, `#version 300 es
+precision highp float; in float v; out vec4 o; void main() { o = vec4(v, 0.0, 0.0, 1.0); }`);
+    const pp = gl.createProgram(); gl.attachShader(pp, vs); gl.attachShader(pp, fs); gl.bindAttribLocation(pp, 0, 'a_st'); gl.bindAttribLocation(pp, 1, 'a_w'); gl.linkProgram(pp); if (!gl.getProgramParameter(pp, gl.LINK_STATUS)) throw new Error('mat pt link: ' + gl.getProgramInfoLog(pp));
+    this._mtP = { pt: { p: pp, u: { r: gl.getUniformLocation(pp, 'u_r'), G: gl.getUniformLocation(pp, 'u_G') } }, cb: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_r, u_g, u_sc, u_s; uniform float u_rho, u_e; uniform int u_hasS; out vec4 o;
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); float r = texelFetch(u_r, b, 0).x, m = texelFetch(u_g, b, 0).x + texelFetch(u_sc, b, 0).x, s = u_hasS == 1 ? texelFetch(u_s, b, 0).x : 0.0; o = vec4(r + u_e * (u_rho * m + (1.0 - u_rho) * s - r), 0.0, 0.0, 1.0); }`, ['r', 'g', 'sc', 's', 'rho', 'e', 'hasS']), gi: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_r, u_k, u_b, u_w; uniform float u_q, u_N; uniform int u_hasB; out vec4 o;
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); float mu = texelFetch(u_k, ivec2(0, 0), 0).x / u_N, u = mu > 0.0 ? texelFetch(u_r, b, 0).x / mu : 0.0, v = u > 0.0 ? u / (1.0 + u) : 0.0;
+  o = vec4((u_hasB == 1 ? texelFetch(u_b, b, 0).x : 0.0) + u_q * texelFetch(u_w, b, 0).x * v, 0.0, 0.0, 1.0); }`, ['r', 'k', 'b', 'w', 'q', 'N', 'hasB']) };
+    return this._mtP; }
+  matOK() { try { return !!this._matProgs(); } catch (e) { return false; } }
+  matPlanSet(key, M) { if (!this._matProgs()) return false; this._mtPl = this._mtPl || new Map(); if (this._mtPl.has(key)) return true; const gl = this._gl, G = this._G, Kg = Math.max(0, M.Kg | 0);
+    let tex = null; if (Kg > 0) { tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, G, G * Kg); for (const [a, b] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, a, b);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G * Kg, gl.RGBA, gl.FLOAT, M.tab); gl.bindTexture(gl.TEXTURE_2D, null); }
+    let vao = null, vbo = null; const nP = M.nP | 0; if (nP > 0) { vao = gl.createVertexArray(); vbo = gl.createBuffer(); gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, M.pts.subarray(0, 5 * nP), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 20, 0); gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 20, 16); gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, null); }
+    if (this._mtPl.size >= 8) { const k0 = this._mtPl.keys().next().value, o = this._mtPl.get(k0); if (o.tex) gl.deleteTexture(o.tex); if (o.vbo) gl.deleteBuffer(o.vbo); if (o.vao) gl.deleteVertexArray(o.vao); this._mtPl.delete(k0); }
+    this._mtPl.set(key, { tex, vao, vbo, nP, groups: (M.groups || []).map((g) => ({ k0: g.k0 | 0, k1: g.k1 | 0, sh: g.sh.map((T) => this.viewTable(T, T.m, T.mi)) })), ka: +M.ka, kb: +M.kb, src: M.src ? this.viewTable(M.src, M.src, null) : null }); return true; }
+  matPlanHas(key) { return !!(this._mtPl && this._mtPl.has(key)); }
+  _matS(id) { this._mtS = this._mtS || new Map(); let S = this._mtS.get(id); if (!S) { S = { A: this._makePsiTex(), B: this._makePsiTex(), cur: 'A', ring: [], spec: this._makePsiTex() }; this._mtS.set(id, S); } return S; }
+  matInit(id, r) { if (!this._matProgs()) return false; const gl = this._gl, G = this._G, N = G * G, S = this._matS(id), f = new Float32Array(2 * N); for (let j = 0; j < N; j++) f[2 * j] = +r[j] || 0;
+    for (const t of [S.A[0], S.B[0]]) { gl.bindTexture(gl.TEXTURE_2D, t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f); } gl.bindTexture(gl.TEXTURE_2D, null); S.cur = 'A'; return true; }
+  matStep(id, key, rho, e) { const MP = this._matProgs(), PL = this._mtPl && this._mtPl.get(key); if (!MP || !PL) return false; const gl = this._gl, G = this._G, P = this._cvProgs(), S = this._matS(id);
+    if (!this._cvX) { const mk = () => this._makePsiTex(); const a = mk(), b = mk(), c = mk(), d = mk(), e2 = mk(); this._cvX = { ap: a, accA: b, accB: c, F: { A: d[0], fA: d[1], B: e2[0], fB: e2[1], src: 'A' } }; }
+    if (!this._mtX) { const mk = () => this._makePsiTex(); this._mtX = { n: [mk(), mk(), mk(), mk()], g: [mk(), mk()], sc: mk() }; } const X = this._cvX, F = X.F, W = this._mtX, cur = () => (F.src === 'A' ? F.A : F.B), rIn = S.cur === 'A' ? S.A : S.B, rOut = S.cur === 'A' ? S.B : S.A;
+    F.src = 'A'; this._nlPass(P.cp.p, F.fA, [rIn[0]], () => gl.uniform1i(P.cp.u.a, 0)); this._fft2dS(F, false); this._nlPass(P.cp.p, S.spec[1], [cur()], () => gl.uniform1i(P.cp.u.a, 0));   // the spectrum (kept: its DC is Σr — the index's mean)
+    this._nlPass(P.zero.p, W.g[0][1], [], () => {}); let ig = 0;
+    for (const g of PL.groups) { g.sh.forEach((T, n) => { F.src = 'A'; this._nlPass(P.mul.p, F.fA, [S.spec[0], T], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); this._fft2dS(F, true); this._nlPass(P.cp.p, W.n[n][1], [cur()], () => gl.uniform1i(P.cp.u.a, 0)); });
+      this._nlPass(P.pnx.p, W.g[1 - ig][1], [W.n[0][0], W.n[1][0], W.n[2][0], W.n[3][0], PL.tex, W.g[ig][0]], () => { const u = P.pnx.u; gl.uniform1i(u.n0, 0); gl.uniform1i(u.n1, 1); gl.uniform1i(u.n2, 2); gl.uniform1i(u.n3, 3); gl.uniform1i(u.tab, 4); gl.uniform1i(u.acc, 5); gl.uniform1i(u.G, G); gl.uniform1i(u.k0, g.k0); gl.uniform1i(u.k1, g.k1); gl.uniform1f(u.ka, PL.ka); gl.uniform1f(u.kb, PL.kb); }); ig = 1 - ig; }
+    this._nlPass(P.zero.p, W.sc[1], [], () => {});
+    if (PL.nP > 0) { gl.bindFramebuffer(gl.FRAMEBUFFER, W.sc[1]); gl.viewport(0, 0, G, G); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); gl.useProgram(MP.pt.p); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, rIn[0]); gl.uniform1i(MP.pt.u.r, 0); gl.uniform1i(MP.pt.u.G, G);
+      gl.bindVertexArray(PL.vao); gl.drawArrays(gl.POINTS, 0, PL.nP); gl.bindVertexArray(null); gl.disable(gl.BLEND); gl.bindFramebuffer(gl.FRAMEBUFFER, null); }   // the scattered maps: each row's share of r, added at its target (blending keeps the primitives' order: the same sum on every peer)
+    this._nlPass(MP.cb.p, rOut[1], [rIn[0], W.g[ig][0], W.sc[0], PL.src || rIn[0]], () => { const u = MP.cb.u; gl.uniform1i(u.r, 0); gl.uniform1i(u.g, 1); gl.uniform1i(u.sc, 2); gl.uniform1i(u.s, 3); gl.uniform1f(u.rho, +rho); gl.uniform1f(u.e, +e); gl.uniform1i(u.hasS, PL.src ? 1 : 0); });
+    S.cur = S.cur === 'A' ? 'B' : 'A'; return true; }
+  matSnap(id, tag) { const S = this._matS(id), gl = this._gl, P = this._cvProgs(), rIn = S.cur === 'A' ? S.A : S.B; let e = S.ring.find((x) => x.tag === tag); if (!e) { e = S.ring.length >= 8 ? S.ring.shift() : { t: this._makePsiTex() }; e.tag = tag; S.ring.push(e); }
+    this._nlPass(P.cp.p, e.t[1], [rIn[0]], () => gl.uniform1i(P.cp.u.a, 0)); }
+  matRestore(id, tag) { const S = this._matS(id), gl = this._gl, P = this._cvProgs(), e = S.ring.find((x) => x.tag === tag); if (!e) return false; const rIn = S.cur === 'A' ? S.A : S.B; this._nlPass(P.cp.p, rIn[1], [e.t[0]], () => gl.uniform1i(P.cp.u.a, 0)); return true; }
+  matHasSnap(id, tag) { return !!(this._mtS && this._mtS.get(id) && this._mtS.get(id).ring.some((x) => x.tag === tag)); }
+  matRead(id) { const S = this._mtS && this._mtS.get(id); if (!S) return null; const gl = this._gl, G = this._G, f = new Float32Array(2 * G * G), r = S.cur === 'A' ? S.A : S.B; gl.bindFramebuffer(gl.FRAMEBUFFER, r[1]); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindFramebuffer(gl.FRAMEBUFFER, null); const o = new Float32Array(G * G); for (let j = 0; j < G * G; j++) o[j] = f[2 * j]; return o; }
+  matGlass(id, base, win, q) { const MP = this._matProgs(), S = this._mtS && this._mtS.get(id); if (!MP || !S) return false; const gl = this._gl, G = this._G; this._glTex = this._glTex || new Map(); this._mtG = this._mtG || new Map(); let T = this._mtG.get(id); if (!T) { T = this._makePsiTex(); this._mtG.set(id, T); }
+    if (!this._cvX) { const mk = () => this._makePsiTex(); const a = mk(), b = mk(), c = mk(), d = mk(), e2 = mk(); this._cvX = { ap: a, accA: b, accB: c, F: { A: d[0], fA: d[1], B: e2[0], fB: e2[1], src: 'A' } }; }
+    const P = this._cvProgs(), rIn = S.cur === 'A' ? S.A : S.B, X = this._cvX, F = X.F; F.src = 'A'; this._nlPass(P.cp.p, F.fA, [rIn[0]], () => gl.uniform1i(P.cp.u.a, 0)); this._fft2dS(F, false); this._nlPass(P.cp.p, S.spec[1], [F.src === 'A' ? F.A : F.B], () => gl.uniform1i(P.cp.u.a, 0));   // (the current state's spectrum: its DC)
+    const bt = base ? this.viewTable(base, base, null) : null, wt = this.viewTable(win, win, null);
+    this._nlPass(MP.gi.p, T[1], [rIn[0], S.spec[0], bt || rIn[0], wt], () => { const u = MP.gi.u; gl.uniform1i(u.r, 0); gl.uniform1i(u.k, 1); gl.uniform1i(u.b, 2); gl.uniform1i(u.w, 3); gl.uniform1f(u.q, +q); gl.uniform1f(u.N, G * G); gl.uniform1i(u.hasB, bt ? 1 : 0); });
+    const old = this._glTex.get(id); if (old && old !== T[0] && !this._mtGown?.has(old)) gl.deleteTexture(old); this._mtGown = this._mtGown || new Set(); this._mtGown.add(T[0]); this._glTex.set(id, T[0]); return true; }
+  cavPlanHas(key) { return !!(this._cvPl && this._cvPl.has(key)); }
+  curEyeTex() { return this._eyeSrc === 'A' ? this._eyeA : this._eyeB; }
+  ringTex(key, idx) { const r = this._rings && this._rings[key]; return r ? r.f[((idx % r.R) + r.R) % r.R][0] : null; }
+  _cvProgs() { if (this._cvP) return this._cvP; const gl = this._gl, mk = (src, names) => { const p = this._compileStep(src), u = {}; for (const n of names) u[n] = gl.getUniformLocation(p, 'u_' + n); return { p, u }; };
+    this._cvP = { mul: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_t; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec2 a = texelFetch(u_x, q, 0).xy, t = texelFetch(u_t, q, 0).xy; o = vec4(a.x * t.x - a.y * t.y, a.x * t.y + a.y * t.x, 0.0, 1.0); }`, ['x', 't']), pull: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_src, u_tab, u_acc; uniform int u_G, u_k0, u_k1; out vec4 o;
+vec2 B(vec2 x) { vec2 X = clamp(x, vec2(0.0), vec2(float(u_G - 1))), f0 = min(floor(X), vec2(float(u_G - 2))), w = X - f0; ivec2 a = ivec2(f0);
+  return mix(mix(texelFetch(u_src, a, 0).xy, texelFetch(u_src, a + ivec2(1, 0), 0).xy, w.x), mix(texelFetch(u_src, a + ivec2(0, 1), 0).xy, texelFetch(u_src, a + ivec2(1, 1), 0).xy, w.x), w.y); }
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); vec2 acc = texelFetch(u_acc, b, 0).xy;
+  for (int k = 0; k < 32; k++) { if (k < u_k0) continue; if (k >= u_k1) break; vec4 e = texelFetch(u_tab, ivec2(b.x, b.y + k * u_G), 0); if (e.z <= 0.0) continue; acc += e.z * B(e.xy); }
+  o = vec4(acc, 0.0, 1.0); }`, ['src', 'tab', 'acc', 'G', 'k0', 'k1']), sc: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_w, u_es; uniform float u_k, u_is, u_N; uniform vec2 u_c; out vec4 o;
+void main() { float es = texelFetch(u_es, ivec2(0, 0), 0).x, f = u_is > 0.0 ? u_k / (1.0 + es / u_N / u_is) : u_k;
+  vec2 w = texelFetch(u_w, ivec2(gl_FragCoord.xy), 0).xy * f; o = vec4(u_c.x * w.x - u_c.y * w.y, u_c.x * w.y + u_c.y * w.x, 0.0, 1.0); }`, ['w', 'es', 'k', 'is', 'N', 'c']), add: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_a, u_b; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); o = vec4(texelFetch(u_a, q, 0).xy + texelFetch(u_b, q, 0).xy, 0.0, 1.0); }`, ['a', 'b']), cp: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_a; out vec4 o;
+void main() { o = vec4(texelFetch(u_a, ivec2(gl_FragCoord.xy), 0).xy, 0.0, 1.0); }`, ['a']), fl: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_a; uniform ivec2 u_f; uniform int u_G; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); o = vec4(texelFetch(u_a, ivec2(u_f.x == 1 ? u_G - 1 - q.x : q.x, u_f.y == 1 ? u_G - 1 - q.y : q.y), 0).xy, 0.0, 1.0); }`, ['a', 'f', 'G']), r9: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_a; uniform int u_G; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); o = vec4(texelFetch(u_a, ivec2(q.y, u_G - 1 - q.x), 0).xy, 0.0, 1.0); }`, ['a', 'G']), zm: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_a, u_K; uniform int u_G, u_axis; out vec4 o;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); int l = u_axis == 0 ? c.y : c.x, u = u_axis == 0 ? c.x : c.y; vec2 acc = vec2(0.0);
+  for (int n = 0; n < 2048; n++) { if (n >= u_G) break; vec2 k = texelFetch(u_K, ivec2(n, u), 0).xy; if (k.x == 0.0 && k.y == 0.0) continue; vec2 p = texelFetch(u_a, u_axis == 0 ? ivec2(n, l) : ivec2(l, n), 0).xy; acc += vec2(p.x * k.x - p.y * k.y, p.x * k.y + p.y * k.x); }
+  o = vec4(acc, 0.0, 1.0); }`, ['a', 'K', 'G', 'axis']), pnx: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_n0, u_n1, u_n2, u_n3, u_tab, u_acc; uniform int u_G, u_k0, u_k1; uniform float u_ka, u_kb; out vec4 o;
+float ph(float t) { float u = t / u_ka; return abs(u) >= 1.0 ? 0.0 : exp(u_kb * (sqrt(1.0 - u * u) - 1.0)); }
+int wrap(int v, int m) { return v - m * int(floor(float(v) / float(m))); }
+vec2 fF(int xi, int yi) { ivec2 q = ivec2(xi / 2, yi / 2); int px = xi - 2 * q.x, py = yi - 2 * q.y; if (px == 0 && py == 0) return texelFetch(u_n0, q, 0).xy; if (px == 1 && py == 0) return texelFetch(u_n1, q, 0).xy; if (px == 0) return texelFetch(u_n2, q, 0).xy; return texelFetch(u_n3, q, 0).xy; }
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); vec2 acc = texelFetch(u_acc, b, 0).xy; int G2 = 2 * u_G;
+  for (int k = 0; k < 32; k++) { if (k < u_k0) continue; if (k >= u_k1) break; vec4 e = texelFetch(u_tab, ivec2(b.x, b.y + k * u_G), 0); if (e.z <= 0.0) continue;
+    float X = 2.0 * e.x, Y = 2.0 * e.y; int mx0 = int(ceil(X - u_ka)), my0 = int(ceil(Y - u_ka)); vec2 s = vec2(0.0);
+    for (int dy = 0; dy < 8; dy++) { int my = my0 + dy; float wy = ph(Y - float(my)); if (wy == 0.0) continue; int yi = wrap(my, G2);
+      for (int dx = 0; dx < 8; dx++) { int mx = mx0 + dx; float ww = wy * ph(X - float(mx)); if (ww == 0.0) continue; s += ww * fF(wrap(mx, G2), yi); } }
+    acc += e.z * s; }
+  o = vec4(acc, 0.0, 1.0); }`, ['n0', 'n1', 'n2', 'n3', 'tab', 'acc', 'G', 'k0', 'k1', 'ka', 'kb']), pnxW: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_n0, u_n1, u_n2, u_n3, u_tab, u_acc; uniform int u_G, u_k0, u_k1, u_mode; uniform float u_ka, u_kb, u_r, u_z, u_pr; uniform vec2 u_s; out vec4 o;
+float ph(float t) { float u = t / u_ka; return abs(u) >= 1.0 ? 0.0 : exp(u_kb * (sqrt(1.0 - u * u) - 1.0)); }
+int wrap(int v, int m) { return v - m * int(floor(float(v) / float(m))); }
+vec2 fF(int xi, int yi) { ivec2 q = ivec2(xi / 2, yi / 2); int px = xi - 2 * q.x, py = yi - 2 * q.y; if (px == 0 && py == 0) return texelFetch(u_n0, q, 0).xy; if (px == 1 && py == 0) return texelFetch(u_n1, q, 0).xy; if (px == 0) return texelFetch(u_n2, q, 0).xy; return texelFetch(u_n3, q, 0).xy; }
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); float acc = texelFetch(u_acc, b, 0).x; int G2 = 2 * u_G; float c = (float(u_G) - 1.0) / 2.0, cs = cos(-u_r), sn = sin(-u_r);
+  for (int k = 0; k < 32; k++) { if (k < u_k0) continue; if (k >= u_k1) break; vec4 e = texelFetch(u_tab, ivec2(b.x, b.y + k * u_G), 0); if (e.z <= 0.0) continue;
+    vec2 d = e.xy - vec2(c), p = e.xy; float pw = 1.0; if (u_mode == 0) { p = vec2(c) + u_s + u_z * vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs); if (u_pr > 0.0) pw = exp(-1.386294 * pow(length(d) / u_pr, 8.0)); }
+    float X = 2.0 * p.x, Y = 2.0 * p.y; int mx0 = int(ceil(X - u_ka)), my0 = int(ceil(Y - u_ka)); vec2 s = vec2(0.0);
+    for (int dy = 0; dy < 8; dy++) { int my = my0 + dy; float wy = ph(Y - float(my)); if (wy == 0.0) continue; int yi = wrap(my, G2);
+      for (int dx = 0; dx < 8; dx++) { int mx = mx0 + dx; float ww = wy * ph(X - float(mx)); if (ww == 0.0) continue; s += ww * fF(wrap(mx, G2), yi); } }
+    acc += e.z * e.z * pw * (u_mode == 0 ? dot(s, s) : s.x); }
+  o = vec4(acc, 0.0, 0.0, 1.0); }`, ['n0', 'n1', 'n2', 'n3', 'tab', 'acc', 'G', 'k0', 'k1', 'mode', 'ka', 'kb', 'r', 'z', 'pr', 's']), swW: mk(`#version 300 es
+precision highp float;
+uniform sampler2D u_p, u_aI, u_aP; uniform float u_rate, u_iw, u_rho; out vec4 o;
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); float E = texelFetch(u_aI, b, 0).x + u_rho * u_iw * texelFetch(u_aP, b, 0).x, P = texelFetch(u_p, b, 0).x; o = vec4(P + u_rate * (E / (E + u_iw) - P), 0.0, 0.0, 1.0); }`, ['p', 'aI', 'aP', 'rate', 'iw', 'rho']), zero: mk(`#version 300 es
+precision highp float;
+out vec4 o;
+void main() { o = vec4(0.0); }`, []) };
+    return this._cvP; }
+  cavW(id, src, key, k, isat, cr, ci) { const PL = this._cvPl && this._cvPl.get(key); if (!PL || !src) return false; const gl = this._gl, P = this._cvProgs(); this._cvS = this._cvS || new Map();
+    let M = this._cvS.get(id); if (!M) { M = { term: this._makePsiTex() }; this._cvS.set(id, M); }
+    if (!this._cvX) { const mk = () => this._makePsiTex(); const a = mk(), b = mk(), c = mk(), d = mk(), e = mk(); this._cvX = { ap: a, accA: b, accB: c, F: { A: d[0], fA: d[1], B: e[0], fB: e[1], src: 'A' } }; }
+    const X = this._cvX, F = X.F, cur = () => (F.src === 'A' ? F.A : F.B), other = () => (F.src === 'A' ? F.fB : F.fA), flip = () => { F.src = F.src === 'A' ? 'B' : 'A'; };
+    this._nlPass(P.mul.p, X.ap[1], [src, PL.ap], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); });   // the round aperture
+    this._nlPass(P.zero.p, X.accA[1], [], () => {}); let acc = X.accA, nxt = X.accB;
+    for (const g of PL.groups) { F.src = 'A'; this._nlPass(P.cp.p, F.fA, [X.ap[0]], () => gl.uniform1i(P.cp.u.a, 0));
+      if (g.nat) { const mul = (t) => { this._nlPass(P.mul.p, other(), [cur(), t], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); flip(); };   // ⟲ NATIVE: the group's optics (the app's _natGL2 chain), then its translations in the dual
+        for (const nt of g.nat) { F.src = 'A'; this._nlPass(P.cp.p, F.fA, [X.ap[0]], () => gl.uniform1i(P.cp.u.a, 0));
+        this._natRun(nt.el, F);
+        this._fft2dS(F, false); mul(nt.S); this._fft2dS(F, true);
+        this._nlPass(P.add.p, nxt[1], [acc[0], cur()], () => { gl.uniform1i(P.add.u.a, 0); gl.uniform1i(P.add.u.b, 1); }); const t2 = acc; acc = nxt; nxt = t2; } continue; }
+      if (g.nx) { if (!X.nx) { X.nx = [0, 1, 2, 3].map(() => this._makePsiTex()); X.nk = this._makePsiTex(); } this._fft2dS(F, false); this._nlPass(P.cp.p, X.nk[1], [cur()], () => gl.uniform1i(P.cp.u.a, 0));   // ⟲ THE EXACT PULL: the spectrum once (kept), four shifted inverse transforms = the field on the 2× grid, then the kernel gather
+        g.nx.sh.forEach((T, n) => { F.src = 'A'; this._nlPass(P.mul.p, F.fA, [X.nk[0], T], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); this._fft2dS(F, true); this._nlPass(P.cp.p, X.nx[n][1], [cur()], () => gl.uniform1i(P.cp.u.a, 0)); });
+        this._nlPass(P.pnx.p, nxt[1], [X.nx[0][0], X.nx[1][0], X.nx[2][0], X.nx[3][0], PL.tex, acc[0]], () => { const u = P.pnx.u; gl.uniform1i(u.n0, 0); gl.uniform1i(u.n1, 1); gl.uniform1i(u.n2, 2); gl.uniform1i(u.n3, 3); gl.uniform1i(u.tab, 4); gl.uniform1i(u.acc, 5); gl.uniform1i(u.G, this._G); gl.uniform1i(u.k0, g.k0); gl.uniform1i(u.k1, g.k1); gl.uniform1f(u.ka, g.nx.a); gl.uniform1f(u.kb, g.nx.b); });
+        const t3 = acc; acc = nxt; nxt = t3; continue; }
+      this._fft2dS(F, false); const s0 = cur(); this._nlPass(P.mul.p, other(), [s0, g.m], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); flip(); this._fft2dS(F, true);   // the copy's numerical aperture
+      this._nlPass(P.pull.p, nxt[1], [cur(), PL.tex, acc[0]], () => { gl.uniform1i(P.pull.u.src, 0); gl.uniform1i(P.pull.u.tab, 1); gl.uniform1i(P.pull.u.acc, 2); gl.uniform1i(P.pull.u.G, this._G); gl.uniform1i(P.pull.u.k0, g.k0); gl.uniform1i(P.pull.u.k1, g.k1); });
+      const t = acc; acc = nxt; nxt = t; }
+    const es = this._viewEnergy(src, 'A');
+    this._nlPass(P.sc.p, M.term[1], [acc[0], es], () => { gl.uniform1i(P.sc.u.w, 0); gl.uniform1i(P.sc.u.es, 1); gl.uniform1f(P.sc.u.k, +k || 0); gl.uniform1f(P.sc.u.is, Math.max(0, +isat || 0)); gl.uniform1f(P.sc.u.N, this._G * this._G); gl.uniform2f(P.sc.u.c, +cr || 0, +ci || 0); });
+    return true; }
+  cavObjAdd(id) { const M = this._cvS && this._cvS.get(id); if (!M) return false; const gl = this._gl, P = this._cvProgs();
+    if (!this._objF) { this._objF = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, this._objF); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._obj, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); this._objT = this._makePsiTex(); }
+    this._nlPass(P.add.p, this._objT[1], [this._obj, M.term[0]], () => { gl.uniform1i(P.add.u.a, 0); gl.uniform1i(P.add.u.b, 1); });
+    this._nlPass(P.cp.p, this._objF, [this._objT[0]], () => gl.uniform1i(P.cp.u.a, 0));   // (back into the object texture the superpose reads)
+    return true; }
+  cavTabHas(key) { return this.cavPlanHas(key); }
+  swTabHas(key) { return !!(this._swTab && this._swTab.has(key)); }   // (a table may have been evicted — the caller re-uploads)
+  //   (optional, 2026-11-03) THE EXPOSURE TABLE — any map kind (affine, exact torus, conformal, graph-directed), any K ≤ 32: swTabSet(key, data, K)
+  //   uploads data = Float32Array(4·G·G·K), row k·G + y, column x: (the body-frame source point w_k⁻¹(b), its weight, 0), weight 0 off w_k's
+  //   image; selfWriteStep(…, { tab: key }, pupil) then exposes Σ_k w·I(source) (bilinear, posed as writeH). Inert unless called.
+  swTabSet(key, data, K) { const gl = this._gl, G = this._G; this._swTab = this._swTab || new Map(); if (this._swTab.has(key)) return; const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, G, G * K); for (const [a, b] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, a, b);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G * K, gl.RGBA, gl.FLOAT, data); gl.bindTexture(gl.TEXTURE_2D, null);
+    if (this._swTab.size >= 8) { const k0 = this._swTab.keys().next().value; gl.deleteTexture(this._swTab.get(k0).tex); this._swTab.delete(k0); } this._swTab.set(key, { tex, K: Math.min(32, K | 0) }); }
+  _swShaderT() { if (this._swPT) return this._swPT; const gl = this._gl, p = this._compileStep(`#version 300 es
+precision highp float;
+uniform sampler2D u_psi, u_p, u_tab; uniform vec2 u_s; uniform float u_r, u_z, u_rate, u_iw, u_pr, u_rho; uniform int u_G, u_K; out vec4 o;
+float I(ivec2 q) { vec2 v = texelFetch(u_psi, q, 0).xy; return dot(v, v); }
+float Ib(vec2 x) { vec2 f = floor(x), w = x - f; int x0 = int(mod(f.x, float(u_G))), y0 = int(mod(f.y, float(u_G))), x1 = (x0 + 1) % u_G, y1 = (y0 + 1) % u_G;
+  return mix(mix(I(ivec2(x0, y0)), I(ivec2(x1, y0)), w.x), mix(I(ivec2(x0, y1)), I(ivec2(x1, y1)), w.x), w.y); }
+float Pb(vec2 x) { vec2 f = floor(x), w = x - f; int x0 = int(mod(f.x, float(u_G))), y0 = int(mod(f.y, float(u_G))), x1 = (x0 + 1) % u_G, y1 = (y0 + 1) % u_G;
+  return mix(mix(texelFetch(u_p, ivec2(x0, y0), 0).x, texelFetch(u_p, ivec2(x1, y0), 0).x, w.x), mix(texelFetch(u_p, ivec2(x0, y1), 0).x, texelFetch(u_p, ivec2(x1, y1), 0).x, w.x), w.y); }
+void main() { ivec2 b = ivec2(gl_FragCoord.xy); float c = (float(u_G) - 1.0) / 2.0, cs = cos(-u_r), sn = sin(-u_r), acc = 0.0, accP = 0.0;
+  for (int k = 0; k < 32; k++) { if (k >= u_K) break; vec4 e = texelFetch(u_tab, ivec2(b.x, b.y + k * u_G), 0); if (e.z <= 0.0) continue; vec2 d = e.xy - vec2(c);
+    float pw = u_pr > 0.0 ? exp(-1.386294 * pow(length(d) / u_pr, 8.0)) : 1.0; acc += pw * e.z * Ib(vec2(c) + u_s + u_z * vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs)); if (u_rho > 0.0) accP += e.z * Pb(e.xy); }
+  acc += u_rho * u_iw * accP; float P = texelFetch(u_p, b, 0).x; o = vec4(P + u_rate * (acc / (acc + u_iw) - P), 0.0, 0.0, 1.0); }`), u = {}; for (const n of ['psi', 'p', 'tab', 's', 'r', 'z', 'rate', 'iw', 'pr', 'rho', 'G', 'K']) u[n] = gl.getUniformLocation(p, 'u_' + n); return (this._swPT = { p, u }); }
+  selfWriteStep(id, rate, Iw, pose, hut, pupil, rho) { const M = this._sw && this._sw.get(id); if (!M) return; const TB = hut && !Array.isArray(hut) && hut.tab && this._swTab ? this._swTab.get(hut.tab) : null;
+    if (TB) { const gl = this._gl, P = this._swShaderT(), q = pose || {}, psi = this._eyeSrc === 'A' ? this._eyeA : this._eyeB, pIn = M.cur === 'A' ? M.A : M.B, fOut = M.cur === 'A' ? M.fB : M.fA, pr = Number.isFinite(+pupil) && +pupil > 0 && +pupil < 1 ? +pupil * this._G / 2 : 0;
+      this._nlPass(P.p, fOut, [psi, pIn, TB.tex], () => { const u = P.u; gl.uniform1i(u.psi, 0); gl.uniform1i(u.p, 1); gl.uniform1i(u.tab, 2); gl.uniform2f(u.s, +q.sx || 0, +q.sy || 0); gl.uniform1f(u.r, +q.r || 0); gl.uniform1f(u.z, +q.z > 0 ? +q.z : 1); gl.uniform1f(u.rate, Math.max(0, Math.min(1, +rate || 0))); gl.uniform1f(u.iw, Math.max(1e-12, +Iw || 1)); gl.uniform1f(u.pr, pr); gl.uniform1f(u.rho, Math.max(0, Math.min(0.99, +rho || 0))); gl.uniform1i(u.G, this._G); gl.uniform1i(u.K, TB.K); });
+      M.cur = M.cur === 'A' ? 'B' : 'A'; M.dirty = true; return; }
+    const H = Array.isArray(hut) && hut.length ? hut.slice(0, 8) : null, gl = this._gl, P = H ? this._swShaders().writeH : this._swShaders().write; let q = pose || {};
+    let psi = this._eyeSrc === 'A' ? this._eyeA : this._eyeB; const pIn = M.cur === 'A' ? M.A : M.B, fOut = M.cur === 'A' ? M.fB : M.fA;
+    if (!H && q.nat && Array.isArray(q.nat.toBody)) { if (!this._swPT2) this._swPT2 = this._makePsiTex(); if (this.natChainTex(psi, q.nat.toBody, this._swPT2)) { psi = this._swPT2[0]; q = {}; } }   // (optional, 2026-11-04) the field carried into the body frame by the pose's OPTICS, then read at the cell itself
+    this._nlPass(P.p, fOut, [psi, pIn], () => { const u = P.u; gl.uniform1i(u.psi, 0); gl.uniform1i(u.p, 1); gl.uniform2f(u.s, +q.sx || 0, +q.sy || 0); gl.uniform1f(u.r, +q.r || 0); gl.uniform1f(u.z, +q.z > 0 ? +q.z : 1); gl.uniform1f(u.rate, Math.max(0, Math.min(1, +rate || 0))); gl.uniform1f(u.iw, Math.max(1e-12, +Iw || 1)); gl.uniform1i(u.G, this._G);
+      if (H) { const ai = new Float32Array(32), t = new Float32Array(16), w = new Float32Array(8); H.forEach((m, k) => { ai.set(m.ai, 4 * k); t[2 * k] = +m.tx || 0; t[2 * k + 1] = +m.ty || 0; w[k] = +m.w || 0; }); gl.uniform1i(u.K, H.length); gl.uniform4fv(u.ai, ai); gl.uniform2fv(u.t, t); gl.uniform1fv(u.w, w); gl.uniform1f(u.pr, +pupil > 0 && +pupil < 1 ? +pupil * this._G / 2 : 0); gl.uniform1f(u.rho, Math.max(0, Math.min(0.99, +rho || 0))); } });
     M.cur = M.cur === 'A' ? 'B' : 'A'; M.dirty = true; }
+  //   selfWriteStepNx(id, rate, Iw, pose, planKey, pupil, rho) (optional, 2026-11-04) — the ✍✿ write by the EXACT PULL: planKey a cavPlanSet plan of the
+  //   genome's maps (every group nx — the app's "nx" plan, body frame): each group's 2× grid of ψ (the eye's field) and of the written state B, then
+  //   E(b) = Σ_k z_k²·pupil·|ψ(posed w_k⁻¹ b)|² + rho·Iw·Σ_k z_k²·B(w_k⁻¹ b) and B ← B + rate·(E/(E + Iw) − B). Returns false (nothing done) without the plan.
+  selfWriteStepNx(id, rate, Iw, pose, planKey, pupil, rho) { const M = this._sw && this._sw.get(id), PL = this._cvPl && this._cvPl.get(planKey); if (!M || !PL) return false; const gl = this._gl, G = this._G, P = this._cvProgs(), q = pose || {};
+    if (!this._cvX) { const mk = () => this._makePsiTex(); const a = mk(), b = mk(), c = mk(), d = mk(), e = mk(); this._cvX = { ap: a, accA: b, accB: c, F: { A: d[0], fA: d[1], B: e[0], fB: e[1], src: 'A' } }; }
+    const X = this._cvX, F = X.F, cur = () => (F.src === 'A' ? F.A : F.B); if (!this._swNx) { const mk = () => this._makePsiTex(); this._swNx = { n: [mk(), mk(), mk(), mk()], kI: mk(), kP: mk(), aI: [mk(), mk()], aP: [mk(), mk()] }; } const W = this._swNx;
+    const psi = this._eyeSrc === 'A' ? this._eyeA : this._eyeB, pIn = M.cur === 'A' ? M.A : M.B, fOut = M.cur === 'A' ? M.fB : M.fA, spec = (src, dst) => { F.src = 'A'; this._nlPass(P.cp.p, F.fA, [src], () => gl.uniform1i(P.cp.u.a, 0)); this._fft2dS(F, false); this._nlPass(P.cp.p, dst[1], [cur()], () => gl.uniform1i(P.cp.u.a, 0)); };
+    spec(psi, W.kI); spec(pIn, W.kP); for (const a of [W.aI[0], W.aP[0]]) this._nlPass(P.zero.p, a[1], [], () => {}); let iI = 0, iP = 0; const pr = Number.isFinite(+pupil) && +pupil > 0 && +pupil < 1 ? +pupil * G / 2 : 0;
+    for (const g of PL.groups) { if (!g.nx) continue; for (const [mode, kk] of [[0, W.kI], [1, W.kP]]) { g.nx.sh.forEach((T, n) => { F.src = 'A'; this._nlPass(P.mul.p, F.fA, [kk[0], T], () => { gl.uniform1i(P.mul.u.x, 0); gl.uniform1i(P.mul.u.t, 1); }); this._fft2dS(F, true); this._nlPass(P.cp.p, W.n[n][1], [cur()], () => gl.uniform1i(P.cp.u.a, 0)); });
+      const A = mode ? W.aP : W.aI, ix = mode ? iP : iI, src = A[ix], dst = A[1 - ix];
+      this._nlPass(P.pnxW.p, dst[1], [W.n[0][0], W.n[1][0], W.n[2][0], W.n[3][0], PL.tex, src[0]], () => { const u = P.pnxW.u; gl.uniform1i(u.n0, 0); gl.uniform1i(u.n1, 1); gl.uniform1i(u.n2, 2); gl.uniform1i(u.n3, 3); gl.uniform1i(u.tab, 4); gl.uniform1i(u.acc, 5); gl.uniform1i(u.G, G); gl.uniform1i(u.k0, g.k0); gl.uniform1i(u.k1, g.k1); gl.uniform1i(u.mode, mode); gl.uniform1f(u.ka, g.nx.a); gl.uniform1f(u.kb, g.nx.b); gl.uniform1f(u.r, +q.r || 0); gl.uniform1f(u.z, +q.z > 0 ? +q.z : 1); gl.uniform1f(u.pr, pr); gl.uniform2f(u.s, +q.sx || 0, +q.sy || 0); });
+      if (mode) iP = 1 - iP; else iI = 1 - iI; if (!(+rho > 0)) break; } }
+    this._nlPass(P.swW.p, fOut, [pIn, W.aI[iI][0], W.aP[iP][0]], () => { const u = P.swW.u; gl.uniform1i(u.p, 0); gl.uniform1i(u.aI, 1); gl.uniform1i(u.aP, 2); gl.uniform1f(u.rate, Math.max(0, Math.min(1, +rate || 0))); gl.uniform1f(u.iw, Math.max(1e-12, +Iw || 1)); gl.uniform1f(u.rho, Math.max(0, Math.min(0.99, +rho || 0))); });
+    M.cur = M.cur === 'A' ? 'B' : 'A'; M.dirty = true; return true; }
   selfWriteReadPosed(id) { const M = this._sw && this._sw.get(id); if (!M) return null; const gl = this._gl, G = this._G, f = new Float32Array(2 * G * G); gl.bindFramebuffer(gl.FRAMEBUFFER, M.fS); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindFramebuffer(gl.FRAMEBUFFER, null); const P = new Float32Array(G * G); for (let i = 0; i < G * G; i++) P[i] = f[2 * i]; return P; }
   selfWriteRead(id) { const M = this._sw && this._sw.get(id); if (!M) return null; const gl = this._gl, G = this._G, f = new Float32Array(2 * G * G); gl.bindFramebuffer(gl.FRAMEBUFFER, M.cur === 'A' ? M.fA : M.fB); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindFramebuffer(gl.FRAMEBUFFER, null); const P = new Float32Array(G * G); for (let i = 0; i < G * G; i++) P[i] = f[2 * i]; return P; }
   selfWriteDrop(id) { const M = this._sw && this._sw.get(id); if (!M) return; const gl = this._gl; for (const t of [M.A, M.B, M.S]) if (t) gl.deleteTexture(t); for (const f of [M.fA, M.fB, M.fS]) if (f) gl.deleteFramebuffer(f); this._sw.delete(id); if (this._gdTex) this._gdTex.delete(id); }
