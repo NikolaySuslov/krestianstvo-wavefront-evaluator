@@ -1621,6 +1621,174 @@ uniform sampler2D u_v; out vec4 o; void main() { o = vec4(texelFetch(u_v, ivec2(
   _eyePass(prog, binds, uni) { const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA; this._nlPass(prog, fbo, [this._eyeSrc === 'A' ? this._eyeA : this._eyeB, ...binds], uni); this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; }
   viewCopy(srcId, dstId) { const gl = this._gl, s = this._slotEye[srcId]; if (!s) return false; const src = s.src === 'A' ? s.A : s.B, P = this._viewProgs(); this.selectEyeSlot(dstId);
     const fbo = this._eyeSrc === 'A' ? this._fboEyeB : this._fboEyeA; this._nlPass(P.c, fbo, [src], () => gl.uniform1i(P.uc, 0)); this._eyeSrc = this._eyeSrc === 'A' ? 'B' : 'A'; this.commitEyeSlot(dstId); return true; }
+  //   ⚛ THE CONDENSATE's PHASE SPACE ON THE GPU (2026-11-08 — INERT additions: only the ahc app's ⚛ condensate calls them). becGpuStep(srcId, o) at a
+  //   read's due beat: the slot's field copied to a scratch eye ('becS'), forward FFT → the k average (accK += a·(|ψ̂|²/N − accK): the time-of-flight
+  //   texture), the band |k| < kb, inverse FFT → ψ band-limited, the LAG products f(x, s) = h(s)·Σ_{y0..y1} ψ*(x−s, y)ψ(x+s, y) (Tukey lag window over
+  //   |s| < Q/2), the 64-term DFT over s → W(x, k) (row mm = (m + Q/2) mod Q), averaged into accW. Same arithmetic as the app's CPU pseudo-Wigner.
+  //   becGpuReadWStart(Q) — a fenced read of accW's G×Q region (RG; W in .x), finished by readEyePsiFinish. becGpuReset / becGpuSetW (a joiner's seed).
+  _becG(tag = 'acc') { this._becAll = this._becAll || {}; if (this._becAll[tag]) return this._becAll[tag]; const gl = this._gl, mk = () => { const [t, f] = this._makePsiTex(); return { t, f }; }, pp = () => ({ a: mk(), b: mk(), cur: 'a' }), ul = (p, ns) => Object.fromEntries(ns.map((n) => [n, gl.getUniformLocation(p, 'u_' + n)]));
+    if (!this._becPr) { const pk = this._compileStep(GLSL_BEC_KACC), pb = this._compileStep(GLSL_BEC_BAND), pl = this._compileStep(GLSL_BEC_LAG), pw = this._compileStep(GLSL_BEC_WDFT);
+      this._becPr = { pk, pb, pl, pw, uk: ul(pk, ['x', 'acc', 'a', 'n']), ub: ul(pb, ['x', 'G', 'kb']), ul: ul(pl, ['x', 'G', 'Q', 'y0', 'y1']), uw: ul(pw, ['f', 'acc', 'Q', 'a']) }; }
+    const S = { K: pp(), W: pp(), L: mk(), scratch: tag === 'acc' ? 'becS' : 'becV', ...this._becPr }; if (tag === 'acc') this._becGS = S; return (this._becAll[tag] = S); }
+  becGpuReset() { const S = this._becG(), gl = this._gl, G = this._G, z = new Float32Array(2 * G * G); for (const P of [S.K, S.W]) for (const h of [P.a, P.b]) { gl.bindTexture(gl.TEXTURE_2D, h.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, z); } gl.bindTexture(gl.TEXTURE_2D, null); }
+  becGpuSetW(wg, Q) { const S = this._becG(), gl = this._gl, G = this._G, f = new Float32Array(2 * G * G); for (let x = 0; x < G; x++) for (let mm = 0; mm < Q; mm++) f[2 * (mm * G + x)] = +wg[x * Q + mm] || 0; gl.bindTexture(gl.TEXTURE_2D, S.W[S.W.cur].t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, G, G, gl.RG, gl.FLOAT, f); gl.bindTexture(gl.TEXTURE_2D, null); }
+  becGpuStep(srcId, o = {}) { return this._becPipe('acc', srcId, o); }
+  _becPipe(tag, srcId, { a = 1, kb = 0, y0 = 0, y1 = 0, Q = 0 } = {}) { if (!this._slotEye[srcId]) return false; const gl = this._gl, G = this._G, S = this._becG(tag), cur = () => (this._eyeSrc === 'A' ? this._eyeA : this._eyeB);
+    this.viewCopy(srcId, S.scratch); this.fftEye(false);
+    { const P = S.K, i = P[P.cur], o = P[P.cur === 'a' ? 'b' : 'a']; this._nlPass(S.pk, o.f, [cur(), i.t], () => { gl.uniform1i(S.uk.x, 0); gl.uniform1i(S.uk.acc, 1); gl.uniform1f(S.uk.a, a); gl.uniform1f(S.uk.n, 1 / (G * G)); }); P.cur = P.cur === 'a' ? 'b' : 'a'; }
+    this._eyePass(S.pb, [], () => { gl.uniform1i(S.ub.x, 0); gl.uniform1i(S.ub.G, G); gl.uniform1i(S.ub.kb, kb | 0); }); this.fftEye(true);
+    this._nlPass(S.pl, S.L.f, [cur()], () => { gl.uniform1i(S.ul.x, 0); gl.uniform1i(S.ul.G, G); gl.uniform1i(S.ul.Q, Q | 0); gl.uniform1i(S.ul.y0, y0 | 0); gl.uniform1i(S.ul.y1, y1 | 0); });
+    { const P = S.W, i = P[P.cur], o = P[P.cur === 'a' ? 'b' : 'a']; this._nlPass(S.pw, o.f, [S.L.t, i.t], () => { gl.uniform1i(S.uw.f, 0); gl.uniform1i(S.uw.acc, 1); gl.uniform1i(S.uw.Q, Q | 0); gl.uniform1f(S.uw.a, a); }); P.cur = P.cur === 'a' ? 'b' : 'a'; }
+    this.commitEyeSlot(S.scratch); this.selectEyeSlot(null); return true; }
+  //   ⚛ THE SPACE VIEWS (2026-11-08, inert — the app's "space" button): spaceRender(srcId, 'k' | 'phase', { acc }) draws into the default framebuffer (the canvas
+  //   the field is rendered to): k — |ψ̂(k)|² (log, k 0 at the centre), or the condensate's replicated k AVERAGE (acc); phase — W(x, k_x) (x across, k_x up,
+  //   orange > 0, blue < 0), the condensate's replicated W average (acc) or the field's own W summed over all rows. Normalised by a GPU max (2 reductions,
+  //   sampled by the render — nothing read back).
+  spaceRender(srcId, space, { acc = false } = {}) { const gl = this._gl, G = this._G, Q = G >> 1, cur = () => (this._eyeSrc === 'A' ? this._eyeA : this._eyeB); let tex, mode;
+    if (acc && this._becGS) { const S = this._becGS; if (space === 'k') { tex = S.K[S.K.cur].t; mode = 2; } else { tex = S.W[S.W.cur].t; mode = 1; } }
+    else if (space === 'k') { if (!this._slotEye[srcId]) return false; this.viewCopy(srcId, 'spk'); this.fftEye(false); tex = cur(); this.commitEyeSlot('spk'); this.selectEyeSlot(null); mode = 0; }
+    else if (space === 'amb') { if (!this._becPipe('view', srcId, { a: 1, kb: G >> 2, y0: 0, y1: G - 1, Q })) return false; const S = this._becAll.view;   /* the AMBIGUITY function A(τ, ν) = Σ_x f(x, s)·e^{iνx} — W's Fourier transform: the lag products transformed along x */
+      if (!this._ambT) { this._ambT = this._rgbaTex(G, G); this._ambP = this._compileStep(GLSL_AMB); this._ambU = Object.fromEntries(['f', 'G', 'Q'].map((n) => [n, gl.getUniformLocation(this._ambP, 'u_' + n)])); }
+      this._drawTo(this._ambP, this._ambT.f, G, G, [S.L.t], () => { gl.uniform1i(this._ambU.f, 0); gl.uniform1i(this._ambU.G, G); gl.uniform1i(this._ambU.Q, Q); }); tex = this._ambT.t; mode = 3; }
+    else { if (!this._becPipe('view', srcId, { a: 1, kb: G >> 2, y0: 0, y1: G - 1, Q })) return false; const S = this._becAll.view; tex = S.W[S.W.cur].t; mode = 1; }
+    if (!this._spR) { const p = this._compileStep(GLSL_SPACE_MAXROW), c = this._compileStep(GLSL_SPACE_MAXCOL), r = this._compileStep(GLSL_SPACE_RENDER), ul = (q, ns) => Object.fromEntries(ns.map((n) => [n, gl.getUniformLocation(q, 'u_' + n)]));
+      const mkR = (w) => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, w, 1); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { t, f }; };
+      this._spR = { p, c, r, up: ul(p, ['t', 'G', 'mode']), uc: ul(c, ['t', 'G']), ur: ul(r, ['t', 'mx', 'G', 'Q', 'mode']), row: mkR(G), one: mkR(1) }; }
+    const R = this._spR, draw = (prog, fbo, w, h, texs, uni) => { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.useProgram(prog); uni(); texs.forEach((t, k) => { gl.activeTexture(gl.TEXTURE0 + k); gl.bindTexture(gl.TEXTURE_2D, t); }); gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); gl.activeTexture(gl.TEXTURE0); };
+    draw(R.p, R.row.f, G, 1, [tex], () => { gl.uniform1i(R.up.t, 0); gl.uniform1i(R.up.G, G); gl.uniform1i(R.up.mode, mode); });
+    draw(R.c, R.one.f, 1, 1, [R.row.t], () => { gl.uniform1i(R.uc.t, 0); gl.uniform1i(R.uc.G, G); });
+    draw(R.r, null, G, G, [tex, R.one.t], () => { gl.uniform1i(R.ur.t, 0); gl.uniform1i(R.ur.mx, 1); gl.uniform1i(R.ur.G, G); gl.uniform1i(R.ur.Q, Q); gl.uniform1i(R.ur.mode, mode); });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); return true; }
+  becGpuReadWStart(Q) { const gl = this._gl, G = this._G, S = this._becG(), n = G * Q * 2, pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, S.W[S.W.cur].f); gl.readPixels(0, 0, G, Q, gl.RG, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush(); return { pbo, fence, n }; }
+  //   ⚛ THE MEDIUM's TIME SERIES AT ONE CELL (2026-11-08, inert — the app's t-f view): tfSample(x, y, beat) copies the SELECTED eye's ψ(x, y) into a ring
+  //   texture (L × 1, RG) at column beat mod L — called inside the stepping at each beat boundary, so the series is taken at the beats themselves (the same on
+  //   every peer). tfReadStart → a fenced read of the ring (finish with readEyePsiFinish); tfReset clears it.
+  _tfRing(L) { if (this._tfR && this._tfR.L === L) return this._tfR; const gl = this._gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, L, 1); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const p = this._tfR?.p || this._compileStep(GLSL_TF_SAMPLE), pr = this._tfR?.pr || this._compileStep(GLSL_TF_ROWSUM), row = this._tfR?.row || this._rgbaTex(this._G, 1); return (this._tfR = { L, t, f, p, pr, row, ux: gl.getUniformLocation(p, 'u_x'), up: gl.getUniformLocation(p, 'u_p'), um: gl.getUniformLocation(p, 'u_mode'), urw: gl.getUniformLocation(p, 'u_row'), uG: gl.getUniformLocation(p, 'u_G'), urx: gl.getUniformLocation(pr, 'u_x'), urG: gl.getUniformLocation(pr, 'u_G') }); }
+  //   (+ mode, 2026-11-09 — user: "a different signal": 0 the cell, 1 the 5 × 5 average about it, 2 the WHOLE field's k = 0 mode Σψ/N (a column-sum pass, then the sum))
+  tfSample(x, y, beat, L = 512, mode = 0) { const gl = this._gl, R = this._tfRing(L), G = this._G, src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB;
+    if (mode === 2) this._drawTo(R.pr, R.row.f, G, 1, [src], () => { gl.uniform1i(R.urx, 0); gl.uniform1i(R.urG, G); });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, R.f); gl.viewport(((beat % L) + L) % L, 0, 1, 1); gl.useProgram(R.p); gl.uniform1i(R.ux, 0); gl.uniform1i(R.urw, 1); gl.uniform2i(R.up, x | 0, y | 0); gl.uniform1i(R.um, mode | 0); gl.uniform1i(R.uG, G);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, R.row.t); gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); gl.activeTexture(gl.TEXTURE0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); }
+  tfReset(L = 512) { const gl = this._gl, R = this._tfRing(L); gl.bindTexture(gl.TEXTURE_2D, R.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, L, 1, gl.RG, gl.FLOAT, new Float32Array(2 * L)); gl.bindTexture(gl.TEXTURE_2D, null); }
+  tfReadStart(L = 512) { const gl = this._gl, R = this._tfRing(L), n = 2 * L, pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ); gl.bindFramebuffer(gl.FRAMEBUFFER, R.f); gl.readPixels(0, 0, L, 1, gl.RG, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush(); return { pbo, fence, n }; }
+  //   ◌ THE VORTEX OVERLAY (2026-11-08, inert — the app's ◌ button): the slot's field copied, band-limited to |k| < kb (the grid's noise off), and every plaquette's
+  //   phase WINDING drawn OVER the canvas (blended: + red, − cyan, one cell), at the display's pose offset (the field render samples x − off); a plaquette
+  //   counts only where its four corners hold density ≥ nmin. The counts by two reductions, read asynchronously: returns the last finished [n+, n−].
+  //   Optional (inert at 0): kenv > 0 — a smooth ENVELOPE, the field band-limited to |k| < kenv (the cores filled in); a plaquette where the envelope's density is
+  //   below nfl is a halo GHOST — drawn dim, not counted (the counts are then the FLUID's).
+  vortexRender(srcId, { ox = 0, oy = 0, nmin = 0, kb = 0, kenv = 0, nfl = 0 } = {}) { if (!this._slotEye[srcId]) return null; const gl = this._gl, G = this._G, S = this._becG('view'), cur = () => (this._eyeSrc === 'A' ? this._eyeA : this._eyeB);
+    this.viewCopy(srcId, 'vtxS'); this.fftEye(false); this._eyePass(S.pb, [], () => { gl.uniform1i(S.ub.x, 0); gl.uniform1i(S.ub.G, G); gl.uniform1i(S.ub.kb, (kb | 0) || (G >> 2)); }); this.fftEye(true); const src = cur(); this.commitEyeSlot('vtxS'); this.selectEyeSlot(null);
+    let env = src; if (kenv > 0) { this.viewCopy(srcId, 'vtxE'); this.fftEye(false); this._eyePass(S.pb, [], () => { gl.uniform1i(S.ub.x, 0); gl.uniform1i(S.ub.G, G); gl.uniform1i(S.ub.kb, kenv | 0); }); this.fftEye(true); env = cur(); this.commitEyeSlot('vtxE'); this.selectEyeSlot(null); }
+    if (!this._vtx) { const ul = (q, ns) => Object.fromEntries(ns.map((n) => [n, gl.getUniformLocation(q, 'u_' + n)])), po = this._compileStep(GLSL_VTX_OVL), pc = this._compileStep(GLSL_VTX_COL), ps = this._compileStep(GLSL_VTX_SUM);
+      const mk = (w) => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, w, 1); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { t, f }; };
+      this._vtx = { po, pc, ps, uo: ul(po, ['x', 'G', 'off', 'nmin', 'e', 'nfl']), uc: ul(pc, ['x', 'G', 'nmin', 'e', 'nfl']), us: ul(ps, ['t', 'G']), row: mk(G), one: mk(1), rd: null, n: null }; }
+    const V = this._vtx, draw = (prog, fbo, w, h, texs, uni) => { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.useProgram(prog); uni(); texs.forEach((t, k) => { gl.activeTexture(gl.TEXTURE0 + k); gl.bindTexture(gl.TEXTURE_2D, t); }); gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); gl.activeTexture(gl.TEXTURE0); };
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); draw(V.po, null, G, G, [src, env], () => { gl.uniform1i(V.uo.x, 0); gl.uniform1i(V.uo.e, 1); gl.uniform1i(V.uo.G, G); gl.uniform2f(V.uo.off, +ox || 0, +oy || 0); gl.uniform1f(V.uo.nmin, +nmin || 0); gl.uniform1f(V.uo.nfl, kenv > 0 ? +nfl || 0 : 0); }); gl.disable(gl.BLEND);
+    if (V.rd) { let ok = false; try { ok = gl.getSyncParameter(V.rd.fence, gl.SYNC_STATUS) === gl.SIGNALED; } catch (e) { ok = true; } if (ok) { const f = new Float32Array(2); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, V.rd.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, f); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.deleteBuffer(V.rd.pbo); gl.deleteSync(V.rd.fence); V.rd = null; V.n = [Math.round(f[0]), Math.round(f[1])]; } }
+    if (!V.rd) { draw(V.pc, V.row.f, G, 1, [src, env], () => { gl.uniform1i(V.uc.x, 0); gl.uniform1i(V.uc.e, 1); gl.uniform1i(V.uc.G, G); gl.uniform1f(V.uc.nmin, +nmin || 0); gl.uniform1f(V.uc.nfl, kenv > 0 ? +nfl || 0 : 0); }); draw(V.ps, V.one.f, 1, 1, [V.row.t], () => { gl.uniform1i(V.us.t, 0); gl.uniform1i(V.us.G, G); });
+      const pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, 8, gl.STREAM_READ); gl.bindFramebuffer(gl.FRAMEBUFFER, V.one.f); gl.readPixels(0, 0, 1, 1, gl.RG, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); V.rd = { pbo, fence: gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) }; gl.flush(); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); return V.n; }
+  //   ⚛ THE HUSIMI PATCHES (2026-11-08, inert — the app's T(x, y) view): husimiSample(a) — on the SELECTED eye (called inside the stepping at a beat boundary):
+  //   the field cut into (G/P)² patches of P × P cells (P 16), each × a Gaussian window (σ P/4, centred), its P × P DFT → |·|² — the local momentum
+  //   distribution (the Husimi function: the Wigner smoothed, never negative) — averaged into an accumulator (EMA weight a). Texel (px·P + kx, py·P + ky) = patch
+  //   (px, py), local k (kx, ky). husimiReadStart → a fenced read (RG; .x), finished by readEyePsiFinish; husimiReset clears it.
+  //   (+ the STRIDE st, 2026-11-09 — user: "a finer temperature map": a P-window centred every st cells, OVERLAPPING — (G/st)² patches, the accumulator (G/st·P)²;
+  //   st = P: the old tiling)
+  _husG(P = 16, st = 16) { const A = (this._G / st) * P; if (this._husS && this._husS.A === A && this._husS.st === st) return this._husS; const gl = this._gl, mk = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, A, A); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { t, f }; }, p = this._husS?.p || this._compileStep(GLSL_HUSIMI);
+    return (this._husS = { A, st, P, a: mk(), b: mk(), cur: 'a', p, u: Object.fromEntries(['x', 'acc', 'a', 'P', 'st', 'G'].map((n) => [n, gl.getUniformLocation(p, 'u_' + n)])) }); }
+  husimiSample(a = 1, P = 16, st = 16) { const gl = this._gl, S = this._husG(P, st), src = this._eyeSrc === 'A' ? this._eyeA : this._eyeB, i = S[S.cur], o = S[S.cur === 'a' ? 'b' : 'a'];
+    this._drawTo(S.p, o.f, S.A, S.A, [src, i.t], () => { gl.uniform1i(S.u.x, 0); gl.uniform1i(S.u.acc, 1); gl.uniform1f(S.u.a, a); gl.uniform1i(S.u.P, P); gl.uniform1i(S.u.st, st); gl.uniform1i(S.u.G, this._G); }); S.cur = S.cur === 'a' ? 'b' : 'a'; }
+  husimiReset(P = 16, st = 16) { const S = this._husG(P, st), gl = this._gl, z = new Float32Array(2 * S.A * S.A); for (const h of [S.a, S.b]) { gl.bindTexture(gl.TEXTURE_2D, h.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, S.A, S.A, gl.RG, gl.FLOAT, z); } gl.bindTexture(gl.TEXTURE_2D, null); }
+  husimiReadStart() { const gl = this._gl, G = this._G, S = this._husG(), n = G * G * 2, pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ); gl.bindFramebuffer(gl.FRAMEBUFFER, S[S.cur].f); gl.readPixels(0, 0, G, G, gl.RG, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush(); return { pbo, fence, n }; }
+  //   ⚛ LIVE ANALYSES (2026-11-08, inert — the app's t-f and T(x, y) views, user: "lively like spectral"): rendered every frame from GPU textures, nothing
+  //   read back but a few label numbers (async). _rgbaTex(w, h) — a small RGBA32F target. tfRender — the Wigner–Ville of the ring (beats b0 … b1): the carrier
+  //   f_c (1 × 1: arg Σ z(b+1)·z*(b)), W into G × G (time across, f = f_c ± F up, Hann over ±Mh), the max, the colour + the first-moment line to the canvas;
+  //   tfStatsStart → [f_c, the latest column's moment] (fenced). husimiEps(f) — the ε table (P × P RG: ε, use) for the fit; husimiRender — the per-patch
+  //   Rayleigh–Jeans fit (binned: T, r, density) into NP × NP, then the map blended over the canvas at the pose offset; husimiStatsStart → the NP × NP fit (fenced).
+  _rgbaTex(w, h) { const gl = this._gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, h); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { t, f, w, h }; }
+  _drawTo(prog, fbo, w, h, texs, uni, blend = false) { const gl = this._gl; gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.useProgram(prog); uni(); texs.forEach((t, k) => { gl.activeTexture(gl.TEXTURE0 + k); gl.bindTexture(gl.TEXTURE_2D, t); });
+    if (blend) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); } gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); if (blend) gl.disable(gl.BLEND); gl.activeTexture(gl.TEXTURE0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); }
+  _readSmall(fbo, w, h) { const gl = this._gl, n = 4 * w * h, pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush(); return { pbo, fence, n }; }
+  tfRender({ b0 = 0, b1 = 0, Mh = 48, F = 0.25, L = 512, Lt = 0, refs = [] } = {}) { const gl = this._gl, G = this._G, R = this._tfRing(L); if (b1 - b0 < 2 * Mh + 2 * (Lt | 0) + 4) return false;
+    if (!this._tfV) { const ul = (q, ns) => Object.fromEntries(ns.map((n) => [n, gl.getUniformLocation(q, 'u_' + n)])), pf = this._compileStep(GLSL_TF_FC), pw = this._compileStep(GLSL_TF_WVD), pr = this._compileStep(GLSL_TF_RENDER), ps = this._compileStep(GLSL_TF_STATS);
+      this._tfV = { pf, pw, pr, ps, uf: ul(pf, ['r', 'L', 'b0', 'b1']), uw: ul(pw, ['r', 'fc', 'L', 'b0', 'b1', 'Mh', 'F', 'G', 'Lt']), ur: ul(pr, ['w', 'mx', 'G', 'fc', 'F', 'nref', 'ref']), us: ul(ps, ['w', 'fc', 'G', 'F']), fc: this._rgbaTex(1, 1), W: this._rgbaTex(G, G), st: this._rgbaTex(1, 1), mxRow: this._rgbaTex(G, 1), mx: this._rgbaTex(1, 1), rd: null, stats: null };
+      this._tfV.pmr = this._compileStep(GLSL_SPACE_MAXROW); this._tfV.pmc = this._compileStep(GLSL_SPACE_MAXCOL); this._tfV.umr = ul(this._tfV.pmr, ['t', 'G', 'mode']); this._tfV.umc = ul(this._tfV.pmc, ['t', 'G']); }
+    const V = this._tfV;
+    this._drawTo(V.pf, V.fc.f, 1, 1, [R.t], () => { gl.uniform1i(V.uf.r, 0); gl.uniform1i(V.uf.L, L); gl.uniform1i(V.uf.b0, b0); gl.uniform1i(V.uf.b1, b1); });
+    this._drawTo(V.pw, V.W.f, G, G, [R.t, V.fc.t], () => { gl.uniform1i(V.uw.r, 0); gl.uniform1i(V.uw.fc, 1); gl.uniform1i(V.uw.L, L); gl.uniform1i(V.uw.b0, b0); gl.uniform1i(V.uw.b1, b1); gl.uniform1i(V.uw.Mh, Mh); gl.uniform1f(V.uw.F, F); gl.uniform1i(V.uw.G, G); gl.uniform1i(V.uw.Lt, Lt | 0); });
+    this._drawTo(V.pmr, V.mxRow.f, G, 1, [V.W.t], () => { gl.uniform1i(V.umr.t, 0); gl.uniform1i(V.umr.G, G); gl.uniform1i(V.umr.mode, 1); });
+    this._drawTo(V.pmc, V.mx.f, 1, 1, [V.mxRow.t], () => { gl.uniform1i(V.umc.t, 0); gl.uniform1i(V.umc.G, G); });
+    const rf = new Float32Array(8); const nr = Math.min(8, refs.length); for (let k = 0; k < nr; k++) rf[k] = +refs[k] || 0;
+    this._drawTo(V.pr, null, G, G, [V.W.t, V.mx.t, V.fc.t], () => { gl.uniform1i(V.ur.w, 0); gl.uniform1i(V.ur.mx, 1); gl.uniform1i(V.ur.G, G); gl.uniform1i(V.ur.fc, 2); gl.uniform1f(V.ur.F, F); gl.uniform1i(V.ur.nref, nr); gl.uniform1fv(V.ur.ref, rf); });
+    if (V.rd) { let ok = false; try { ok = gl.getSyncParameter(V.rd.fence, gl.SYNC_STATUS) === gl.SIGNALED; } catch (e) { ok = true; } if (ok) { const f = new Float32Array(4); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, V.rd.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, f); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.deleteBuffer(V.rd.pbo); gl.deleteSync(V.rd.fence); V.rd = null; V.stats = { fc: f[0], fNow: f[1] }; } }
+    if (!V.rd && (!V.at || performance.now() - V.at > 400)) { V.at = performance.now(); this._drawTo(V.ps, V.st.f, 1, 1, [V.W.t, V.fc.t], () => { gl.uniform1i(V.us.w, 0); gl.uniform1i(V.us.fc, 1); gl.uniform1i(V.us.G, G); gl.uniform1f(V.us.F, F); }); V.rd = this._readSmall(V.st.f, 1, 1); }
+    return V.stats || {}; }
+  husimiEps(f, P = 16) { const gl = this._gl; if (!this._husE || this._husE.P !== P) { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, P, P); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); this._husE = { t, P }; }
+    gl.bindTexture(gl.TEXTURE_2D, this._husE.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, P, P, gl.RG, gl.FLOAT, f instanceof Float32Array ? f : Float32Array.from(f)); gl.bindTexture(gl.TEXTURE_2D, null); }
+  husimiRender({ ox = 0, oy = 0, P = 16, e0 = 0, e1 = 1, sw2 = 1, ref = 0 } = {}) { const gl = this._gl, G = this._G, S = this._husS; if (!S || !this._husE) return false; const NP = G / S.st;
+    if (!this._husV || this._husV.NP !== NP) { const ul = (q, ns) => Object.fromEntries(ns.map((n) => [n, gl.getUniformLocation(q, 'u_' + n)])), pf = this._husV?.pf || this._compileStep(GLSL_HUS_FIT), pr = this._husV?.pr || this._compileStep(GLSL_HUS_RENDER); this._husV = { NP, pf, pr, uf: ul(pf, ['h', 'eps', 'P', 'e0', 'e1', 'sw2']), ur: ul(pr, ['fit', 'NP', 'P', 'off', 'ref', 'G']), fit: this._rgbaTex(NP, NP), rd: null, stats: null }; }
+    const V = this._husV;
+    this._drawTo(V.pf, V.fit.f, NP, NP, [S[S.cur].t, this._husE.t], () => { gl.uniform1i(V.uf.h, 0); gl.uniform1i(V.uf.eps, 1); gl.uniform1i(V.uf.P, P); gl.uniform1f(V.uf.e0, e0); gl.uniform1f(V.uf.e1, e1); gl.uniform1f(V.uf.sw2, sw2); });
+    this._drawTo(V.pr, null, G, G, [V.fit.t], () => { gl.uniform1i(V.ur.fit, 0); gl.uniform1i(V.ur.NP, NP); gl.uniform1i(V.ur.P, S.st); gl.uniform2f(V.ur.off, ox, oy); gl.uniform1f(V.ur.ref, ref); gl.uniform1i(V.ur.G, G); }, true);
+    if (V.rd) { let ok = false; try { ok = gl.getSyncParameter(V.rd.fence, gl.SYNC_STATUS) === gl.SIGNALED; } catch (e) { ok = true; } if (ok) { const f = new Float32Array(V.rd.n); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, V.rd.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, f); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.deleteBuffer(V.rd.pbo); gl.deleteSync(V.rd.fence); V.rd = null; V.stats = f; } }
+    if (!V.rd && (!V.at || performance.now() - V.at > 700)) { V.at = performance.now(); V.rd = this._readSmall(V.fit.f, NP, NP); }
+    return V.stats; }
+  //   ⚛ THE STIRRER (2026-11-09, inert — the app's ⚛ ⑧): applyEyeStir(phi, cx, cy, w) on the SELECTED eye: ψ ← ψ·e^{−i·phi·exp(−d²/w²)}, d the torus distance to
+  //   (cx, cy) — a repulsive Gaussian obstacle for one sub-step (phi = V·dt); the app moves (cx, cy) on a circle per sub-step, by the beat.
+  applyEyeStir(phi, cx, cy, w) { const gl = this._gl; if (!this._stirP) { this._stirP = this._compileStep(GLSL_STIR); this._stirU = Object.fromEntries(['x', 'G', 'c', 'w', 'phi'].map((n) => [n, gl.getUniformLocation(this._stirP, 'u_' + n)])); } const U = this._stirU;
+    this._eyePass(this._stirP, [], () => { gl.uniform1i(U.x, 0); gl.uniform1i(U.G, this._G); gl.uniform2f(U.c, cx, cy); gl.uniform1f(U.w, w); gl.uniform1f(U.phi, phi); }); }
+  //   applyEyeLz(a, cx, cy) — ψ ← ψ + a·L_z ψ, L_z = −i(X∂_Y − Y∂_X) about (cx, cy) (central differences, wrapped): one Euler step of the ROTATING-FRAME
+  //   term in an imaginary-time (damping) step — e^{a·L_z} to first order, a = γd·dt·Ω small (inert unless called); R > 0: only within r < R (tapered over 6 cells)
+  applyEyeLz(a, cx, cy, R = 0) { if (!a) return; const gl = this._gl; if (!this._lzP) { this._lzP = this._compileStep(GLSL_LZ); this._lzU = Object.fromEntries(['x', 'G', 'c', 'a', 'R'].map((n) => [n, gl.getUniformLocation(this._lzP, 'u_' + n)])); } const U = this._lzU;
+    this._eyePass(this._lzP, [], () => { gl.uniform1i(U.x, 0); gl.uniform1i(U.G, this._G); gl.uniform2f(U.c, cx, cy); gl.uniform1f(U.a, a); gl.uniform1f(U.R, +R || 0); }); }
+  //   applyEyeEos(lut, L, Imax, s, amp) — a declared EQUATION OF STATE f(I), I = |ψ|², tabulated (L entries over [0, Imax], packed row-major in a G×G R32F
+  //   texture from makePhaseTex; linear between entries, clamped past Imax): ψ ← ψ·e^{i·s·f(I)} (the unitary step), or with amp ψ ← ψ·e^{s·f(I)} (a damping
+  //   step in imaginary time) — inert unless called
+  applyEyeEos(lut, L, Imax, s, amp = false) { if (!lut || !s || !(L > 1) || !(Imax > 0)) return; const gl = this._gl; if (!this._eosP) { this._eosP = this._compileStep(GLSL_EOS); this._eosU = Object.fromEntries(['x', 'lut', 'G', 'L', 'Imax', 's', 'amp'].map((n) => [n, gl.getUniformLocation(this._eosP, 'u_' + n)])); } const U = this._eosU;
+    this._eyePass(this._eosP, [lut], () => { gl.uniform1i(U.x, 0); gl.uniform1i(U.lut, 1); gl.uniform1i(U.G, this._G); gl.uniform1i(U.L, L | 0); gl.uniform1f(U.Imax, Imax); gl.uniform1f(U.s, s); gl.uniform1i(U.amp, amp ? 1 : 0); }); }
+  //   ⚛F DENSE PROJECTIONS OVER THE LATTICE (2026-11-09 — the live BdG's M_c²·P products, measured 3.2 s of 15 on the CPU at 30 a spin; inert unless called):
+  //   linPhi(f32, M, P) — the orbitals Φ (M rows × P sites) as an R32F texture (re-uploaded on call); linProjStart(v, Mc, P) — D_ab = Σ_p Φ_ap Φ_bp v_p (Mc × Mc);
+  //   linBackStart(K1, K2, Mc, P) — (Σ_ab Φ_ap K1_ab Φ_bp, Σ_ab Φ_ap K2_ab Φ_bp) at every site p (two passes: W = K·Φ, then the column sums); each read fenced:
+  //   linReady(h), linFinish(h) → Float32Array (RG pairs). Returns null when P exceeds the texture limit (the caller stays on the CPU)
+  _linT(w, h, fmt) { const gl = this._gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return t; }
+  _linRT(key, w, h) { const L = (this._lin = this._lin || {}), o = L[key]; if (o && o.w === w && o.h === h) return o; const gl = this._gl; if (o) { gl.deleteTexture(o.t); gl.deleteFramebuffer(o.f); } const t = this._linT(w, h, gl.RG32F), f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return (L[key] = { t, f, w, h }); }
+  _linIn(key, f32, w, h, fmt, ch) { const gl = this._gl, L = (this._lin = this._lin || {}); let o = L[key]; if (!o || o.w !== w || o.h !== h) { if (o) gl.deleteTexture(o.t); o = L[key] = { t: this._linT(w, h, fmt), w, h }; } gl.bindTexture(gl.TEXTURE_2D, o.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, ch, gl.FLOAT, f32); gl.bindTexture(gl.TEXTURE_2D, null); return o; }
+  _linProg(key, src, names) { const L = (this._lin = this._lin || {}); if (!L["p" + key]) { const gl = this._gl, q = this._compileStep(src); L["p" + key] = { q, u: Object.fromEntries(names.map((n) => [n, gl.getUniformLocation(q, 'u_' + n)])) }; } return L["p" + key]; }
+  _linRun(pr, rt, texs, uni) { const gl = this._gl; gl.bindFramebuffer(gl.FRAMEBUFFER, rt.f); gl.viewport(0, 0, rt.w, rt.h); gl.useProgram(pr.q); uni(pr.u); texs.forEach((t, k) => { gl.activeTexture(gl.TEXTURE0 + k); gl.bindTexture(gl.TEXTURE_2D, t); }); gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); gl.activeTexture(gl.TEXTURE0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, this._G, this._G); }
+  _linRead(rt) { const gl = this._gl, n = rt.w * rt.h * 2, pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ); gl.bindFramebuffer(gl.FRAMEBUFFER, rt.f); gl.readPixels(0, 0, rt.w, rt.h, gl.RG, gl.FLOAT, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush(); return { pbo, fence, n }; }
+  linOk(P) { const gl = this._gl; return P > 0 && P <= gl.getParameter(gl.MAX_TEXTURE_SIZE); }
+  linPhi(f32, M, P) { if (!this.linOk(P)) return false; const gl = this._gl, rt = this._linRT("phi", P, M), d = new Float32Array(2 * M * P); for (let i = 0; i < M * P; i++) d[2 * i] = f32[i]; gl.bindTexture(gl.TEXTURE_2D, rt.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, P, M, gl.RG, gl.FLOAT, d); gl.bindTexture(gl.TEXTURE_2D, null); return true; }
+  //   THE RELAXATION ON THE GPU too (2026-11-10; MEASURED at 30 a spin: its CPU Gram + rotation 1.0 s of 15, ~20 MB read back a sweep): the disc's sites (linSites: their
+  //   grid cells, and the grid's site index); linScatter(k) — orbitals 2k, 2k+1 of Φ into the SELECTED eye (re, im), zero off the disc; linGather(key, k) — the eye's
+  //   (re, im) back into rows 2k, 2k+1 of the matrix texture `key` (P × M); linGramStart(M, P) — (Σ G1_a G1_b, Σ G1_a G2_b) read back (M × M); linRotate(C, M, P) —
+  //   Φ ← Cᵀ·G1 written INTO Φ on the GPU, read back fenced (the CPU's copy). Inert unless called
+  linSites(pid, P) { const gl = this._gl, G = this._G, L = (this._lin = this._lin || {}), key = P + "|" + pid[0] + "|" + pid[P - 1]; if (L.sitesKey === key) return; const pt = new Float32Array(2 * P), iv = new Float32Array(G * G).fill(-1);
+    for (let p = 0; p < P; p++) { pt[2 * p] = pid[p] % G; pt[2 * p + 1] = Math.floor(pid[p] / G); iv[pid[p]] = p; } this._linIn("pidT", pt, P, 1, gl.RG32F, gl.RG); this._linIn("invT", iv, G, G, gl.R32F, gl.RED); L.sitesKey = key; }
+  linScatter(k, M) { const gl = this._gl, L = this._lin, pr = this._linProg("scat", GLSL_LIN_SCAT, ['phi', 'inv', 'k2', 'M']); this._eyePass(pr.q, [L.phi.t, L.invT.t], () => { gl.uniform1i(pr.u.phi, 1); gl.uniform1i(pr.u.inv, 2); gl.uniform1i(pr.u.k2, 2 * k); gl.uniform1i(pr.u.M, M); }); }
+  linGather(key, k, M, P) { const gl = this._gl, L = this._lin, rt = this._linRT(key, P, M), pr = this._linProg("gath", GLSL_LIN_GATH, ['e', 'pid', 'k2']), rows = Math.min(2, M - 2 * k), e = this._eyeSrc === 'A' ? this._eyeA : this._eyeB; if (rows <= 0) return;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, rt.f); gl.viewport(0, 2 * k, P, rows); gl.useProgram(pr.q); gl.uniform1i(pr.u.e, 0); gl.uniform1i(pr.u.pid, 1); gl.uniform1i(pr.u.k2, 2 * k); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, e); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, L.pidT.t);
+    gl.bindVertexArray(this._vao); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null); gl.activeTexture(gl.TEXTURE0); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, this._G, this._G); }
+  linGramStart(M, P) { const gl = this._gl, L = this._lin, rt = this._linRT("gram", M, M), pr = this._linProg("gram", GLSL_LIN_GRAM, ['a', 'b', 'P']); this._linRun(pr, rt, [L.G1.t, L.G2.t], (u) => { gl.uniform1i(u.a, 0); gl.uniform1i(u.b, 1); gl.uniform1i(u.P, P); }); return this._linRead(rt); }
+  linRotateStart(C, M, P) { const gl = this._gl, L = this._lin, ct = this._linIn("C", C instanceof Float32Array ? C : Float32Array.from(C), M, M, gl.R32F, gl.RED), rt = this._linRT("phi", P, M), pr = this._linProg("rot", GLSL_LIN_ROT, ['c', 'g', 'M']);
+    this._linRun(pr, rt, [ct.t, L.G1.t], (u) => { gl.uniform1i(u.c, 0); gl.uniform1i(u.g, 1); gl.uniform1i(u.M, M); }); return this._linRead(rt); }
+  linProjStart(v, Mc, P) { const gl = this._gl, L = this._lin; if (!L?.phi) return null; const vt = this._linIn("v", v, P, 1, gl.R32F, gl.RED), rt = this._linRT("D", Mc, Mc), pr = this._linProg("proj", GLSL_LIN_PROJ, ['phi', 'v', 'P']);
+    this._linRun(pr, rt, [L.phi.t, vt.t], (u) => { gl.uniform1i(u.phi, 0); gl.uniform1i(u.v, 1); gl.uniform1i(u.P, P); }); return this._linRead(rt); }
+  linBackStart(K1, K2, Mc, P) { const gl = this._gl, L = this._lin; if (!L?.phi) return null; const kk = new Float32Array(2 * Mc * Mc); for (let i = 0; i < Mc * Mc; i++) { kk[2 * i] = K1[i]; kk[2 * i + 1] = K2[i]; } const kt = this._linIn("K", kk, Mc, Mc, gl.RG32F, gl.RG);
+    const W = this._linRT("W", P, Mc), out = this._linRT("nk", P, 1), pw = this._linProg("w", GLSL_LIN_W, ['phi', 'k', 'Mc']), pd = this._linProg("d", GLSL_LIN_DIAG, ['phi', 'w', 'Mc']);
+    this._linRun(pw, W, [L.phi.t, kt.t], (u) => { gl.uniform1i(u.phi, 0); gl.uniform1i(u.k, 1); gl.uniform1i(u.Mc, Mc); });
+    this._linRun(pd, out, [L.phi.t, W.t], (u) => { gl.uniform1i(u.phi, 0); gl.uniform1i(u.w, 1); gl.uniform1i(u.Mc, Mc); }); return this._linRead(out); }
+  linReady(h) { const gl = this._gl; try { return gl.getSyncParameter(h.fence, gl.SYNC_STATUS) === gl.SIGNALED; } catch (e) { return true; } }
+  linFinish(h) { const gl = this._gl, f = new Float32Array(h.n); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, h.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, f); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.deleteBuffer(h.pbo); gl.deleteSync(h.fence); return f; }
+  //   ⚛F RUNG 2's LOCAL TERM (2026-11-10, inert unless called): makeLutTex(f32, w, h) — an R32F w × h table; applyEyeLut2(lut, idx, nr, nd, phiMax, s) — ψ ← ψ·e^{s·w(i(x), |ψ|)},
+  //   w bilinear in (i — the cell's row index from the G×G R32F `idx`, |ψ| over [0, φmax] across nd columns), the exponent clamped to ±30
+  makeLutTex(f32, w, h) { const gl = this._gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.FLOAT, f32); gl.bindTexture(gl.TEXTURE_2D, null); return t; }
+  applyEyeLut2(lut, idx, nr, nd, phiMax, s) { if (!lut || !idx || !s) return; const gl = this._gl; if (!this._l2P) { this._l2P = this._compileStep(GLSL_LUT2); this._l2U = Object.fromEntries(['x', 'l', 'i', 'nr', 'nd', 'pm', 's'].map((n) => [n, gl.getUniformLocation(this._l2P, 'u_' + n)])); } const U = this._l2U;
+    this._eyePass(this._l2P, [lut, idx], () => { gl.uniform1i(U.x, 0); gl.uniform1i(U.l, 1); gl.uniform1i(U.i, 2); gl.uniform1i(U.nr, nr | 0); gl.uniform1i(U.nd, nd | 0); gl.uniform1f(U.pm, +phiMax || 1); gl.uniform1f(U.s, +s || 0); }); }
+  becGpuTex() { const S = this._becGS; return S ? { k: S.K[S.K.cur].t, w: S.W[S.W.cur].t } : null; }   // (the k average and W)   // (the k average and W — for a view to render from)
   viewGate({ r2 = 0, bs = null, bsr2 = 0, hp = null, kcm = 0, kc2 = 0 } = {}) { const gl = this._gl, P = this._viewProgs(), U = P.ug, b = new Float32Array(16); const nb = bs ? Math.min(8, bs.length) : 0; for (let k = 0; k < nb; k++) { b[2 * k] = +bs[k][0]; b[2 * k + 1] = +bs[k][1]; }
     this._eyePass(P.g, [], () => { gl.uniform1i(U.x, 0); gl.uniform1i(U.G, this._G); gl.uniform1f(U.r2, +r2 || 0); gl.uniform1i(U.nb, nb); gl.uniform2fv(U.bs, b); gl.uniform1f(U.bsr2, +bsr2 || 0); gl.uniform3f(U.hp, hp ? +hp[0] : 0, hp ? +hp[1] : 0, hp ? 1 : 0); gl.uniform1i(U.kcm, kcm | 0); gl.uniform1f(U.kc2, +kc2 || 0); }); }
   //   viewTheta(w, r) — the θ key's two phase screens (G² Float32: the writer's, the reader's) for holoViewPass(…, th = true); viewMedGather(b2x, b2y, r2) on the active eye IN k
@@ -7776,6 +7944,188 @@ in vec2 v_uv; out vec4 fragColor;
 void main() { ivec2 c = ivec2(gl_FragCoord.xy); vec2 p = texelFetch(u_psi, c, 0).xy, q = texelFetch(u_prev, c, 0).xy; vec4 A = texelFetch(u_acc, c, 0);
   vec2 z = vec2(p.x * q.x + p.y * q.y, p.y * q.x - p.x * q.y); z = vec2(z.x * u_ref.x + z.y * u_ref.y, z.y * u_ref.x - z.x * u_ref.y);
   fragColor = mix(A, vec4(z, dot(p, p), u_dt), u_a); }`;
+//   ⚛ the condensate's phase-space passes (becGpuStep — inert unless called)
+const GLSL_BEC_KACC = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_acc; uniform float u_a, u_n; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec2 z = texelFetch(u_x, q, 0).xy; float p = texelFetch(u_acc, q, 0).x; o = vec4((1.0 - u_a) * p + u_a * dot(z, z) * u_n, 0.0, 0.0, 1.0); }`;
+const GLSL_BEC_BAND = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x; uniform int u_G, u_kb; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); int kx = q.x < u_G / 2 ? q.x : q.x - u_G, ky = q.y < u_G / 2 ? q.y : q.y - u_G; o = (abs(kx) < u_kb && abs(ky) < u_kb) ? vec4(texelFetch(u_x, q, 0).xy, 0.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0); }`;
+const GLSL_BEC_LAG = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x; uniform int u_G, u_Q, u_y0, u_y1; in vec2 v_uv; out vec4 o;
+float hw(int s) { float u = abs(float(s)) / float(u_Q / 2); if (u <= 0.75) return 1.0; if (u >= 1.0) return 0.0; float c = cos(1.5707963267948966 * (u - 0.75) / 0.25); return c * c; }
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); int x = q.x, j = q.y; o = vec4(0.0, 0.0, 0.0, 1.0); if (j >= u_Q) return; int s = j < u_Q / 2 ? j : j - u_Q; float h = hw(s); if (h == 0.0) return;
+  int xm = ((x - s) % u_G + u_G) % u_G, xp = ((x + s) % u_G + u_G) % u_G; vec2 acc = vec2(0.0);
+  for (int y = u_y0; y <= u_y1; y++) { int yy = (y % u_G + u_G) % u_G; vec2 a = texelFetch(u_x, ivec2(xm, yy), 0).xy, b = texelFetch(u_x, ivec2(xp, yy), 0).xy; acc += vec2(a.x * b.x + a.y * b.y, a.x * b.y - a.y * b.x); }
+  o = vec4(h * acc, 0.0, 1.0); }`;
+const GLSL_BEC_WDFT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_f, u_acc; uniform int u_Q; uniform float u_a; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); int x = q.x, mm = q.y; if (mm >= u_Q) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } int m = (mm + u_Q / 2) % u_Q; float re = 0.0;
+  for (int j = 0; j < u_Q; j++) { vec2 f = texelFetch(u_f, ivec2(x, j), 0).xy; float ang = -6.283185307179586 * float((j * m) % u_Q) / float(u_Q); re += f.x * cos(ang) - f.y * sin(ang); }
+  float p = texelFetch(u_acc, q, 0).x; o = vec4((1.0 - u_a) * p + u_a * re, 0.0, 0.0, 1.0); }`;
+//   ⚛ the space views (spaceRender — inert unless called): a column max per x, the max of those, the colour map
+const GLSL_HUSIMI = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_acc; uniform float u_a; uniform int u_P, u_st, u_G; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy), pc = q / u_P, kk = q - pc * u_P, x0 = pc * u_st + u_st / 2 - u_P / 2; float c = 0.5 * float(u_P - 1), s2 = 2.0 * pow(float(u_P) / 4.0, 2.0); vec2 acc = vec2(0.0);
+  for (int v = 0; v < u_P; v++) for (int u = 0; u < u_P; u++) { vec2 z = texelFetch(u_x, ((x0 + ivec2(u, v)) % u_G + u_G) % u_G, 0).xy; float w = exp(-((float(u) - c) * (float(u) - c) + (float(v) - c) * (float(v) - c)) / s2), th = -6.283185307179586 * float(kk.x * u + kk.y * v) / float(u_P);
+    acc += w * vec2(z.x * cos(th) - z.y * sin(th), z.x * sin(th) + z.y * cos(th)); }
+  float p = texelFetch(u_acc, q, 0).x; o = vec4((1.0 - u_a) * p + u_a * dot(acc, acc), 0.0, 0.0, 1.0); }`;
+//   ⚛ the live analyses: the t-f Wigner–Ville from the ring, the Husimi patch fit
+const GLSL_TF_RING = `vec2 ring(sampler2D r, int b, int L) { return texelFetch(r, ivec2(((b % L) + L) % L, 0), 0).xy; }`;
+const GLSL_TF_FC = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_r; uniform int u_L, u_b0, u_b1; in vec2 v_uv; out vec4 o;` + GLSL_TF_RING + `
+void main() { vec2 a = vec2(0.0); for (int b = u_b0; b < u_b1; b++) { vec2 p = ring(u_r, b + 1, u_L), q = ring(u_r, b, u_L); a += vec2(p.x * q.x + p.y * q.y, p.y * q.x - p.x * q.y); } o = vec4(atan(a.y, a.x), 0.0, 0.0, 1.0); }`;
+const GLSL_TF_WVD = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_r, u_fc; uniform int u_L, u_b0, u_b1, u_Mh, u_G, u_Lt; uniform float u_F; in vec2 v_uv; out vec4 o;` + GLSL_TF_RING + `
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); int span = u_b1 - u_b0 - 2 * u_Mh - 2 * u_Lt; int n0 = u_b0 + u_Mh + u_Lt + int(round(float(c.x) * float(max(span, 0)) / float(u_G - 1)));
+  float fc = texelFetch(u_fc, ivec2(0), 0).x, f = fc - u_F + 2.0 * u_F * (float(c.y) + 0.5) / float(u_G), a = 0.0;
+  for (int t = -u_Lt; t <= u_Lt; t++) { float g = u_Lt > 0 ? pow(cos(3.141592653589793 * float(t) / float(2 * u_Lt + 2)), 2.0) : 1.0; int n = n0 + t;   /* the SMOOTHED pseudo-Wigner–Ville: a time window g over ±Lt — the oscillating cross terms average out */
+    for (int m = -u_Mh; m <= u_Mh; m++) { vec2 zp = ring(u_r, n + m, u_L), zm = ring(u_r, n - m, u_L); float pr = zp.x * zm.x + zp.y * zm.y, pi = zp.y * zm.x - zp.x * zm.y, th = 2.0 * f * float(m), h = cos(3.141592653589793 * float(m) / float(2 * u_Mh + 2)); a += g * h * h * (pr * cos(th) + pi * sin(th)); } }
+  o = vec4(a, 0.0, 0.0, 1.0); }`;
+const GLSL_TF_RENDER = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_w, u_mx, u_fc; uniform int u_G, u_nref; uniform float u_F, u_ref[8]; in vec2 v_uv; out vec4 o;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); float m = max(texelFetch(u_mx, ivec2(0), 0).x, 1e-30), v = texelFetch(u_w, c, 0).x / m, a = sqrt(abs(v)); float sw = 0.0, sy = 0.0;
+  float fc = texelFetch(u_fc, ivec2(0), 0).x; for (int k = 0; k < 8; k++) { if (k >= u_nref) break; float d = u_ref[k] - fc; d -= 6.283185307179586 * floor(d / 6.283185307179586 + 0.5); float yr = (d + u_F) / (2.0 * u_F) * float(u_G) - 0.5; if (abs(float(c.y) - yr) < 0.6 && (c.x % 4) < 2) { o = vec4(0.35, 0.85, 1.0, 1.0); return; } }   /* the medium's own frequencies: dashed cyan */
+  for (int y = 0; y < u_G; y++) { float w = max(texelFetch(u_w, ivec2(c.x, y), 0).x, 0.0); sw += w; sy += w * float(y); } float ym = sw > 0.0 ? sy / sw : -10.0;
+  if (abs(float(c.y) - ym) < 0.7) { o = vec4(0.9, 0.93, 0.95, 1.0); return; }
+  o = v >= 0.0 ? vec4(min(1.0, 1.5 * a), clamp(1.5 * a - 0.4, 0.0, 1.0), 0.16 * a, 1.0) : vec4(0.12 * a, 0.63 * a, min(1.0, 1.6 * a), 1.0); }`;
+const GLSL_TF_STATS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_w, u_fc; uniform int u_G; uniform float u_F; in vec2 v_uv; out vec4 o;
+void main() { float fc = texelFetch(u_fc, ivec2(0), 0).x, sw = 0.0, sf = 0.0; for (int y = 0; y < u_G; y++) { float w = max(texelFetch(u_w, ivec2(u_G - 1, y), 0).x, 0.0), f = fc - u_F + 2.0 * u_F * (float(y) + 0.5) / float(u_G); sw += w; sf += w * f; } o = vec4(fc, sw > 0.0 ? sf / sw : fc, 0.0, 1.0); }`;
+const GLSL_HUS_FIT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_h, u_eps; uniform int u_P; uniform float u_e0, u_e1, u_sw2; in vec2 v_uv; out vec4 o;
+void main() { ivec2 pc = ivec2(gl_FragCoord.xy); float bn[10], be[10], bc[10]; for (int b = 0; b < 10; b++) { bn[b] = 0.0; be[b] = 0.0; bc[b] = 0.0; } float tot = 0.0;
+  for (int ky = 0; ky < u_P; ky++) for (int kx = 0; kx < u_P; kx++) { float h = texelFetch(u_h, pc * u_P + ivec2(kx, ky), 0).x / u_sw2; tot += h; vec2 e = texelFetch(u_eps, ivec2(kx, ky), 0).xy; if (e.y < 0.5) continue; int b = min(9, int(floor(10.0 * (e.x - u_e0) / (u_e1 - u_e0 + 1e-12)))); bn[b] += h; be[b] += e.x; bc[b] += 1.0; }
+  float n = 0.0, mx = 0.0, my = 0.0; for (int b = 0; b < 10; b++) if (bc[b] > 0.0 && bn[b] > 0.0) { n += 1.0; mx += be[b] / bc[b]; my += bc[b] / bn[b]; } if (n < 4.0) { o = vec4(-1.0, 0.0, tot, 1.0); return; } mx /= n; my /= n;
+  float sxx = 0.0, sxy = 0.0, syy = 0.0; for (int b = 0; b < 10; b++) if (bc[b] > 0.0 && bn[b] > 0.0) { float X = be[b] / bc[b] - mx, Y = bc[b] / bn[b] - my; sxx += X * X; sxy += X * Y; syy += Y * Y; }
+  float sl = sxy / max(sxx, 1e-30); o = vec4(sl > 0.0 ? 1.0 / sl : -1.0, sxy / sqrt(max(sxx * syy, 1e-30)), tot, 1.0); }`;
+const GLSL_HUS_RENDER = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_fit; uniform int u_NP, u_P, u_G; uniform vec2 u_off; uniform float u_ref; in vec2 v_uv; out vec4 o;
+void main() { float dmx = 0.0; for (int j = 0; j < u_NP * u_NP; j++) dmx = max(dmx, texelFetch(u_fit, ivec2(j % u_NP, j / u_NP), 0).z);
+  float ref = u_ref; if (ref <= 0.0) { float s = 0.0, c = 0.0; for (int j = 0; j < u_NP * u_NP; j++) { vec4 v = texelFetch(u_fit, ivec2(j % u_NP, j / u_NP), 0); if (v.z >= 0.05 * dmx && v.y >= 0.6 && v.x > 0.0) { s += v.x; c += 1.0; } } ref = c > 0.0 ? s / c : 1.0; }
+  vec2 qf = mod(gl_FragCoord.xy - u_off, float(u_G)), uf = (qf - 0.5 * float(u_P)) / float(u_P); ivec2 i0 = ivec2(floor(uf)); vec2 fr = uf - floor(uf);   /* bilinear over the patch centres (u_P = the stride) */
+  float sl = 0.0, sw = 0.0, sd = 0.0, sb = 0.0; for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) { ivec2 pi = ((i0 + ivec2(i, j)) % u_NP + u_NP) % u_NP; vec4 v = texelFetch(u_fit, pi, 0); float w = (i == 0 ? 1.0 - fr.x : fr.x) * (j == 0 ? 1.0 - fr.y : fr.y); sd += w * v.z;
+    if (v.z >= 0.05 * dmx && v.y >= 0.6 && v.x > 0.0) { sl += w * log2(v.x / ref); sw += w; } else sb += w; }
+  if (sd < 0.05 * dmx) { o = vec4(0.08, 0.094, 0.118, 0.55); return; } if (sw < 0.5 * (sw + sb)) { o = vec4(0.43, 0.46, 0.5, 0.6); return; }
+  float t = clamp((sl / sw) / 1.5, -1.0, 1.0), w = 1.0 - abs(t); o = t >= 0.0 ? vec4(1.0, (90.0 + 165.0 * w) / 255.0, (90.0 + 165.0 * w) / 255.0, 0.62) : vec4((90.0 + 165.0 * w) / 255.0, (150.0 + 105.0 * w) / 255.0, 1.0, 0.62); }`;
+const GLSL_STIR = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x; uniform int u_G; uniform vec2 u_c; uniform float u_w, u_phi; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec2 z = texelFetch(u_x, q, 0).xy, d = vec2(q) - u_c; d -= float(u_G) * floor(d / float(u_G) + 0.5); float a = -u_phi * exp(-dot(d, d) / (u_w * u_w)), c = cos(a), s = sin(a); o = vec4(z.x * c - z.y * s, z.x * s + z.y * c, 0.0, 1.0); }`;
+const GLSL_EOS = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_lut; uniform int u_G, u_L, u_amp; uniform float u_Imax, u_s; in vec2 v_uv; out vec4 o;
+float lut(int i) { return texelFetch(u_lut, ivec2(i % u_G, i / u_G), 0).x; }
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec2 z = texelFetch(u_x, q, 0).xy; float t = clamp(dot(z, z) / u_Imax, 0.0, 1.0) * float(u_L - 1); int i0 = min(int(floor(t)), u_L - 2); float w = t - float(i0), f = mix(lut(i0), lut(i0 + 1), w);
+  if (u_amp == 1) { o = vec4(z * exp(clamp(u_s * f, -30.0, 30.0)), 0.0, 1.0); } else { float a = u_s * f, c = cos(a), sn = sin(a); o = vec4(z.x * c - z.y * sn, z.x * sn + z.y * c, 0.0, 1.0); } }`;
+const GLSL_LIN_PROJ = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_phi, u_v; uniform int u_P; in vec2 v_uv; out vec4 o;
+void main() { int b = int(gl_FragCoord.x), a = int(gl_FragCoord.y); float s = 0.0; for (int p = 0; p < 16384; p++) { if (p >= u_P) break; s += texelFetch(u_phi, ivec2(p, a), 0).x * texelFetch(u_phi, ivec2(p, b), 0).x * texelFetch(u_v, ivec2(p, 0), 0).x; } o = vec4(s, 0.0, 0.0, 1.0); }`;
+const GLSL_LIN_W = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_phi, u_k; uniform int u_Mc; in vec2 v_uv; out vec4 o;
+void main() { int p = int(gl_FragCoord.x), a = int(gl_FragCoord.y); vec2 s = vec2(0.0); for (int b = 0; b < 4096; b++) { if (b >= u_Mc) break; s += texelFetch(u_k, ivec2(b, a), 0).xy * texelFetch(u_phi, ivec2(p, b), 0).x; } o = vec4(s, 0.0, 1.0); }`;
+const GLSL_LIN_DIAG = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_phi, u_w; uniform int u_Mc; in vec2 v_uv; out vec4 o;
+void main() { int p = int(gl_FragCoord.x); vec2 s = vec2(0.0); for (int a = 0; a < 4096; a++) { if (a >= u_Mc) break; s += texelFetch(u_phi, ivec2(p, a), 0).x * texelFetch(u_w, ivec2(p, a), 0).xy; } o = vec4(s, 0.0, 1.0); }`;
+const GLSL_LIN_SCAT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_phi, u_inv; uniform int u_k2, u_M; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); float fi = texelFetch(u_inv, q, 0).x; if (fi < 0.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } int p = int(fi + 0.5);
+  float a = texelFetch(u_phi, ivec2(p, u_k2), 0).x, b = u_k2 + 1 < u_M ? texelFetch(u_phi, ivec2(p, u_k2 + 1), 0).x : 0.0; o = vec4(a, b, 0.0, 1.0); }`;
+const GLSL_LIN_GATH = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_e, u_pid; uniform int u_k2; in vec2 v_uv; out vec4 o;
+void main() { int p = int(gl_FragCoord.x), r = int(gl_FragCoord.y); vec2 c = texelFetch(u_pid, ivec2(p, 0), 0).xy; vec2 z = texelFetch(u_e, ivec2(int(c.x + 0.5), int(c.y + 0.5)), 0).xy; o = vec4(r == u_k2 ? z.x : z.y, 0.0, 0.0, 1.0); }`;
+const GLSL_LIN_GRAM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_a, u_b; uniform int u_P; in vec2 v_uv; out vec4 o;
+void main() { int b = int(gl_FragCoord.x), a = int(gl_FragCoord.y); vec2 s = vec2(0.0); for (int p = 0; p < 16384; p++) { if (p >= u_P) break; float x = texelFetch(u_a, ivec2(p, a), 0).x; s += x * vec2(texelFetch(u_a, ivec2(p, b), 0).x, texelFetch(u_b, ivec2(p, b), 0).x); } o = vec4(s, 0.0, 1.0); }`;
+const GLSL_LIN_ROT = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_c, u_g; uniform int u_M; in vec2 v_uv; out vec4 o;
+void main() { int p = int(gl_FragCoord.x), k = int(gl_FragCoord.y); float s = 0.0; for (int i = 0; i < 4096; i++) { if (i >= u_M) break; s += texelFetch(u_c, ivec2(k, i), 0).x * texelFetch(u_g, ivec2(p, i), 0).x; } o = vec4(s, 0.0, 0.0, 1.0); }`;
+const GLSL_LUT2 = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_l, u_i; uniform int u_nr, u_nd; uniform float u_pm, u_s; in vec2 v_uv; out vec4 o;
+float L(int a, int b) { return texelFetch(u_l, ivec2(clamp(b, 0, u_nd - 1), clamp(a, 0, u_nr - 1)), 0).x; }
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); vec2 z = texelFetch(u_x, q, 0).xy; float r = clamp(texelFetch(u_i, q, 0).x, 0.0, float(u_nr - 1)), c = clamp(length(z) / u_pm * float(u_nd - 1), 0.0, float(u_nd - 1));
+  int a0 = min(int(floor(r)), u_nr - 2), b0 = min(int(floor(c)), u_nd - 2); float u = r - float(a0), w = c - float(b0); float v = mix(mix(L(a0, b0), L(a0, b0 + 1), w), mix(L(a0 + 1, b0), L(a0 + 1, b0 + 1), w), u);
+  o = vec4(z * exp(clamp(u_s * v, -30.0, 30.0)), 0.0, 1.0); }`;
+const GLSL_LZ = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x; uniform int u_G; uniform vec2 u_c; uniform float u_a, u_R; in vec2 v_uv; out vec4 o;
+void main() { ivec2 q = ivec2(gl_FragCoord.xy); int G = u_G; vec2 z = texelFetch(u_x, q, 0).xy;
+  vec2 xp = texelFetch(u_x, ivec2((q.x + 1) % G, q.y), 0).xy, xm = texelFetch(u_x, ivec2((q.x + G - 1) % G, q.y), 0).xy, yp = texelFetch(u_x, ivec2(q.x, (q.y + 1) % G), 0).xy, ym = texelFetch(u_x, ivec2(q.x, (q.y + G - 1) % G), 0).xy;
+  vec2 d = vec2(q) - u_c; d -= float(G) * floor(d / float(G) + 0.5); vec2 dx = 0.5 * (xp - xm), dy = 0.5 * (yp - ym);
+  vec2 w = d.x * dy - d.y * dx; float r = length(d), m = u_R > 0.0 ? clamp(1.0 - (r - u_R) / 6.0, 0.0, 1.0) : 1.0; o = vec4(z.x + m * u_a * w.y, z.y - m * u_a * w.x, 0.0, 1.0); }`;
+const GLSL_TF_SAMPLE = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_row; uniform ivec2 u_p; uniform int u_mode, u_G; in vec2 v_uv; out vec4 o;
+void main() { vec2 z = vec2(0.0); if (u_mode == 0) z = texelFetch(u_x, u_p, 0).xy;
+  else if (u_mode == 1) { for (int j = -2; j <= 2; j++) for (int i = -2; i <= 2; i++) z += texelFetch(u_x, ((u_p + ivec2(i, j)) % u_G + u_G) % u_G, 0).xy; z /= 25.0; }
+  else { for (int x = 0; x < u_G; x++) z += texelFetch(u_row, ivec2(x, 0), 0).xy; z /= float(u_G * u_G); }
+  o = vec4(z, 0.0, 1.0); }`;
+const GLSL_TF_ROWSUM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x; uniform int u_G; in vec2 v_uv; out vec4 o;
+void main() { int x = int(gl_FragCoord.x); vec2 a = vec2(0.0); for (int y = 0; y < u_G; y++) a += texelFetch(u_x, ivec2(x, y), 0).xy; o = vec4(a, 0.0, 1.0); }`;
+//   ◌ the vortex overlay: the phase winding of a plaquette (four corners ≥ nmin), one cell per vortex at the display offset; the column counts
+const GLSL_VTX_FN = `
+float wr(float d) { return d - 6.283185307179586 * floor(d / 6.283185307179586 + 0.5); }
+int wind(sampler2D t, ivec2 p, int G, float nmin) { ivec2 q0 = (p % G + G) % G, q1 = ((p + ivec2(1, 0)) % G + G) % G, q2 = ((p + ivec2(1, 1)) % G + G) % G, q3 = ((p + ivec2(0, 1)) % G + G) % G;
+  vec2 a = texelFetch(t, q0, 0).xy, b = texelFetch(t, q1, 0).xy, c = texelFetch(t, q2, 0).xy, d = texelFetch(t, q3, 0).xy; if (min(min(dot(a, a), dot(b, b)), min(dot(c, c), dot(d, d))) < nmin) return 0;
+  float s = wr(atan(b.y, b.x) - atan(a.y, a.x)) + wr(atan(c.y, c.x) - atan(b.y, b.x)) + wr(atan(d.y, d.x) - atan(c.y, c.x)) + wr(atan(a.y, a.x) - atan(d.y, d.x)); return int(round(s / 6.283185307179586)); }`;
+const GLSL_VTX_OVL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_e; uniform int u_G; uniform vec2 u_off; uniform float u_nmin, u_nfl; in vec2 v_uv; out vec4 o;` + GLSL_VTX_FN + `
+void main() { ivec2 p = ivec2(floor(gl_FragCoord.xy - u_off)); int w = wind(u_x, p, u_G, u_nmin);   /* (one cell a vortex — the plaquette's own corner: a hot field's thousand defects stay readable) */
+  vec2 e = texelFetch(u_e, (p % u_G + u_G) % u_G, 0).xy; float al = dot(e, e) >= u_nfl ? 0.9 : 0.3;   /* (a halo ghost — the envelope below the fluid's floor — dim) */
+  o = w > 0 ? vec4(1.0, 0.25, 0.25, al) : w < 0 ? vec4(0.25, 0.85, 1.0, al) : vec4(0.0); }`;
+const GLSL_VTX_SUM = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_t; uniform int u_G; in vec2 v_uv; out vec4 o;
+void main() { vec2 a = vec2(0.0); for (int x = 0; x < u_G; x++) a += texelFetch(u_t, ivec2(x, 0), 0).xy; o = vec4(a, 0.0, 1.0); }`;
+const GLSL_VTX_COL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_x, u_e; uniform int u_G; uniform float u_nmin, u_nfl; in vec2 v_uv; out vec4 o;` + GLSL_VTX_FN + `
+void main() { int x = int(gl_FragCoord.x); float pp = 0.0, mm = 0.0; for (int y = 0; y < u_G; y++) { int v = wind(u_x, ivec2(x, y), u_G, u_nmin); if (v == 0) continue; vec2 e = texelFetch(u_e, ivec2(x, y), 0).xy; if (dot(e, e) < u_nfl) continue; if (v > 0) pp += 1.0; else mm += 1.0; } o = vec4(pp, mm, 0.0, 1.0); }`;
+//   ⚛ the ambiguity function: column → the lag s (τ = 2s, 0 at the middle), row → ν (0 at the middle); A = Σ_x f(x, s)·e^{iνx}
+const GLSL_AMB = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_f; uniform int u_G, u_Q; in vec2 v_uv; out vec4 o;
+void main() { ivec2 c = ivec2(gl_FragCoord.xy); int s = int(floor(float(c.x) * float(u_Q) / float(u_G))) - u_Q / 2, j = ((s % u_Q) + u_Q) % u_Q; float nu = 6.283185307179586 * float(c.y - u_G / 2) / float(u_G); vec2 a = vec2(0.0);
+  for (int x = 0; x < u_G; x++) { vec2 f = texelFetch(u_f, ivec2(x, j), 0).xy; float th = nu * float(x); a += vec2(f.x * cos(th) - f.y * sin(th), f.x * sin(th) + f.y * cos(th)); } o = vec4(a, 0.0, 1.0); }`;
+const GLSL_SPACE_MAXROW = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_t; uniform int u_G, u_mode; in vec2 v_uv; out vec4 o;
+void main() { int x = int(gl_FragCoord.x); float m = 0.0; for (int y = 0; y < u_G; y++) { vec2 z = texelFetch(u_t, ivec2(x, y), 0).xy; float v = (u_mode == 0 || u_mode == 3) ? dot(z, z) : abs(z.x); m = max(m, v); } o = vec4(m, 0.0, 0.0, 1.0); }`;
+const GLSL_SPACE_MAXCOL = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_t; uniform int u_G; in vec2 v_uv; out vec4 o;
+void main() { float m = 0.0; for (int x = 0; x < u_G; x++) m = max(m, texelFetch(u_t, ivec2(x, 0), 0).x); o = vec4(m, 0.0, 0.0, 1.0); }`;
+const GLSL_SPACE_RENDER = /* glsl */`#version 300 es
+precision highp float;
+uniform sampler2D u_t, u_mx; uniform int u_G, u_Q, u_mode; in vec2 v_uv; out vec4 o;
+vec3 heat(float l) { return vec3(clamp(1.6 * l, 0.0, 1.0), clamp(1.6 * l - 0.35, 0.0, 1.0), clamp(2.2 * l - 1.2, 0.0, 1.0)); }
+void main() { float m = max(texelFetch(u_mx, ivec2(0), 0).x, 1e-30); ivec2 c = ivec2(gl_FragCoord.xy);
+  if (u_mode == 3) { vec2 z = texelFetch(u_t, c, 0).xy; float v = dot(z, z), l = v > 0.0 ? clamp(1.0 + log(v / m) / (4.0 * log(10.0)), 0.0, 1.0) : 0.0; o = vec4(heat(l), 1.0); return; }   /* (A(τ, ν): already centred) */
+  if (u_mode != 1) { ivec2 q = (c + u_G / 2) % u_G; vec2 z = texelFetch(u_t, q, 0).xy; float v = u_mode == 0 ? dot(z, z) : z.x; float l = v > 0.0 ? clamp(1.0 + log(v / m) / (4.0 * log(10.0)), 0.0, 1.0) : 0.0; o = vec4(heat(l), 1.0); return; }
+  int mm = int(float(c.y) * float(u_Q) / float(u_G)); float v = texelFetch(u_t, ivec2(c.x, mm), 0).x / m, a = sqrt(abs(v));
+  o = v >= 0.0 ? vec4(min(1.0, 1.5 * a), clamp(1.5 * a - 0.4, 0.0, 1.0), 0.16 * a, 1.0) : vec4(0.12 * a, 0.63 * a, min(1.0, 1.6 * a), 1.0); }`;
 const GLSL_SPEC_COPY = /* glsl */`#version 300 es
 precision highp float;
 uniform sampler2D u_x; in vec2 v_uv; out vec4 fragColor;

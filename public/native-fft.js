@@ -185,6 +185,9 @@ const _fastLine = (P, inv) => { let xr = P.ar, xi = P.ai, yr = P.br, yi = P.bi; 
         yr[o] = a0r + a1r; yi[o] = a0i + a1i; yr[o + s] = dr * wr - di * wi; yi[o + s] = dr * wi + di * wr; } }
     let t = xr; xr = yr; yr = t; t = xi; xi = yi; yi = t; }
   return [xr, xi]; };
+//   nativeFftFast1d — ONE line through the same fused native stages (2026-11-08, inert addition: the ⚛ phase space's lag transform); in place, n a
+//   power of 2, the app's conventions: forward unnormalised, inverse with 1/n
+export function nativeFftFast1d(re, im, n, inv = false) { const P = _planOf(n), sc = inv ? 1 / n : 1; for (let x = 0; x < n; x++) { P.ar[x] = re[x]; P.ai[x] = im[x]; } const [xr, xi] = _fastLine(P, inv); for (let x = 0; x < n; x++) { re[x] = xr[x] * sc; im[x] = xi[x] * sc; } }
 export function nativeFftFast2d(re, im, G, inv = false) { const P = _planOf(G), sc = inv ? 1 / G : 1;
   for (let y = 0; y < G; y++) { const o = y * G; for (let x = 0; x < G; x++) { P.ar[x] = re[o + x]; P.ai[x] = im[o + x]; } const [xr, xi] = _fastLine(P, inv); for (let x = 0; x < G; x++) { re[o + x] = xr[x] * sc; im[o + x] = xi[x] * sc; } }
   for (let x = 0; x < G; x++) { for (let y = 0; y < G; y++) { P.ar[y] = re[y * G + x]; P.ai[y] = im[y * G + x]; } const [xr, xi] = _fastLine(P, inv); for (let y = 0; y < G; y++) { re[y * G + x] = xr[y] * sc; im[y * G + x] = xi[y] * sc; } } }
